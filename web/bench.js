@@ -27,8 +27,17 @@ for (const radio of document.querySelectorAll('input[name=src]')) {
   });
 }
 
-/** DOMの更新をブラウザに反映させてから重い処理へ入る */
-const paint = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+/**
+ * DOMの更新をブラウザに反映させてから重い処理へ入る。
+ *
+ * requestAnimationFrame は**タブが非表示だと発火しない**。それだけに頼ると
+ * バックグラウンドのタブで計測が永久に止まる (実際に踏んだ) ので、
+ * タイマーとの競争にして必ず進むようにする。
+ */
+const paint = () => Promise.race([
+  new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))),
+  new Promise(r => setTimeout(r, 50)),
+]);
 
 /** 選択中のワークロードを読む。埋め込みなら null (Emulator.bench() を使う) */
 async function selectedSector() {
@@ -43,15 +52,50 @@ async function selectedSector() {
   return buf;
 }
 
-/** 1回分の計測。この間メインスレッドは止まる */
+/**
+ * 計測前の空転。捨てる実行なので結果は返さない。
+ *
+ * 段階が2つあるのは**原因を切り分けた名残**である。当初「1回目が遅いのは
+ * wasmリニアメモリの初回確保のせい」と考えたが、確保だけを済ませる軽い空転では
+ * まったく直らなかった (1回目 41.1 MIPS のまま)。確保は原因ではない。
+ *
+ * 実測で分かっているのは次の2点:
+ *
+ * - **軽い空転 (確保だけ) では直らない**。だから空転は1回まるごと走らせる
+ * - **ネイティブでも同じ形が出る** (1回目 101.8、以降 107〜110)。
+ *   ただし落ち込みは7%程度。ホスト側のCPU立ち上がり (周波数制御や
+ *   コア割り当て) が少なくとも一部を占めている
+ *
+ * 追試の途中で「同じページでも間が空くとまた遅くなる」ように見えたが、
+ * これは**タブが非表示になっていたこと**による汚染だった (`measure` 参照)。
+ * 交絡を潰しきれていないので、残りの原因は特定できていないものとして扱う。
+ */
+function warmUp(mode, sector, limit) {
+  if (mode === 'none') return;
+  const emu = sector === null ? Emulator.bench() : new Emulator(sector);
+  // 軽い: エミュレータを1個作って少しだけ回す。メモリ確保 (1MB + 64K) は
+  //       ここで済む。**これでは直らない**ことが分かっているので、原因切り分け用
+  // 完全: 1回まるごと走らせて捨てる。これは効く
+  emu.run(mode === 'light' ? 1000 : limit);
+}
+
+/**
+ * 1回分の計測。この間メインスレッドは止まる。
+ *
+ * タブが非表示だとブラウザがスロットリングをかけ、**値が半分以下になる**
+ * (実測: 表示時 104〜106 MIPS に対し、非表示時 34〜50 MIPS)。
+ * 前後で `document.hidden` を見て、汚染された測定に印を付ける。
+ */
 function measure(sector, limit) {
   const emu = sector === null ? Emulator.bench() : new Emulator(sector);
+  const hiddenBefore = document.hidden;
   const t0 = performance.now();
   const n = emu.run(limit);
   const ms = performance.now() - t0;
   return {
     n, ms,
     halted: emu.halted(),
+    hidden: hiddenBefore || document.hidden,
     mips: n / (ms / 1000) / 1e6,
     nsPerInsn: (ms * 1e6) / n,
   };
@@ -61,7 +105,7 @@ function addRow(i, r, isWarmup) {
   const tr = document.createElement('tr');
   if (isWarmup) tr.className = 'warmup';
   const cells = [
-    [String(i), ''],
+    [r.hidden ? `${i} ⚠` : String(i), ''],
     [r.n.toLocaleString(), 'num'],
     [`${(r.ms / 1000).toFixed(2)} 秒`, 'num'],
     [r.mips.toFixed(1), 'num'],
@@ -91,9 +135,17 @@ async function runBench() {
     ? Math.max(Number($limit.value) || 0, 20_000_000_000)
     : Number($limit.value);
 
+  const warmupMode = $('warmup').value;
+
   try {
     const sector = await selectedSector();
     const rows = [];
+
+    if (warmupMode !== 'none') {
+      $status.textContent = '空転中… (計測には含めません)';
+      await paint();
+      warmUp(warmupMode, sector, limit);
+    }
 
     for (let i = 1; i <= runs; i++) {
       $status.textContent = `計測中… (${i}/${runs}) — このタブは数秒固まります`;
@@ -108,7 +160,8 @@ async function runBench() {
       }
 
       rows.push(r);
-      addRow(i, r, i === 1 && runs > 1);
+      // 空転を入れていれば1回目も対等な測定なので、薄く表示しない
+      addRow(i, r, i === 1 && runs > 1 && warmupMode === 'none');
       await paint();
     }
 
@@ -118,6 +171,16 @@ async function runBench() {
     $status.textContent = `完了。${rows[0].n.toLocaleString()} 命令 × ${runs}回`;
 
     let msg = `最良 ${best.toFixed(1)} MIPS。`;
+    // 可視性の汚染は他のどの注意より優先して伝える。
+    // 非表示タブはブラウザにスロットリングされ、値が半分以下になる
+    if (rows.some(r => r.hidden)) {
+      $summary.className = 'note warn';
+      $summary.textContent =
+        '⚠ 非表示のタブで測定した回がある (⚠印)。ブラウザのスロットリングで ' +
+        '値が半分以下になるため、この結果は使えない。タブを前面にして測り直すこと。';
+      $run.disabled = false;
+      return;
+    }
     if (counts.size > 1) {
       msg += '⚠ 回によって命令数が違う。MIPSを比較してはいけない。';
       $summary.className = 'note warn';
@@ -125,7 +188,11 @@ async function runBench() {
       const ratio = best / rows[0].mips;
       if (ratio > 1.1) {
         msg += `1回目 (${rows[0].mips.toFixed(1)} MIPS) は最良の ${(100 / ratio).toFixed(0)}% しか出ていない。`
-             + 'JITのティアアップとwasmメモリの初回確保が乗るためで、これを基準にしてはいけない。';
+             + (warmupMode === 'none'
+                 ? '「事前の空転」を入れると揃うか試すこと。'
+                 : `空転 (${warmupMode}) を入れてもこの差が残っている。`);
+      } else if (warmupMode !== 'none') {
+        msg += `空転 (${warmupMode}) を入れたので1回目から揃っている。`;
       }
     }
     msg += ' ネイティブとの比較は最良値どうしで行うこと。';
