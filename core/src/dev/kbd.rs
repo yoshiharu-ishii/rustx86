@@ -129,8 +129,63 @@ impl Kbd8042 {
         }
     }
 
-    /// ホスト側からキーコードを流し込む
+    /// ホスト側からスキャンコードを流し込む
     pub fn feed(&mut self, codes: &[u8]) {
         self.keys.extend(codes.iter().copied());
     }
+
+    /// 読ませるデータが残っているか。**IRQ1を上げ続ける条件**でもある。
+    /// キーボードは割り込み駆動で、OSはハンドラの中で 0x60 を1バイト読む
+    pub fn has_data(&self) -> bool {
+        self.has_output || !self.keys.is_empty()
+    }
+
+    /// ASCII文字を押して離す。
+    ///
+    /// PCのキーボードは文字ではなく**キーの位置**を送る。押すと「メイク」、
+    /// 離すと「ブレーク」(メイク + 0x80) が流れ、文字への変換はOSの仕事である。
+    /// 配列を変えられるのも、Shiftが別のキーとして届くのも、この設計のおかげ。
+    pub fn type_ascii(&mut self, s: &str) {
+        for ch in s.chars() {
+            if let Some(code) = scancode(ch) {
+                self.keys.push_back(code);
+                self.keys.push_back(code | 0x80);
+            }
+        }
+    }
+}
+
+/// ASCII文字 → スキャンコード セット1。
+///
+/// 並びがアルファベット順でないのは、**キーボード上の物理的な位置に振られた
+/// 番号**だからである。左上から数えると Q=0x10、W=0x11 と続く —
+/// QWERTY配列そのものが番号の並びになっている。
+pub fn scancode(ch: char) -> Option<u8> {
+    const ROW_Q: &str = "qwertyuiop";
+    const ROW_A: &str = "asdfghjkl";
+    const ROW_Z: &str = "zxcvbnm";
+    let c = ch.to_ascii_lowercase();
+    if let Some(i) = ROW_Q.find(c) {
+        return Some(0x10 + i as u8);
+    }
+    if let Some(i) = ROW_A.find(c) {
+        return Some(0x1E + i as u8);
+    }
+    if let Some(i) = ROW_Z.find(c) {
+        return Some(0x2C + i as u8);
+    }
+    Some(match c {
+        '1'..='9' => 0x02 + (c as u8 - b'1'),
+        '0' => 0x0B,
+        '\n' | '\r' => 0x1C,
+        ' ' => 0x39,
+        '\x08' => 0x0E,
+        '-' => 0x0C,
+        '=' => 0x0D,
+        '.' => 0x34,
+        ',' => 0x33,
+        '/' => 0x35,
+        ';' => 0x27,
+        _ => return None,
+    })
 }

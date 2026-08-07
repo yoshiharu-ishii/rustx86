@@ -37,6 +37,8 @@ pub const PIT_CLOCKS_PER_TICK: u32 = 1;
 
 /// IRQ0 (PIT) の割り込み線
 pub const IRQ_TIMER: u8 = 0;
+/// IRQ1 (キーボード) の割り込み線
+pub const IRQ_KEYBOARD: u8 = 1;
 /// IRQ4 (COM1) の割り込み線
 pub const IRQ_COM1: u8 = 4;
 
@@ -197,6 +199,10 @@ impl Machine {
         }
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
+        }
+        // キーボードは割り込み駆動。読み残しがある限り挙手し続ける
+        if self.devices.keyboard.has_data() {
+            self.devices.pic[0].raise(IRQ_KEYBOARD);
         }
         if self.pending_irq.is_none() {
             self.pending_irq = self.devices.pic[0].acknowledge();

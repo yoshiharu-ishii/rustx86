@@ -14,8 +14,8 @@ Rust製のx86エミュレータ。リアルモード8086から始めて、プロ
 途中に「動くもの」を必ず置く。CPUは完成したが動かすものがない、という状態を作らない。
 
 1. ブートセクタの Hello, World が出る ✅
-2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) が起動する** ✅ (loginプロンプトまで)
-2'. そのシェルがブラウザで叩ける ← 次 (キー入力 + WASM)
+2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルが動く** ✅
+3. そのシェルがブラウザで叩ける ← 次 (WASM + 画面)
 3. そのELKSから本物のホストに `ping` が届く
 4. 32bit Linux が起動する
 
@@ -72,8 +72,8 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       [一周](docs/architecture.md#なぜpicとpitが要るのか)が通っている
 - [x] **2c: ELKS起動** — BIOS HLE (INT 10h/11h/12h/13h/15h/16h/1Ah、IRQ0/1) と
       BIOSデータエリア、8042 (A20)、CMOS RTC を実装。**loginプロンプトまで到達**。
-      `cargo run --release --example boot -- images/fd1440.img`
-      (キー入力はまだ繋いでいないのでログインはできない)
+      さらに8042へスキャンコードを流して**rootでログインし、シェルが動く**。
+      `cargo run --release --example boot -- images/fd1440.img 50000000 root "uname -a"`
 - [ ] **2d: ブラウザ化** — WASM + xterm.js。ここで初めて画面に載る
 - [ ] **2e: テキストVRAM** — 80×25の文字+属性バッファ。
       ゲストが直接書いた画面が映る。「画面に映す」の本体はこちら

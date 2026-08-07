@@ -22,16 +22,50 @@ fn main() {
     let mut m = Machine::new();
     m.boot_from_disk(image).expect("boot");
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut n = 0u64;
-        while n < max {
-            // HLT中も装置は進み続ける。タイマ割り込みで目を覚ますので、
-            // 「保留が無い」だけで打ち切ってはいけない
+    // 画面に文字列が出るまで走らせ、出たらキーを打つ。
+    //
+    // 「一定命令数だけ回してから打つ」ではなく**プロンプトを見てから打つ**のは、
+    // 起動にかかる時間が環境で変わるためである。人間が画面を見て打つのと同じ手順。
+    fn run_until<'a>(m: &mut Machine, needle: &str, budget: u64) -> bool {
+        for _ in 0..budget {
             if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
                 break;
             }
             m.step();
-            n += 1;
+            // 画面を毎命令組み立ててはいけない。1命令ごとに80x25文字のStringを
+            // 作ることになり、起動が数百倍遅くなる (実際にやって390秒かかった)。
+            // Tier 2a で入れた dirty フラグで、**書き換わったときだけ**見る
+            if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let script: Vec<String> = std::env::args().skip(3).collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !run_until(&mut m, "login:", max) {
+            return 0u64;
+        }
+        eprintln!("[login: を検出]");
+        // 既定は root でログインする。引数があればそれを順に打つ
+        let lines: Vec<String> = if script.is_empty() {
+            vec!["root\n".into()]
+        } else {
+            script.iter().map(|s| format!("{s}\n")).collect()
+        };
+        let mut n = 0u64;
+        for line in lines {
+            m.devices.keyboard.type_ascii(&line);
+            eprintln!("[入力: {}]", line.trim_end());
+            // 打った内容が処理されるまで少し回す
+            for _ in 0..3_000_000 {
+                if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
+                    break;
+                }
+                m.step();
+                n += 1;
+            }
         }
         n
     }));
