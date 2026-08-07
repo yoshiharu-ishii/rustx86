@@ -65,8 +65,10 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       デコーダ2つ。16bit時代はアドレスが定数なので `match` で足りる。
       **ブリッジ (PCI) は不要** — Tier 5 まで出てこない。
       未接続ポートは `0xFF` を返しつつ番号を控える (OSの装置探索を止めないため)
-- [ ] **2b: 装置** — 8259 PIC、8254 PIT、UART 16550。
-      **3つとも32bit Linuxでそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))
+- [x] **2b: 装置** — 8259 PIC、8254 PIT、UART 16550。
+      **3つとも32bit Linuxでそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))。
+      PITが挙手 → PICが交通整理 → CPUが命令境界で受け取る、という
+      [一周](docs/architecture.md#なぜpicとpitが要るのか)が通っている
 - [ ] **2c: ELKS起動 (シリアルコンソール)** — BIOS INT 13h のHLEでディスクイメージを読み、
       UART経由でシェルに到達する。**VRAMより先にシリアルをやる**:
       数十行でシェルが出るので、以降のデバッグが劇的に楽になる

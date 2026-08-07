@@ -83,24 +83,35 @@ pub fn decode_io(port: u16) -> IoTarget {
     }
 }
 
-/// 装置のレジスタ置き場。
+/// I/Oポート空間にぶら下がる装置一式。
 ///
-/// Tier 2b で中身を実装する。今は「振り分けが正しいこと」を確かめるための箱で、
-/// 書かれた値をそのまま覚えるだけ。**継ぎ目を先に作っておくことに意味がある**。
-#[derive(Default)]
+/// トレイトオブジェクトの表は作らない。アドレスが定数である以上、
+/// 実行時に宛先を探す必要が無く、名前付きのフィールドと `match` で足りる。
+/// 動的な登録が要るのはPCIからである。
 pub struct Devices {
-    /// 8259 PIC マスタ (0x20-0x21) / スレーブ (0xA0-0xA1)
-    pub pic: [[u8; 2]; 2],
+    /// 8259 PIC。マスタ (0x20-0x21) とスレーブ (0xA0-0xA1) の2個
+    pub pic: [crate::dev::Pic8259; 2],
     /// 8254 PIT (0x40-0x43)
-    pub pit: [u8; 4],
-    /// キーボードコントローラ (0x60, 0x64)
+    pub pit: crate::dev::Pit8254,
+    /// UART 16550 / COM1 (0x3F8-0x3FF)
+    pub uart: crate::dev::Uart16550,
+    /// キーボードコントローラ (0x60, 0x64)。中身は未実装
     pub keyboard: [u8; 2],
-    /// UART 16550 (0x3F8-0x3FF)
-    pub uart: [u8; 8],
+}
+
+impl Default for Devices {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Devices {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pic: [crate::dev::Pic8259::new(), crate::dev::Pic8259::new()],
+            pit: crate::dev::Pit8254::new(),
+            uart: crate::dev::Uart16550::new(),
+            keyboard: [0; 2],
+        }
     }
 }

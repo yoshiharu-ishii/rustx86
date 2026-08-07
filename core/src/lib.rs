@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod cpu;
+pub mod dev;
 
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
 pub use cpu::Cpu;
@@ -15,6 +16,27 @@ pub const MEM_SIZE: usize = 1 << 20; // リアルモード 1MB
 /// OSが自分のハンドラを登録したベクタはもう `BIOS_SEG` を指していないので、
 /// 何の分岐も足さずに乗っ取りが成立する。実機のBIOSとOSの関係そのものである。
 pub const BIOS_SEG: u16 = 0xF000;
+
+/// 何命令ごとに装置を進めるか。
+///
+/// 本来はCPUのクロックと装置のクロックを別々に数えるべきだが、このエミュレータは
+/// サイクル数を持っていない。「1命令 ≒ 一定時間」と割り切って、まとめて進める。
+///
+/// ELKSやLinuxが要求するのは**周期割り込みが一定の間隔で来ること**であって、
+/// 実時間との一致ではない。時計がずれても動作は壊れない。
+pub const INSTRUCTIONS_PER_TICK: u32 = 64;
+
+/// 1回の tick で装置に渡すクロック数。
+///
+/// 実測 (Tier 1c 時点) でおよそ 1億命令/秒 出ているので、
+/// 1命令 ≒ 10ns → 64命令 ≒ 640ns。PITの入力は 1.193182 MHz (≒838ns周期) なので、
+/// 64命令あたり 1クロックに近い。実時間に大きくは外れない
+pub const PIT_CLOCKS_PER_TICK: u32 = 1;
+
+/// IRQ0 (PIT) の割り込み線
+pub const IRQ_TIMER: u8 = 0;
+/// IRQ4 (COM1) の割り込み線
+pub const IRQ_COM1: u8 = 4;
 
 /// マシン全体。メモリとBIOS HLE (高位エミュレーション) を持つ。
 /// 本物のBIOSは実装せず、INT命令をフックして最小限のサービスだけ提供する。
@@ -34,6 +56,11 @@ pub struct Machine {
     pub unhandled_io: std::collections::BTreeSet<u16>,
     /// テキストVRAMに書き込みがあったか。描画側が読んだら下ろす
     pub vram_dirty: bool,
+    /// 装置を進めるまでの残り命令数。
+    ///
+    /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
+    /// カウントダウン1本にしておけば、ほとんどの命令は「1減らして分岐」だけで済む
+    tick_countdown: u32,
     /// INT 10h テレタイプ出力の蓄積 (画面代わり)
     pub console: Vec<u8>,
     pub halted: bool,
@@ -48,6 +75,7 @@ impl Machine {
             devices: Devices::new(),
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
+            tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             halted: false,
         }
@@ -80,9 +108,27 @@ impl Machine {
         }
     }
 
-    /// ハードウェア割り込みを立てる (PICの代役)。IFが立つまで保留される
+    /// ハードウェア割り込みベクタを直接立てる (PICを介さない経路。テスト用)
     pub fn raise_irq(&mut self, vector: u8) {
         self.pending_irq = Some(vector);
+    }
+
+    /// 装置を進め、挙手があればPICへ渡す。
+    ///
+    /// **一周はこうなっている**:
+    /// PITがカウンタ0を下ろしきってIRQ0を出す → PICが優先順位を見て受理し、
+    /// ICW2で設定されたベースから割り込みベクタを決める → CPUが命令境界で受け取る。
+    /// この経路のどこか1つでも欠けるとOSのスケジューラが動かない。
+    fn tick_devices(&mut self) {
+        if self.devices.pit.tick(PIT_CLOCKS_PER_TICK) > 0 {
+            self.devices.pic[0].raise(IRQ_TIMER);
+        }
+        if self.devices.uart.irq_pending {
+            self.devices.pic[0].raise(IRQ_COM1);
+        }
+        if self.pending_irq.is_none() {
+            self.pending_irq = self.devices.pic[0].acknowledge();
+        }
     }
 
     pub fn read8(&self, addr: u32) -> u8 {
@@ -124,10 +170,16 @@ impl Machine {
     /// 判断する。ここで panic すると装置探索の段階で止まってしまう
     pub fn io_read8(&mut self, port: u16) -> u8 {
         match bus::decode_io(port) {
-            IoTarget::Pic { slave } => self.devices.pic[slave as usize][(port & 1) as usize],
-            IoTarget::Pit => self.devices.pit[(port & 3) as usize],
+            IoTarget::Pic { slave } => {
+                let p = &self.devices.pic[slave as usize];
+                if port & 1 == 0 { p.read_command() } else { p.read_data() }
+            }
+            IoTarget::Pit => {
+                let idx = (port & 3) as usize;
+                if idx == 3 { 0xFF } else { self.devices.pit.read_counter(idx) }
+            }
             IoTarget::Keyboard => self.devices.keyboard[usize::from(port == 0x64)],
-            IoTarget::Uart => self.devices.uart[(port & 7) as usize],
+            IoTarget::Uart => self.devices.uart.read(port & 7),
             IoTarget::Unmapped => {
                 self.unhandled_io.insert(port);
                 0xFF
@@ -137,10 +189,20 @@ impl Machine {
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
         match bus::decode_io(port) {
-            IoTarget::Pic { slave } => self.devices.pic[slave as usize][(port & 1) as usize] = val,
-            IoTarget::Pit => self.devices.pit[(port & 3) as usize] = val,
+            IoTarget::Pic { slave } => {
+                let p = &mut self.devices.pic[slave as usize];
+                if port & 1 == 0 { p.write_command(val) } else { p.write_data(val) }
+            }
+            IoTarget::Pit => {
+                let idx = (port & 3) as usize;
+                if idx == 3 {
+                    self.devices.pit.write_control(val)
+                } else {
+                    self.devices.pit.write_counter(idx, val)
+                }
+            }
             IoTarget::Keyboard => self.devices.keyboard[usize::from(port == 0x64)] = val,
-            IoTarget::Uart => self.devices.uart[(port & 7) as usize] = val,
+            IoTarget::Uart => self.devices.uart.write(port & 7, val),
             IoTarget::Unmapped => {
                 self.unhandled_io.insert(port);
             }
@@ -224,11 +286,18 @@ impl Machine {
             cpu::interrupt(self, vec);
             return;
         }
+        // 2. 装置を進める。毎命令ではなくまとめて進め、ホットパスの負担を抑える
+        self.tick_countdown -= 1;
+        if self.tick_countdown == 0 {
+            self.tick_countdown = INSTRUCTIONS_PER_TICK;
+            self.tick_devices();
+        }
+
         if self.halted {
             return;
         }
 
-        // 2. BIOS HLE の入口に居るなら、バイト列を実行せずホスト関数で肩代わりする。
+        // 3. BIOS HLE の入口に居るなら、バイト列を実行せずホスト関数で肩代わりする。
         //    OSがIVTを書き換えていればここには来ない
         if self.cpu.sregs[cpu::CS] == BIOS_SEG {
             let vec = self.cpu.ip as u8;
@@ -237,12 +306,12 @@ impl Machine {
             return;
         }
 
-        // 3. 命令を実行する。TFは**実行前**の値を見る。
+        // 4. 命令を実行する。TFは**実行前**の値を見る。
         //    ハンドラ内でTFが落ちても、この命令のシングルステップは成立させる
         let tf = self.cpu.flag(cpu::TF);
         cpu::step(self);
 
-        // 4. トラップフラグが立っていたら、命令が終わってから INT 1。
+        // 5. トラップフラグが立っていたら、命令が終わってから INT 1。
         //    「実行してから止まる」ので、デバッガは1命令ずつ進められる
         if tf && !self.halted {
             cpu::interrupt(self, 1);
@@ -254,7 +323,9 @@ impl Machine {
     pub fn run(&mut self, max_instructions: u64) -> u64 {
         let mut n = 0;
         while n < max_instructions {
-            if self.halted && self.pending_irq.is_none() {
+            // HLT中でも装置は動き続ける。タイマ割り込みで目を覚ますため、
+            // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
+            if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
                 break;
             }
             self.step();
