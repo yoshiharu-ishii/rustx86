@@ -57,6 +57,15 @@ let prevVram = null;
 let prevRows = null;
 
 /**
+ * 画面を何行さかのぼって見ているか (0 = 最新)。
+ *
+ * 別枠にログを出すより、**端末そのものを遡れる**方が自然である。
+ * 実機の端末にスクロールバックは無いが、これはブラウザの中の端末なので、
+ * 使う側の期待に合わせる。
+ */
+let viewOffset = 0;
+
+/**
  * 画面がスクロールしたかを判定し、押し出された行を控える。
  *
  * VRAMには「今見えている25行」しか無く、流れ去った行はどこにも残らない。
@@ -147,33 +156,51 @@ function vramView() {
  * スクロールの追跡は [`readRows`] 側で細かく行う
  */
 function draw() {
-  const mem = new Uint8Array(wasmMemory.buffer, emu.text_vram_ptr(), emu.text_vram_len());
+  ctx.fillStyle = PALETTE[0];
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.textBaseline = 'top';
   ctx.font = `${CELL_H}px ui-monospace, Menlo, monospace`;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const i = (row * cols + col) * 2;
-      const ch = mem[i];
-      const attr = mem[i + 1];
-      const x = col * CELL_W;
-      const y = row * CELL_H;
-      ctx.fillStyle = PALETTE[(attr >> 4) & 7];
-      ctx.fillRect(x, y, CELL_W, CELL_H);
-      if (ch >= 0x20 && ch < 0x7f) {
-        ctx.fillStyle = PALETTE[attr & 0x0f];
-        ctx.fillText(String.fromCharCode(ch), x, y);
+
+  if (viewOffset === 0) {
+    // 最新を見ているときはVRAMをそのまま描く (色も属性どおり)
+    const mem = vramView();
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const i = (row * cols + col) * 2;
+        const ch = mem[i];
+        const attr = mem[i + 1];
+        const x = col * CELL_W;
+        const y = row * CELL_H;
+        const bg = PALETTE[(attr >> 4) & 7];
+        if (bg !== PALETTE[0]) {
+          ctx.fillStyle = bg;
+          ctx.fillRect(x, y, CELL_W, CELL_H);
+        }
+        if (ch >= 0x20 && ch < 0x7f) {
+          ctx.fillStyle = PALETTE[attr & 0x0f];
+          ctx.fillText(String.fromCharCode(ch), x, y);
+        }
       }
     }
+  } else {
+    // 遡って見ているときは控えた行を描く。
+    // 属性は控えていないので既定色になる — 履歴は読めれば十分と割り切る
+    const all = [...log, ...(prevRows ?? [])];
+    const start = Math.max(0, all.length - rows - viewOffset);
+    ctx.fillStyle = PALETTE[7];
+    for (let row = 0; row < rows; row++) {
+      const line = all[start + row];
+      if (line) ctx.fillText(line, 0, row * CELL_H);
+    }
+    ctx.fillStyle = PALETTE[1];
+    ctx.fillRect(0, 0, canvas.width, CELL_H);
+    ctx.fillStyle = PALETTE[15];
+    ctx.fillText(`\u25B2 ${viewOffset}行前を表示中 (キーを打つと最新へ戻る)`, 4, 0);
   }
+
   if (logView && !logView.hidden) updateLogView();
 }
 
-/**
- * ログ表示を更新する。
- *
- * **末尾に居るときだけ末尾へ追従する。** 利用者が上へ遡って読んでいる最中に
- * 新しい行が来て勝手に飛ばされるのが一番困るので、位置を見てから決める。
- */
 function updateLogView() {
   const atBottom =
     logView.scrollHeight - logView.scrollTop - logView.clientHeight < 24;
@@ -234,6 +261,7 @@ function bootWith(bytes) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   running = true;
+  viewOffset = 0;
   log.length = 0;
   prevRows = null;
   prevVram = null;
@@ -252,8 +280,24 @@ function bootWith(bytes) {
 // event.key を文字に直して渡している。8042側で「押す/離す」の
 // スキャンコード対に変換されるので、こちらは文字を渡すだけでよい
 
+canvas.addEventListener('wheel', e => {
+  if (!emu) return;
+  e.preventDefault();
+  const step = e.deltaY > 0 ? -3 : 3;
+  const next = Math.max(0, Math.min(log.length, viewOffset + step));
+  if (next !== viewOffset) {
+    viewOffset = next;
+    draw();
+  }
+}, { passive: false });
+
 canvas.addEventListener('keydown', e => {
   if (!emu) return;
+  // 打ったら最新へ戻る。端末として当たり前の振る舞い
+  if (viewOffset !== 0) {
+    viewOffset = 0;
+    draw();
+  }
   let text = null;
   if (e.key.length === 1) text = e.key;
   else if (e.key === 'Enter') text = '\n';
