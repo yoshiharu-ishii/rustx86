@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustx86</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    max-width: 40rem; margin: 0 auto; padding: 3rem 1.25rem; line-height: 1.8;
+  }
+  h1 { font-size: 1.5rem; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .5rem 0; }
+  .note { opacity: .75; font-size: .9rem; }
+</style>
+</head>
+<body>
+  <h1>rustx86</h1>
+  <p>Rust製のx86エミュレータ。リアルモード8086から歴史の地層を順に登る教材。</p>
+
+  <ul>
+    <li><a href="./bench.html">実行速度ベンチ</a> — 任意のブートセクタを流して命令毎秒を測る</li>
+  </ul>
+
+  <p class="note">
+    エミュレータ本体の画面は Tier 2d (WASM + xterm.js) でここに載る。
+    それまではベンチだけが動く。
+  </p>
+</body>
+</html>
