@@ -1,14 +1,23 @@
 # rustx86
 
 Rust製のx86エミュレータ。リアルモード8086から始めて、プロテクトモード、
-ページングと歴史の地層を順に登る。
+ページングと歴史の地層を順に登る。同時に**現代PCの成り立ちを辿る教材**でもある。
 
-## ゴール (2026-08-07 決定)
+📚 **[ドキュメント](docs/)** — アーキテクチャ図と設計の記録 (ADR)。
+「なぜブートセクタは0x7C00なのか」「割り込みをOSが乗っ取るとは何か」といった
+問いから読める。
 
-**32bit Linuxがブラウザで起動し、busyboxシェルが操作できること (Tier 2)。**
+## ゴール
 
-x86_64 (ロングモード) への拡張はゴールに含めない。Tier 2到達後に、
-やる価値があると判断したら改めて検討する。
+**32bit Linuxがブラウザで起動し、busyboxシェルが操作できること。**
+
+途中に「動くもの」を必ず置く。CPUは完成したが動かすものがない、という状態を作らない。
+
+1. ブートセクタの Hello, World が出る ✅
+2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルが立ち上がる** ← 次
+3. 32bit Linux が起動し、ブラウザで動く
+
+x86_64 (ロングモード) はゴールに含めない。3に到達後に改めて検討する。
 
 ## ロードマップ
 
@@ -21,12 +30,17 @@ x86_64 (ロングモード) への拡張はゴールに含めない。Tier 2到�
       TEST/XCHG/LEA/CBW/CWD/SAHF/LAHF/PUSHF/POPF、十進補正 (DAA/DAS/AAA/AAS/AAM/AAD)、
       ストリング命令 (MOVS/CMPS/STOS/LODS/SCAS、REP対応) を追加。
       **ここまで到達したらブログ記事化する (図解付き)**
-- [ ] **Tier 2a: プロテクトモード** — GDT、セグメントディスクリプタ、CR0、リング
-- [ ] **Tier 2b: ページング** — CR3、2段ページテーブル、TLB
-- [ ] **Tier 2c: Linuxブートプロトコル** — BIOSは作らず bzImage + initrd を直接ロードして
-      32bitエントリへ (QEMUの `-kernel` 方式)
-- [ ] **Tier 2d: 最小デバイス一式** — UART 16550、8254タイマー、8259 PIC、virtio-blk
-- [ ] **Tier 2e: ブラウザ化** — WASM + xterm.js でbusyboxシェルが叩ける状態にする
+- [ ] **Tier 1c: CPU命令の穴埋め** — far jump/call、IRET、セグメントレジスタのPUSH/POP、
+      LES/LDS、XLAT、IN/OUT、186命令群 (PUSHA/ENTER/PUSH imm 等)
+- [ ] **Tier 2a: 割り込み機構と基本装置** — IVTの実ディスパッチ、8259 PIC、8254 PIT、
+      UART 16550。**ここは32bit Linuxでもそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))
+- [ ] **Tier 2b: ELKS起動** — BIOS INT 13h のHLE (ディスクイメージ読み) と
+      テキストVRAM 0xB8000。16bit UNIXのシェルが立ち上がる
+- [ ] **Tier 3a: プロテクトモード** — GDT、セグメントディスクリプタ、CR0、リング
+- [ ] **Tier 3b: ページング** — CR3、2段ページテーブル、TLB
+- [ ] **Tier 3c: Linuxブートプロトコル + virtio-blk** — BIOSは作らず bzImage + initrd を
+      直接ロードして32bitエントリへ (QEMUの `-kernel` 方式)
+- [ ] **Tier 3d: ブラウザ化** — WASM + xterm.js でbusyboxシェルが叩ける状態にする
 
 ## 実行
 
@@ -101,3 +115,5 @@ matchが1箇所に集まっていること自体が「この命令はどこで�
 - レジスタは最初からu32で保持 (386拡張を見据える)。リアルモードは16bitビューで操作
 - x86のオペコードグリッド (規則的な部分) はrustboyで確立した「ビットで畳む」方式で処理し、
   歴史的な不規則部分だけ個別実装する
+
+決定の経緯と代償は [ADR](docs/adr/) に記録している。
