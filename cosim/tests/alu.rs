@@ -1,151 +1,8 @@
-//! Unicornをオラクルにした比較実行テスト。
+//! ALU・GRP1-5・シフト・十進補正・ストリング命令のco-simテスト。
 //!
-//! 命令テンプレート (オペコード + オペランドの形) を定義し、レジスタ初期値と
-//! 即値だけをランダムに振ってケースを大量生成する。ランダムなバイト列を撒くより
-//! 有効な命令に当たる確率がはるかに高い。
+//! ハーネス (Unicornオラクル、テンプレート、乱数生成) は `rustx86_cosim` 本体にある。
 
 use rustx86_cosim::*;
-use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
-use unicorn_engine::{RegisterX86, Unicorn};
-
-/// Unicornで1命令実行してオラクルの状態を得る
-fn run_oracle(tc: &TestCase) -> State {
-    let mut uc = Unicorn::new(Arch::X86, Mode::MODE_16).expect("unicorn init");
-    uc.mem_map(0, 0x100000, Prot::ALL).expect("map");
-    uc.mem_write(CODE_ADDR as u64, &tc.code).expect("write code");
-    uc.mem_write(DATA_ADDR as u64, &tc.data).expect("write data");
-
-    let regs = [
-        RegisterX86::AX,
-        RegisterX86::CX,
-        RegisterX86::DX,
-        RegisterX86::BX,
-        RegisterX86::SP,
-        RegisterX86::BP,
-        RegisterX86::SI,
-        RegisterX86::DI,
-    ];
-    for (i, r) in regs.iter().enumerate() {
-        uc.reg_write(*r, tc.regs[i] as u64).expect("reg");
-    }
-    for s in [RegisterX86::CS, RegisterX86::DS, RegisterX86::ES, RegisterX86::SS] {
-        uc.reg_write(s, 0).expect("sreg");
-    }
-    uc.reg_write(RegisterX86::EFLAGS, tc.flags as u64 | 0x0002)
-        .expect("flags");
-
-    // 1命令だけ実行 (until=0で無効化し、count=1で止める)
-    uc.emu_start(CODE_ADDR as u64, 0xFFFF, 0, 1).expect("emu");
-
-    let mut out_regs = [0u16; 8];
-    for (i, r) in regs.iter().enumerate() {
-        out_regs[i] = uc.reg_read(*r).expect("read reg") as u16;
-    }
-    let flags = uc.reg_read(RegisterX86::EFLAGS).expect("read flags") as u16;
-    let ip = uc.reg_read(RegisterX86::IP).expect("read ip") as u16;
-    let mut data = [0u8; 16];
-    uc.mem_read(DATA_ADDR as u64, &mut data).expect("read data");
-
-    State {
-        regs: out_regs,
-        flags: flags & FLAG_MASK_ALL,
-        ip,
-        data,
-    }
-}
-
-
-/// 明示的に構築したケース列を検証する (状態空間が小さい命令の総当たり用)
-fn check_cases(name: &str, undefined: u16, cases: Vec<TestCase>) {
-    let total = cases.len();
-    for tc in cases {
-        let ours = run_ours(&tc);
-        let oracle = run_oracle(&tc);
-        if let Some(d) = diff(&ours, &oracle, FLAG_MASK_ALL & !undefined) {
-            panic!(
-                "co-sim mismatch [{name}] code={:02x?} AX={:04x} flags_in={}\n  {}",
-                tc.code,
-                tc.regs[0],
-                flag_names(tc.flags),
-                d
-            );
-        }
-    }
-    eprintln!("{name}: {total} cases (exhaustive)");
-}
-
-/// AL/AH/フラグの全組み合わせを総当たりするケース列
-fn sweep_al(code: Vec<u8>) -> Vec<TestCase> {
-    let mut out = Vec::new();
-    for al in 0..=255u16 {
-        for ah in [0x00u16, 0x12, 0x99] {
-            for f in [0u16, 0x0001, 0x0010, 0x0011] {
-                out.push(TestCase {
-                    code: code.clone(),
-                    regs: [(ah << 8) | al, 0x1234, 0x5678, 0x9ABC, 0x0100, 0x0200, 0x0300, 0x0400],
-                    flags: f,
-                    data: [0; 16],
-                });
-            }
-        }
-    }
-    out
-}
-
-/// 命令テンプレート: ランダム値から命令バイト列を組み立てる
-struct Template {
-    name: &'static str,
-    /// 比較から除外するフラグ (x86が未定義と定めるもの)
-    undefined: u16,
-    build: fn(&mut Rng) -> Vec<u8>,
-    /// レジスタ初期値の補正 (DIVのゼロ除算・商オーバーフローを避けるなど)
-    fixup: fn(&mut [u16; 8]),
-}
-
-fn nofix(_: &mut [u16; 8]) {}
-
-fn random_case(rng: &mut Rng, t: &Template) -> TestCase {
-    let mut regs: [u16; 8] = std::array::from_fn(|_| rng.interesting_u16());
-    (t.fixup)(&mut regs);
-    TestCase {
-        code: (t.build)(rng),
-        regs,
-        flags: (rng.next_u16() & (FLAG_MASK_ALL | 0x0400)),
-        data: std::array::from_fn(|_| rng.interesting_u8()),
-    }
-}
-
-fn check(templates: &[Template], cases_per_template: usize, seed: u64) {
-    let mut failures = Vec::new();
-    for t in templates {
-        let mut rng = Rng::new(seed ^ t.name.len() as u64 * 0x9E37_79B9);
-        let mut checked = 0;
-        for _ in 0..cases_per_template {
-            let tc = random_case(&mut rng, t);
-            let ours = run_ours(&tc);
-            let oracle = run_oracle(&tc);
-            checked += 1;
-            if let Some(d) = diff(&ours, &oracle, FLAG_MASK_ALL & !t.undefined) {
-                failures.push(format!(
-                    "[{}] code={:02x?} regs={:04x?} flags_in={}\n  {}",
-                    t.name,
-                    tc.code,
-                    tc.regs,
-                    flag_names(tc.flags),
-                    d
-                ));
-                break; // テンプレートごとに最初の1件だけ報告
-            }
-        }
-        eprintln!("{}: {checked} cases", t.name);
-    }
-    assert!(
-        failures.is_empty(),
-        "co-sim mismatch ({} template(s)):\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-}
 
 /// ALUグリッド全8演算 x 主要6形式
 #[test]
@@ -271,14 +128,6 @@ fn grp1_and_incdec() {
     check(&templates, 300, 0x5EED_0007);
 }
 
-
-// x86が「未定義」と定めるフラグ (比較から除外する)
-const UD_CF: u16 = 0x0001;
-const UD_PF: u16 = 0x0004;
-const UD_AF: u16 = 0x0010;
-const UD_ZF: u16 = 0x0040;
-const UD_SF: u16 = 0x0080;
-const UD_OF: u16 = 0x0800;
 
 /// GRP2: シフトと回転。AFは常に未定義、OFはカウント1のときだけ定義される
 #[test]
@@ -423,3 +272,4 @@ fn string_instructions() {
     ];
     check(&templates, 300, 0x5712_0000);
 }
+
