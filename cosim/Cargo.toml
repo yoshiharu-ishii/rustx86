@@ -1,0 +1,10 @@
+[package]
+name = "rustx86-cosim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustx86-core = { path = "../core" }
+
+[dev-dependencies]
+unicorn-engine = "2"

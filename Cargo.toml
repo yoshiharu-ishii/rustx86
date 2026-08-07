@@ -1,0 +1,8 @@
+[workspace]
+members = ["core", "cosim"]
+default-members = ["core"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
