@@ -16,8 +16,10 @@ x86_64 (ロングモード) への拡張はゴールに含めない。Tier 2到�
   - ALUグリッド (8演算×6形式 = 48命令を1ハンドラで処理)
   - ModRM 16bitアドレッシング、セグメントオーバーライド
   - BIOSは実装せず INT 10h テレタイプ出力をHLEフック
-- [ ] **Tier 1b: 命令網羅とco-sim検証** — Unicorn Engineをオラクルにした比較実行で
-      EFLAGS意味論を潰す。シフト/回転、MUL/DIV、残りのMOV系を追加。
+- [x] **Tier 1b: 命令網羅とco-sim検証** — Unicorn Engineをオラクルにした比較実行。
+      シフト/回転 (GRP2)、MUL/DIV/NEG/NOT (GRP3)、INC/DEC/PUSH/CALL/JMP (GRP4/5)、
+      TEST/XCHG/LEA/CBW/CWD/SAHF/LAHF/PUSHF/POPF、十進補正 (DAA/DAS/AAA/AAS/AAM/AAD)、
+      ストリング命令 (MOVS/CMPS/STOS/LODS/SCAS、REP対応) を追加。
       **ここまで到達したらブログ記事化する (図解付き)**
 - [ ] **Tier 2a: プロテクトモード** — GDT、セグメントディスクリプタ、CR0、リング
 - [ ] **Tier 2b: ページング** — CR3、2段ページテーブル、TLB
@@ -55,13 +57,27 @@ cargo test -p rustx86-cosim   # co-sim (Unicornのビルドに数分かかる)
 
 ### co-simは「バグを検出できること」を確認済み
 
-緑のテストは、それ自体では検証能力を証明しない。ADCのAFフラグ計算からキャリー加算を
-落とす変異を注入したところ、ハーネスは命令バイト・レジスタ値つきで即座に検出した:
+緑のテストは、それ自体では検証能力を証明しない。意図的にバグを注入して
+検出されるかを確かめている (変異テスト)。
+
+ADCのAFフラグ計算からキャリー加算を落とすと、即座に検出された:
 
 ```
 [ADC r/m8,r8] code=[10, d4] regs=[8000, 19ff, ...] flags_in=CF|PF
   FLAGS: ours=PF|SF oracle=PF|AF|SF (差分 AF)
 ```
+
+一方、DAAの境界値を `0x99` から `0x9A` にずらす変異は、ランダム生成では
+3000ケース流しても**検出できなかった**。ALがちょうど 0x9A になるケースを
+踏み損ねるためである。十進補正命令はALとCF/AFだけで分岐が決まり状態空間が
+小さい (256 x 3 x 4) ので、総当たりに切り替えた。今は一発で捕まる:
+
+```
+co-sim mismatch [DAA] code=[27] AX=009a flags_in=-
+  AX: ours=00a0 oracle=0000
+```
+
+**状態空間が小さいならランダムより総当たり**、という使い分けが要る。
 
 ## 設計メモ
 
