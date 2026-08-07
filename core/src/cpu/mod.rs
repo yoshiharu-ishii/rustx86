@@ -51,6 +51,9 @@ pub const SF: u32 = 1 << 7;
 pub const IF: u32 = 1 << 9;
 pub const DF: u32 = 1 << 10;
 pub const OF: u32 = 1 << 11;
+/// トラップフラグ。立っていると1命令ごとに INT 1 が起きる。
+/// デバッガのシングルステップはこれで実現されている
+pub const TF: u32 = 1 << 8;
 
 pub struct Cpu {
     /// AX CX DX BX SP BP SI DI (将来の32bit拡張を見据えてu32で保持)
@@ -101,11 +104,11 @@ impl Cpu {
         }
     }
 
-    fn flag(&self, mask: u32) -> bool {
+    pub fn flag(&self, mask: u32) -> bool {
         self.flags & mask != 0
     }
 
-    fn set_flag(&mut self, mask: u32, on: bool) {
+    pub fn set_flag(&mut self, mask: u32, on: bool) {
         if on {
             self.flags |= mask;
         } else {
@@ -408,12 +411,7 @@ pub fn step(m: &mut Machine) {
         }
         // IRET: 割り込みハンドラからの復帰。CALLと違いFLAGSも戻す。
         // 割り込み中に変わったIF/DFを呼び出し前の値へ戻すのが要点。
-        0xCF => {
-            m.cpu.ip = pop16(m);
-            m.cpu.sregs[CS] = pop16(m);
-            let f = pop16(m);
-            m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
-        }
+        0xCF => iret(m),
         0xE2 => {
             // LOOP
             let rel = fetch8(m) as i8;
@@ -428,15 +426,12 @@ pub fn step(m: &mut Machine) {
         // Tier 1d でここを実IVTディスパッチに置き換える。
         // OSは起動時にIVTを自分のハンドラで書き換えるので、
         // ホスト関数へ横流しする今の方式ではOSが動かない。
-        0xCD => {
-            let n = fetch8(m);
-            m.bios_interrupt(n);
-        }
-        0xCC => m.bios_interrupt(3), // INT3 (デバッガのブレークポイント)
+        0xCD => { let n = fetch8(m); interrupt(m, n); }
+        0xCC => interrupt(m, 3), // INT3 (デバッガのブレークポイント)
         0xCE => {
             // INTO: OFが立っているときだけ割り込み4。立っていなければ何もしない
             if m.cpu.flag(OF) {
-                m.bios_interrupt(4);
+                interrupt(m, 4);
             }
         }
 
@@ -544,18 +539,18 @@ pub fn step(m: &mut Machine) {
                 }
                 6 => {
                     let ax = m.cpu.reg16(AX);
-                    if a == 0 { panic!("divide by zero"); }
+                    if a == 0 { return divide_error(m, start_ip); }
                     let q = ax / a as u16;
-                    if q > 0xFF { panic!("divide overflow"); }
+                    if q > 0xFF { return divide_error(m, start_ip); }
                     m.cpu.set_reg8(0, q as u8);
                     m.cpu.set_reg8(4, (ax % a as u16) as u8);
                 }
                 _ => {
                     let ax = m.cpu.reg16(AX) as i16;
                     let b = a as i8 as i16;
-                    if b == 0 { panic!("divide by zero"); }
+                    if b == 0 { return divide_error(m, start_ip); }
                     let q = ax / b;
-                    if q > 127 || q < -128 { panic!("divide overflow"); }
+                    if q > 127 || q < -128 { return divide_error(m, start_ip); }
                     m.cpu.set_reg8(0, q as u8);
                     m.cpu.set_reg8(4, (ax % b) as u8);
                 }
@@ -590,18 +585,18 @@ pub fn step(m: &mut Machine) {
                 }
                 6 => {
                     let n = ((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32;
-                    if a == 0 { panic!("divide by zero"); }
+                    if a == 0 { return divide_error(m, start_ip); }
                     let q = n / a as u32;
-                    if q > 0xFFFF { panic!("divide overflow"); }
+                    if q > 0xFFFF { return divide_error(m, start_ip); }
                     m.cpu.set_reg16(AX, q as u16);
                     m.cpu.set_reg16(DX, (n % a as u32) as u16);
                 }
                 _ => {
                     let n = (((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32) as i32;
                     let b = a as i16 as i32;
-                    if b == 0 { panic!("divide by zero"); }
+                    if b == 0 { return divide_error(m, start_ip); }
                     let q = n / b;
-                    if q > 32767 || q < -32768 { panic!("divide overflow"); }
+                    if q > 32767 || q < -32768 { return divide_error(m, start_ip); }
                     m.cpu.set_reg16(AX, q as u16);
                     m.cpu.set_reg16(DX, (n % b) as u16);
                 }
@@ -683,4 +678,47 @@ pub fn step(m: &mut Machine) {
             m.cpu.sregs[CS], start_ip
         ),
     }
+}
+
+/// 割り込み・例外の共通入口。**実IVTを引いてハンドラへ飛ぶ**。
+///
+/// ソフトウェア割り込み (`INT n`)、例外 (ゼロ除算など)、ハードウェア割り込み
+/// (PICからのIRQ) は入口が違うだけで、ここから先は同じ道を通る。
+///
+/// 積む順序が `CALL far` と違う点に注意: **FLAGSを先に積む**。`IRET` が
+/// 逆順に取り出すので、ハンドラ実行中に変わったIF/DFが呼び出し前へ戻る。
+pub fn interrupt(m: &mut Machine, n: u8) {
+    let f = (m.cpu.flags as u16) | 0xF002;
+    push16(m, f);
+    // ハンドラ実行中は多重割り込みとシングルステップを止める。
+    // 必要ならハンドラ側が STI で開け直す (これが「割り込み禁止区間」の正体)
+    m.cpu.set_flag(IF, false);
+    m.cpu.set_flag(TF, false);
+    let cs = m.cpu.sregs[CS];
+    push16(m, cs);
+    let ip = m.cpu.ip;
+    push16(m, ip);
+    // IVTは 0x0000 から 4バイト × 256個。n番目に [オフセット, セグメント] が並ぶ。
+    // **OSはここを自分のハンドラで書き換えて割り込みを乗っ取る**
+    let vec = n as u32 * 4;
+    m.cpu.ip = m.read16(vec);
+    m.cpu.sregs[CS] = m.read16(vec + 2);
+}
+
+/// 割り込みからの復帰。IP・CS・FLAGS をこの順で取り出す
+pub fn iret(m: &mut Machine) {
+    m.cpu.ip = pop16(m);
+    m.cpu.sregs[CS] = pop16(m);
+    let f = pop16(m);
+    m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
+}
+
+/// ゼロ除算・商オーバーフローで上がる #DE (INT 0)。
+///
+/// **フォールトなので、積むのは「失敗した命令の先頭」**である。次の命令ではない。
+/// ハンドラが原因を直して `IRET` すれば同じ除算をやり直せる、という設計。
+/// (8086は次の命令を積む実装だったが、286以降で今の形に直された)
+fn divide_error(m: &mut Machine, start_ip: u16) {
+    m.cpu.ip = start_ip;
+    interrupt(m, 0);
 }
