@@ -14,35 +14,100 @@ Rust製のx86エミュレータ。リアルモード8086から始めて、プロ
 途中に「動くもの」を必ず置く。CPUは完成したが動かすものがない、という状態を作らない。
 
 1. ブートセクタの Hello, World が出る ✅
-2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルが立ち上がる** ← 次
-3. 32bit Linux が起動し、ブラウザで動く
+2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルがブラウザで立ち上がる** ← 次
+3. そのELKSから本物のホストに `ping` が届く
+4. 32bit Linux が起動する
 
-x86_64 (ロングモード) はゴールに含めない。3に到達後に改めて検討する。
+x86_64 (ロングモード) は**このリポジトリのゴールに含めない**。
+やるならこのリポジトリを fork して `rustx86_64` を作る。
+16bitと32bitの地層を登りきることを完成と定義し、終わりを持たせる。
 
 ## ロードマップ
 
-- [x] **Tier 1a: リアルモードの骨格** — ブートセクタの Hello, World が動く
+7段のうち **Tier 5 で完成**とする。Tier 6 は余力があれば、Tier 7 は別リポジトリ。
+
+| Tier | 到達点 | 状態 |
+|---|---|---|
+| 1 | 16bitリアルモードCPUが命令を正しく実行する | 1a✅ 1b✅ 1c |
+| 2 | **ブラウザの画面でELKSのシェルが叩ける** | |
+| 3 | **そのELKSから本物のホストにpingが届く** (L3まで) | |
+| 4 | 32bit化。プロテクトモードとページング | |
+| 5 | **32bit Linuxが起動する** ← ここで完成 | |
+| 6 | GUI (フレームバッファ + 入力装置) | 余力があれば |
+| 7 | 64bit | **別リポジトリ (fork)** |
+
+### Tier 1: 16bitリアルモードのCPU
+
+- [x] **1a: 骨格** — ブートセクタの Hello, World が動く
   - ALUグリッド (8演算×6形式 = 48命令を1ハンドラで処理)
   - ModRM 16bitアドレッシング、セグメントオーバーライド
   - BIOSは実装せず INT 10h テレタイプ出力をHLEフック
-- [x] **Tier 1b: 命令網羅とco-sim検証** — Unicorn Engineをオラクルにした比較実行。
+- [x] **1b: 命令網羅とco-sim検証** — Unicorn Engineをオラクルにした比較実行。
       シフト/回転 (GRP2)、MUL/DIV/NEG/NOT (GRP3)、INC/DEC/PUSH/CALL/JMP (GRP4/5)、
       TEST/XCHG/LEA/CBW/CWD/SAHF/LAHF/PUSHF/POPF、十進補正 (DAA/DAS/AAA/AAS/AAM/AAD)、
-      ストリング命令 (MOVS/CMPS/STOS/LODS/SCAS、REP対応) を追加。
-      **ここまで到達したらブログ記事化する (図解付き)**
-- [ ] **Tier 1c: CPU命令の穴埋め** — far jump/call、IRET、セグメントレジスタのPUSH/POP、
+      ストリング命令 (MOVS/CMPS/STOS/LODS/SCAS、REP対応)
+- [ ] **1c: 穴埋め** — far jump/call、IRET、セグメントレジスタのPUSH/POP、
       LES/LDS、XLAT、IN/OUT、186命令群 (PUSHA/ENTER/PUSH imm 等)
-- [ ] **Tier 2a: 割り込み機構と基本装置** — IVTの実ディスパッチ、8259 PIC、8254 PIT、
-      UART 16550。**ここは32bit Linuxでもそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))
-- [ ] **Tier 2b: ELKS起動** — BIOS INT 13h のHLE (ディスクイメージ読み) と
-      テキストVRAM 0xB8000。16bit UNIXのシェルが立ち上がる
-- [ ] **Tier 3a: プロテクトモード** — GDT、セグメントディスクリプタ、CR0、リング
-- [ ] **Tier 3b: ページング** — CR3、2段ページテーブル、TLB
-- [ ] **Tier 3c: Linuxブートプロトコル + virtio-blk** — BIOSは作らず bzImage + initrd を
-      直接ロードして32bitエントリへ (QEMUの `-kernel` 方式)
-- [ ] **Tier 3d: ブラウザ化** — WASM + xterm.js でbusyboxシェルが叩ける状態にする
-- [ ] **Tier 3e: ネットワーク** — virtio-net と自前のネットワーク終端。
-      `dig` と `ping` をサーバー無しで動かす ([ADR-0003](docs/adr/0003-networking-in-the-browser.md))
+- [ ] **1d: 割り込み機構** — IVTの実ディスパッチ、IF フラグ、割り込み受付タイミング。
+      **CPUが純粋な関数でなくなる最初の一歩**。装置より先にここを固める
+
+### Tier 2: 画面とシェル
+
+「画面に映す」という行為に時間をかけて鍛える段。ここで作るコンソール経路は
+Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
+
+- [ ] **2a: バス** — メモリ空間 (RAM / テキストVRAM `0xB8000`) と
+      I/Oポート空間 (PIC `0x20,0xA0` / PIT `0x40-43` / UART `0x3F8`) の
+      デコーダ2つ。16bit時代はアドレスが定数なので `match` で足りる。
+      **ブリッジ (PCI) は不要** — Tier 5 まで出てこない
+- [ ] **2b: 装置** — 8259 PIC、8254 PIT、UART 16550。
+      **3つとも32bit Linuxでそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))
+- [ ] **2c: ELKS起動 (シリアルコンソール)** — BIOS INT 13h のHLEでディスクイメージを読み、
+      UART経由でシェルに到達する。**VRAMより先にシリアルをやる**:
+      数十行でシェルが出るので、以降のデバッグが劇的に楽になる
+- [ ] **2d: ブラウザ化** — WASM + xterm.js。ここで初めて画面に載る
+- [ ] **2e: テキストVRAM** — 80×25の文字+属性バッファ。
+      ゲストが直接書いた画面が映る。「画面に映す」の本体はこちら
+
+### Tier 3: ネットワーク (L3まで)
+
+- [ ] **3a: 踏み台** — WSS → TAP → MASQUERADE。
+      **エミュレータの完成を待たず qemu を TAP に直結して単体検証できる**
+- [ ] **3b: NE2000** — ELKSは virtio-net を知らないので ISA の NE2000 を書く。
+      Tier 5 で virtio-net を書き直すことになるが、**踏み台側は全部使い回せる**
+- [ ] **3c: 疎通** — ARP / IP / ICMP / DNS。`ping 8.8.8.8` に本物の応答が返り、
+      `dig` が本物のAレコードを返す ([ADR-0003](docs/adr/0003-networking-in-the-browser.md))
+
+TCP over TCP や MTU の本気の測定には Linux のスタックが要るので Tier 5 に回す。
+ELKS の ktcp では L3 の疎通までを取る。
+
+### Tier 4: 32bit化
+
+16bitでやりきれるところをやりきってから移る。
+
+- [ ] **4a: プロテクトモード** — GDT、セグメントディスクリプタ、CR0、特権リング、例外
+- [ ] **4b: 32bit命令** — `0x66`/`0x67` プレフィクス、`0x0F` 二バイト空間、SIBバイト
+- [ ] **4c: ページング** — CR3、2段ページテーブル、TLB、A20ゲート
+
+### Tier 5: Linux起動 ← ここで完成
+
+- [ ] **5a: メモリ拡張** — 1MB固定をやめる (Tier 1 から `Vec<u8>` で確保しておく)。
+      e820メモリマップをゲストに渡す
+- [ ] **5b: ブートプロトコル** — BIOSは作らず bzImage + initrd を直接ロードして
+      32bitエントリへ (QEMUの `-kernel` 方式)
+- [ ] **5c: virtio-blk / virtio-net** — virtio-mmio を使えば PCI を実装せずに済む
+- [ ] **5d: ネットワークの本測定** — TCP over TCP の破綻、MTUの押し出し、
+      レイテンシの内訳。**Linuxのスタックで初めて測れる**
+
+### Tier 6: GUI (余力があれば)
+
+- [ ] フレームバッファ、PS/2キーボード + マウス、fbdev上のX
+
+### Tier 7: 64bit → 別リポジトリ
+
+このリポジトリでは扱わない。fork して `rustx86_64` として作る。
+ロングモード、REXプレフィクスと16本のレジスタ、4段ページング、SSE前提の
+ユーザーランド — 積み上げるものが多すぎて、混ぜるとゴールが消える。
 
 ## 実行
 
