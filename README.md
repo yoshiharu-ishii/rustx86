@@ -41,6 +41,8 @@ x86_64 (ロングモード) はゴールに含めない。3に到達後に改め
 - [ ] **Tier 3c: Linuxブートプロトコル + virtio-blk** — BIOSは作らず bzImage + initrd を
       直接ロードして32bitエントリへ (QEMUの `-kernel` 方式)
 - [ ] **Tier 3d: ブラウザ化** — WASM + xterm.js でbusyboxシェルが叩ける状態にする
+- [ ] **Tier 3e: ネットワーク** — virtio-net と自前のネットワーク終端。
+      `dig` と `ping` をサーバー無しで動かす ([ADR-0003](docs/adr/0003-networking-in-the-browser.md))
 
 ## 実行
 
