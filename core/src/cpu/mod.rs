@@ -1,9 +1,28 @@
 //! 8086 リアルモードCPU。
 //!
+//! このファイルは**振り分け表**に徹する。オペコードを読み、どの処理に
+//! 渡すかを決めるところまでが仕事で、実際の計算は各モジュールが持つ:
+//!
+//! - [`operand`] — ModRM解決、オペランド読み書き、アドレス変換、スタック
+//! - [`alu`] — 8種の演算とフラグ計算 (AF/OFの意味論)
+//! - [`shift`] — シフトと回転
+//! - [`string`] — ストリング命令とREP
+//! - [`decimal`] — 十進補正 (BCD)
+//!
 //! デコード方針: x86のオペコードは規則的な「グリッド」を持つ部分が大きい。
 //! 例えばALU演算は 0x00-0x3D が (演算種別3bit) x (形式3bit) の格子になっており、
 //! 48命令を1つのハンドラで処理できる。個別実装は格子から外れるものだけ。
 //! 未実装オペコードは即panicして正体を報告する (静かに壊れない)。
+
+pub mod alu;
+pub mod decimal;
+pub mod operand;
+pub mod shift;
+pub mod string;
+
+use alu::{alu16, alu8, condition, set_szp16};
+use operand::{fetch16, fetch8, linear, modrm, pop16, push16, read_op16, read_op8, write_op16, write_op8, Operand};
+use shift::shift_rot;
 
 use crate::Machine;
 
@@ -94,312 +113,12 @@ impl Cpu {
         }
     }
 }
-
-/// リニアアドレス変換 (リアルモード: seg*16 + off、20bitでラップ)
-fn linear(seg: u16, off: u16) -> u32 {
-    ((seg as u32) << 4).wrapping_add(off as u32) & 0xF_FFFF
+/// プレフィクスの解析結果
+pub struct Decoder {
+    pub seg_override: Option<usize>,
+    pub rep: Option<u8>,
 }
 
-/// ModRMのデコード結果
-enum Operand {
-    Reg(usize),
-    /// addr = セグメント適用後のリニアアドレス、off = セグメント内オフセット (LEA用)
-    Mem { addr: u32, off: u16 },
-}
-
-struct Decoder {
-    seg_override: Option<usize>,
-    rep: Option<u8>,
-}
-
-fn fetch8(m: &mut Machine) -> u8 {
-    let v = m.read8(linear(m.cpu.sregs[CS], m.cpu.ip));
-    m.cpu.ip = m.cpu.ip.wrapping_add(1);
-    v
-}
-
-fn fetch16(m: &mut Machine) -> u16 {
-    let lo = fetch8(m) as u16;
-    let hi = fetch8(m) as u16;
-    hi << 8 | lo
-}
-
-/// ModRMバイトを読み、(reg番号, 実効オペランド) を返す (16bitアドレッシング)
-fn modrm(m: &mut Machine, d: &Decoder) -> (usize, Operand) {
-    let b = fetch8(m);
-    let md = b >> 6;
-    let reg = ((b >> 3) & 7) as usize;
-    let rm = (b & 7) as usize;
-    if md == 3 {
-        return (reg, Operand::Reg(rm));
-    }
-    let c = &m.cpu;
-    // 16bit実効アドレスの基底 (rm=6かつmod=0はdisp16直接)
-    let (base, default_seg) = match rm {
-        0 => (c.reg16(BX).wrapping_add(c.reg16(SI)), DS),
-        1 => (c.reg16(BX).wrapping_add(c.reg16(DI)), DS),
-        2 => (c.reg16(BP).wrapping_add(c.reg16(SI)), SS),
-        3 => (c.reg16(BP).wrapping_add(c.reg16(DI)), SS),
-        4 => (c.reg16(SI), DS),
-        5 => (c.reg16(DI), DS),
-        6 => {
-            if md == 0 {
-                (0, DS) // disp16のみ
-            } else {
-                (c.reg16(BP), SS)
-            }
-        }
-        _ => (c.reg16(BX), DS),
-    };
-    let disp = match md {
-        0 => {
-            if rm == 6 {
-                fetch16(m)
-            } else {
-                0
-            }
-        }
-        1 => fetch8(m) as i8 as u16,
-        _ => fetch16(m),
-    };
-    let off = base.wrapping_add(disp);
-    let seg = m.cpu.sregs[d.seg_override.unwrap_or(default_seg)];
-    (reg, Operand::Mem { addr: linear(seg, off), off })
-}
-
-fn read_op8(m: &Machine, op: &Operand) -> u8 {
-    match *op {
-        Operand::Reg(r) => m.cpu.reg8(r),
-        Operand::Mem { addr, .. } => m.read8(addr),
-    }
-}
-
-fn write_op8(m: &mut Machine, op: &Operand, v: u8) {
-    match *op {
-        Operand::Reg(r) => m.cpu.set_reg8(r, v),
-        Operand::Mem { addr, .. } => m.write8(addr, v),
-    }
-}
-
-fn read_op16(m: &Machine, op: &Operand) -> u16 {
-    match *op {
-        Operand::Reg(r) => m.cpu.reg16(r),
-        Operand::Mem { addr, .. } => m.read16(addr),
-    }
-}
-
-fn write_op16(m: &mut Machine, op: &Operand, v: u16) {
-    match *op {
-        Operand::Reg(r) => m.cpu.set_reg16(r, v),
-        Operand::Mem { addr, .. } => m.write16(addr, v),
-    }
-}
-
-// --- ALU (8種の演算: ADD OR ADC SBB AND SUB XOR CMP) ---
-
-fn alu8(c: &mut Cpu, op: u8, a: u8, b: u8) -> u8 {
-    let carry = c.flag(CF) as u16;
-    let (r, cf, of, af) = match op {
-        0 => {
-            let r = a as u16 + b as u16;
-            (r, r > 0xFF, ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) + (b & 0xF) > 0xF)
-        }
-        1 => ((a | b) as u16, false, false, false),
-        2 => {
-            let r = a as u16 + b as u16 + carry;
-            (r, r > 0xFF, ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) + (b & 0xF) + carry as u8 > 0xF)
-        }
-        3 => {
-            let r = (a as u16).wrapping_sub(b as u16).wrapping_sub(carry);
-            (r, (a as u16) < b as u16 + carry, ((a ^ b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) < (b & 0xF) + carry as u8)
-        }
-        4 => ((a & b) as u16, false, false, false),
-        5 | 7 => {
-            let r = (a as u16).wrapping_sub(b as u16);
-            (r, (a as u16) < b as u16, ((a ^ b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) < (b & 0xF))
-        }
-        _ => ((a ^ b) as u16, false, false, false), // 6 = XOR
-    };
-    let r8 = r as u8;
-    c.set_flag(CF, cf);
-    c.set_flag(OF, of);
-    c.set_flag(AF, af);
-    set_szp8(c, r8);
-    if op == 7 { a } else { r8 } // CMPは結果を書き戻さない
-}
-
-fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
-    let carry = c.flag(CF) as u32;
-    let (r, cf, of, af) = match op {
-        0 => {
-            let r = a as u32 + b as u32;
-            (r, r > 0xFFFF, ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) + (b & 0xF) > 0xF)
-        }
-        1 => ((a | b) as u32, false, false, false),
-        2 => {
-            let r = a as u32 + b as u32 + carry;
-            (r, r > 0xFFFF, ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) + (b & 0xF) + carry as u16 > 0xF)
-        }
-        3 => {
-            let r = (a as u32).wrapping_sub(b as u32).wrapping_sub(carry);
-            (r, (a as u32) < b as u32 + carry, ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) < (b & 0xF) + carry as u16)
-        }
-        4 => ((a & b) as u32, false, false, false),
-        5 | 7 => {
-            let r = (a as u32).wrapping_sub(b as u32);
-            (r, (a as u32) < b as u32, ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) < (b & 0xF))
-        }
-        _ => ((a ^ b) as u32, false, false, false),
-    };
-    let r16 = r as u16;
-    c.set_flag(CF, cf);
-    c.set_flag(OF, of);
-    c.set_flag(AF, af);
-    set_szp16(c, r16);
-    if op == 7 { a } else { r16 }
-}
-
-fn set_szp8(c: &mut Cpu, v: u8) {
-    c.set_flag(ZF, v == 0);
-    c.set_flag(SF, v & 0x80 != 0);
-    c.set_flag(PF, v.count_ones() % 2 == 0);
-}
-
-fn set_szp16(c: &mut Cpu, v: u16) {
-    c.set_flag(ZF, v == 0);
-    c.set_flag(SF, v & 0x8000 != 0);
-    c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは下位8bitのみ
-}
-
-
-// --- シフト/回転 (GRP2) ---
-// 8086はカウントをマスクしないが、186以降 (およびUnicorn) は5bitでマスクする。
-// 最終目標が32bit Linuxなので186以降の挙動に合わせる。
-// カウント0のときはフラグを一切変更しない。AFは常に未定義。
-fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 {
-    let mask: u32 = if w == 8 { 0xFF } else { 0xFFFF };
-    let count = (count_raw & 0x1F) as u32;
-    if count == 0 {
-        return val & mask;
-    }
-    let val = val & mask;
-    let mut cf = c.flag(CF) as u32;
-    let r: u32;
-    match kind {
-        0 => {
-            // ROL
-            let n = count % w;
-            r = ((val << n) | (val >> ((w - n) % w))) & mask;
-            cf = r & 1;
-        }
-        1 => {
-            // ROR
-            let n = count % w;
-            r = ((val >> n) | (val << ((w - n) % w))) & mask;
-            cf = (r >> (w - 1)) & 1;
-        }
-        2 => {
-            // RCL (キャリーを含む w+1 bit の回転)
-            let n = count % (w + 1);
-            let mut x = val;
-            for _ in 0..n {
-                let newcf = (x >> (w - 1)) & 1;
-                x = ((x << 1) | cf) & mask;
-                cf = newcf;
-            }
-            r = x;
-        }
-        3 => {
-            // RCR
-            let n = count % (w + 1);
-            let mut x = val;
-            for _ in 0..n {
-                let newcf = x & 1;
-                x = (x >> 1) | (cf << (w - 1));
-                cf = newcf;
-            }
-            r = x & mask;
-        }
-        4 | 6 => {
-            // SHL / SAL
-            cf = if count <= w { (val >> (w - count)) & 1 } else { 0 };
-            r = if count >= w { 0 } else { (val << count) & mask };
-        }
-        5 => {
-            // SHR
-            cf = if count <= w { (val >> (count - 1)) & 1 } else { 0 };
-            r = if count >= w { 0 } else { val >> count };
-        }
-        _ => {
-            // SAR (符号を保つ)
-            let sval = if w == 8 { val as u8 as i8 as i32 } else { val as u16 as i16 as i32 };
-            let n = count.min(w - 1);
-            cf = ((sval >> (count - 1).min(w - 1)) & 1) as u32;
-            r = (sval >> n) as u32 & mask;
-        }
-    }
-    c.set_flag(CF, cf != 0);
-    // OFはカウント1のときのみ定義される
-    if count == 1 {
-        let msb = (r >> (w - 1)) & 1;
-        let of = match kind {
-            0 | 2 | 4 | 6 => msb ^ cf,               // 左回転・左シフト
-            1 | 3 => msb ^ ((r >> (w - 2)) & 1),      // 右回転
-            5 => (val >> (w - 1)) & 1,                // SHR: 元のMSB
-            _ => 0,                                   // SAR
-        };
-        c.set_flag(OF, of != 0);
-    }
-    // 回転命令はSZPを変更しない
-    if kind >= 4 {
-        if w == 8 {
-            set_szp8(c, r as u8);
-        } else {
-            set_szp16(c, r as u16);
-        }
-    }
-    r
-}
-
-/// ストリング命令のインデックス更新量 (DF方向)
-fn str_delta(c: &Cpu, size: u16) -> u16 {
-    if c.flag(DF) {
-        size.wrapping_neg()
-    } else {
-        size
-    }
-}
-
-/// Jcc条件 (cc = オペコード下位4bit)
-fn condition(c: &Cpu, cc: u8) -> bool {
-    let r = match cc >> 1 {
-        0 => c.flag(OF),
-        1 => c.flag(CF),
-        2 => c.flag(ZF),
-        3 => c.flag(CF) || c.flag(ZF),
-        4 => c.flag(SF),
-        5 => c.flag(PF),
-        6 => c.flag(SF) != c.flag(OF),
-        _ => c.flag(ZF) || (c.flag(SF) != c.flag(OF)),
-    };
-    if cc & 1 != 0 { !r } else { r }
-}
-
-fn push16(m: &mut Machine, v: u16) {
-    let sp = m.cpu.reg16(SP).wrapping_sub(2);
-    m.cpu.set_reg16(SP, sp);
-    let addr = linear(m.cpu.sregs[SS], sp);
-    m.write16(addr, v);
-}
-
-fn pop16(m: &mut Machine) -> u16 {
-    let sp = m.cpu.reg16(SP);
-    let v = m.read16(linear(m.cpu.sregs[SS], sp));
-    m.cpu.set_reg16(SP, sp.wrapping_add(2));
-    v
-}
-
-/// 1命令の実行
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
     let mut d = Decoder { seg_override: None, rep: None };
@@ -749,61 +468,10 @@ pub fn step(m: &mut Machine) {
         }
 
         // --- 十進補正 ---
-        0x27 | 0x2F => {
-            let old_al = m.cpu.reg8(0);
-            let old_cf = m.cpu.flag(CF);
-            let sub = op == 0x2F;
-            let mut al = old_al;
-            let mut cf = false;
-            if al & 0x0F > 9 || m.cpu.flag(AF) {
-                al = if sub { al.wrapping_sub(6) } else { al.wrapping_add(6) };
-                cf = old_cf || if sub { old_al < 6 } else { al < old_al };
-                m.cpu.set_flag(AF, true);
-            } else {
-                m.cpu.set_flag(AF, false);
-            }
-            if old_al > 0x99 || old_cf {
-                al = if sub { al.wrapping_sub(0x60) } else { al.wrapping_add(0x60) };
-                cf = true;
-            }
-            m.cpu.set_reg8(0, al);
-            m.cpu.set_flag(CF, cf);
-            set_szp8(&mut m.cpu, al);
-        }
-        0x37 | 0x3F => {
-            let al = m.cpu.reg8(0);
-            let sub = op == 0x3F;
-            if al & 0x0F > 9 || m.cpu.flag(AF) {
-                let ax = m.cpu.reg16(AX);
-                let ax = if sub { ax.wrapping_sub(6) } else { ax.wrapping_add(6) };
-                m.cpu.set_reg16(AX, ax);
-                let ah = m.cpu.reg8(4);
-                m.cpu.set_reg8(4, if sub { ah.wrapping_sub(1) } else { ah.wrapping_add(1) });
-                m.cpu.set_flag(AF, true);
-                m.cpu.set_flag(CF, true);
-            } else {
-                m.cpu.set_flag(AF, false);
-                m.cpu.set_flag(CF, false);
-            }
-            let al = m.cpu.reg8(0) & 0x0F;
-            m.cpu.set_reg8(0, al);
-        }
-        0xD4 => {
-            let base = fetch8(m);
-            if base == 0 { panic!("AAM by zero"); }
-            let al = m.cpu.reg8(0);
-            m.cpu.set_reg8(4, al / base);
-            let r = al % base;
-            m.cpu.set_reg8(0, r);
-            set_szp8(&mut m.cpu, r);
-        }
-        0xD5 => {
-            let base = fetch8(m);
-            let r = m.cpu.reg8(0).wrapping_add(m.cpu.reg8(4).wrapping_mul(base));
-            m.cpu.set_reg8(0, r);
-            m.cpu.set_reg8(4, 0);
-            set_szp8(&mut m.cpu, r);
-        }
+        0x27 | 0x2F => decimal::daa_das(m, op),
+        0x37 | 0x3F => decimal::aaa_aas(m, op),
+        0xD4 => decimal::aam(m),
+        0xD5 => decimal::aad(m),
 
         // --- ループ/条件ジャンプの残り ---
         0xE0 | 0xE1 => {
@@ -824,105 +492,7 @@ pub fn step(m: &mut Machine) {
         0xC2 => { let n = fetch16(m); m.cpu.ip = pop16(m); let sp = m.cpu.reg16(SP).wrapping_add(n); m.cpu.set_reg16(SP, sp); }
 
         // --- ストリング命令 (REP対応) ---
-        0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAC | 0xAD | 0xAE | 0xAF => {
-            let word = op & 1 != 0;
-            let size = if word { 2 } else { 1 };
-            loop {
-                if d.rep.is_some() && m.cpu.reg16(CX) == 0 {
-                    break;
-                }
-                let src_seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
-                let si = m.cpu.reg16(SI);
-                let di = m.cpu.reg16(DI);
-                let es = m.cpu.sregs[ES];
-                match op {
-                    0xA4 | 0xA5 => {
-                        // MOVS
-                        if word {
-                            let v = m.read16(linear(src_seg, si));
-                            m.write16(linear(es, di), v);
-                        } else {
-                            let v = m.read8(linear(src_seg, si));
-                            m.write8(linear(es, di), v);
-                        }
-                        let dl = str_delta(&m.cpu, size);
-                        m.cpu.set_reg16(SI, si.wrapping_add(dl));
-                        m.cpu.set_reg16(DI, di.wrapping_add(dl));
-                    }
-                    0xA6 | 0xA7 => {
-                        // CMPS
-                        if word {
-                            let a = m.read16(linear(src_seg, si));
-                            let b = m.read16(linear(es, di));
-                            alu16(&mut m.cpu, 7, a, b);
-                        } else {
-                            let a = m.read8(linear(src_seg, si));
-                            let b = m.read8(linear(es, di));
-                            alu8(&mut m.cpu, 7, a, b);
-                        }
-                        let dl = str_delta(&m.cpu, size);
-                        m.cpu.set_reg16(SI, si.wrapping_add(dl));
-                        m.cpu.set_reg16(DI, di.wrapping_add(dl));
-                    }
-                    0xAA | 0xAB => {
-                        // STOS
-                        if word {
-                            let v = m.cpu.reg16(AX);
-                            m.write16(linear(es, di), v);
-                        } else {
-                            let v = m.cpu.reg8(0);
-                            m.write8(linear(es, di), v);
-                        }
-                        let dl = str_delta(&m.cpu, size);
-                        m.cpu.set_reg16(DI, di.wrapping_add(dl));
-                    }
-                    0xAC | 0xAD => {
-                        // LODS
-                        if word {
-                            let v = m.read16(linear(src_seg, si));
-                            m.cpu.set_reg16(AX, v);
-                        } else {
-                            let v = m.read8(linear(src_seg, si));
-                            m.cpu.set_reg8(0, v);
-                        }
-                        let dl = str_delta(&m.cpu, size);
-                        m.cpu.set_reg16(SI, si.wrapping_add(dl));
-                    }
-                    _ => {
-                        // SCAS
-                        if word {
-                            let a = m.cpu.reg16(AX);
-                            let b = m.read16(linear(es, di));
-                            alu16(&mut m.cpu, 7, a, b);
-                        } else {
-                            let a = m.cpu.reg8(0);
-                            let b = m.read8(linear(es, di));
-                            alu8(&mut m.cpu, 7, a, b);
-                        }
-                        let dl = str_delta(&m.cpu, size);
-                        m.cpu.set_reg16(DI, di.wrapping_add(dl));
-                    }
-                }
-                match d.rep {
-                    None => break,
-                    Some(prefix) => {
-                        let cx = m.cpu.reg16(CX).wrapping_sub(1);
-                        m.cpu.set_reg16(CX, cx);
-                        // REPE(F3)/REPNE(F2) はCMPS/SCASでZFを見て打ち切る
-                        if matches!(op, 0xA6 | 0xA7 | 0xAE | 0xAF) {
-                            let zf = m.cpu.flag(ZF);
-                            let want = prefix == 0xF3;
-                            if zf != want {
-                                break;
-                            }
-                        }
-                        if cx == 0 {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAC | 0xAD | 0xAE | 0xAF => string::exec(m, &d, op),
 
         _ => panic!(
             "unimplemented opcode {op:#04x} at {:04x}:{:04x}",
