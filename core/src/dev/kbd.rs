@@ -38,6 +38,13 @@ pub struct Kbd8042 {
     pub output_port: u8,
     /// キー入力の待ち行列
     keys: std::collections::VecDeque<u8>,
+    /// 今あるデータについて、既に割り込みを上げたか。
+    ///
+    /// **これが無いと文字が化ける。** 割り込みを「データがある間ずっと」上げると、
+    /// CPUが読み終えた後にも余分な割り込みが1発残り、OSは空のバッファを読んで
+    /// でたらめなスキャンコードを受け取る。実機の割り込み線は**変化したときに1回**
+    /// 動くもので、状態を垂れ流すものではない
+    irq_asserted: bool,
 }
 
 impl Default for Kbd8042 {
@@ -55,6 +62,7 @@ impl Kbd8042 {
             // 起動時からA20は開いている扱いにする。実機のBIOSも大抵そうする
             output_port: OUTPORT_A20 | 1,
             keys: std::collections::VecDeque::new(),
+            irq_asserted: false,
         }
     }
 
@@ -75,11 +83,24 @@ impl Kbd8042 {
 
     /// データポート (0x60) の読み出し
     pub fn read_data(&mut self) -> u8 {
+        // 読まれたら割り込みの主張を下ろす。次のバイトがあれば改めて上げ直す
+        self.irq_asserted = false;
         if self.has_output {
             self.has_output = false;
             return self.output_buf;
         }
-        self.keys.pop_front().unwrap_or(0)
+        // 空を読まれたら 0xFF を返す。0 は正当なスキャンコードと紛らわしい
+        self.keys.pop_front().unwrap_or(0xFF)
+    }
+
+    /// 今このタイミングでIRQ1を上げるべきか。**1バイトにつき1回だけ真を返す**
+    pub fn take_irq(&mut self) -> bool {
+        if self.has_data() && !self.irq_asserted {
+            self.irq_asserted = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// コマンドポート (0x64) への書き込み

@@ -36,7 +36,92 @@ function setStatus(text, warn = false) {
   $('status').className = warn ? 'warn' : '';
 }
 
-/** wasmのメモリを直接読んで画面を描く (コピーを作らない) */
+/** スクロールで画面外へ押し出された行の控え (最大 LOG_LINES 行のリングバッファ) */
+const LOG_LINES = 1000;
+const log = [];
+
+/**
+ * 前回のVRAMの写し。スクロールの検出に使う。
+ *
+ * **文字列ではなくバイト列で持つ**のが要点である。25行を文字列に組み立てるのは
+ * 高くつくのでサンプル間隔を詰められず、間隔が空くと一度に何十行も流れて
+ * 差分を追えなくなる (実際にそれでログがほぼ空になった)。
+ * バイト比較なら安いので、細かく見張れる。
+ */
+let prevVram = null;
+/** 直近のVRAMから作った25行 (ログ表示用) */
+let prevRows = null;
+
+/**
+ * 画面がスクロールしたかを判定し、押し出された行を控える。
+ *
+ * VRAMには「今見えている25行」しか無く、流れ去った行はどこにも残らない。
+ * カーネルがスクロールすると各行が1つ上へ動くので、**前回の (shift+1) 行目以降が
+ * 今回の1行目以降と一致していれば shift 行スクロールした**と分かる。
+ */
+function captureScroll(vram) {
+  const rowBytes = cols * 2;
+  const total = rowBytes * rows;
+  if (prevVram) {
+    let shifted = 0;
+    for (let shift = 1; shift < rows; shift++) {
+      const off = shift * rowBytes;
+      const len = total - off;
+      let same = true;
+      for (let i = 0; i < len; i++) {
+        // ほとんどの shift は先頭数バイトで外れるので、早く抜ける
+        if (prevVram[off + i] !== vram[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        shifted = shift;
+        break;
+      }
+    }
+    if (shifted > 0 && prevRows) {
+      for (let i = 0; i < shifted; i++) log.push(prevRows[i]);
+      while (log.length > LOG_LINES) log.shift();
+    }
+    if (shifted > 0) prevRows = rowsFrom(vram);
+  }
+  if (!prevVram) prevVram = new Uint8Array(total);
+  prevVram.set(vram.subarray(0, total));
+  if (!prevRows) prevRows = rowsFrom(vram);
+}
+
+/** バイト列から25行の文字列を作る。**スクロール検出時と表示時にだけ**呼ぶ */
+function rowsFrom(vram) {
+  const out = [];
+  for (let row = 0; row < rows; row++) {
+    let line = '';
+    for (let col = 0; col < cols; col++) {
+      const ch = vram[(row * cols + col) * 2];
+      line += ch >= 0x20 && ch < 0x7f ? String.fromCharCode(ch) : ' ';
+    }
+    out.push(line.replace(/\s+$/, ''));
+  }
+  return out;
+}
+
+/** 控えた行 + 今の画面 を続きとして返す */
+function fullLog() {
+  const now = emu ? rowsFrom(vramView()) : [];
+  return [...log, ...now].join('\n').replace(/\s+$/, '');
+}
+
+/** wasmメモリ上のテキストVRAMをそのまま見る (コピーしない) */
+function vramView() {
+  return new Uint8Array(wasmMemory.buffer, emu.text_vram_ptr(), emu.text_vram_len());
+}
+
+/**
+ * wasmのメモリを直接読んで画面を描く (コピーを作らない)。
+ *
+ * こちらは2000セルを塗る**高い処理**なので、1フレームに1回しか呼ばない。
+ * スクロールの追跡は [`readRows`] 側で細かく行う
+ */
 function draw() {
   const mem = new Uint8Array(wasmMemory.buffer, emu.text_vram_ptr(), emu.text_vram_len());
   ctx.textBaseline = 'top';
@@ -56,9 +141,11 @@ function draw() {
       }
     }
   }
+  if (logView && !logView.hidden) logView.textContent = fullLog();
 }
 
 let wasmMemory = null;
+const logView = $('log');
 
 /**
  * 次のフレームを予約する。
@@ -72,11 +159,26 @@ function scheduleFrame() {
   else requestAnimationFrame(frame);
 }
 
+/**
+ * 1フレーム分を細切れに進める。
+ *
+ * まとめて300万命令進めてから画面を見ると、その間に何十行もスクロールしていて
+ * **流れ去った行を追えない** (実際にそれでログが空になった)。
+ * 読み取りは安いので細かく、描画は高いので最後に1回だけ行う。
+ */
+const CHUNK = 6_000;
+
 function frame() {
   if (!running) return;
-  emu.run_slice(INSTRUCTIONS_PER_FRAME);
-  // 書き換わったときだけ描く。毎フレーム2000セルを塗り直すのは無駄が大きい
-  if (emu.take_vram_dirty()) draw();
+  let dirty = false;
+  for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
+    emu.run_slice(CHUNK);
+    if (emu.take_vram_dirty()) {
+      dirty = true;
+      captureScroll(vramView());
+    }
+  }
+  if (dirty) draw();
   scheduleFrame();
 }
 
@@ -95,6 +197,10 @@ function bootWith(bytes) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   running = true;
+  log.length = 0;
+  prevRows = null;
+  prevVram = null;
+  window.__log = log;
   // 動作確認用にコンソールから触れるようにしておく (window.__emu)
   window.__emu = emu;
   $('login').disabled = false;
@@ -131,6 +237,24 @@ $('ls').addEventListener('click', () => {
   canvas.focus();
 });
 
+$('showlog').addEventListener('click', () => {
+  logView.hidden = !logView.hidden;
+  $('showlog').textContent = logView.hidden ? `ログを見る (${log.length}行)` : 'ログを隠す';
+  if (!logView.hidden) {
+    logView.textContent = fullLog();
+    logView.scrollTop = logView.scrollHeight;
+  }
+});
+
+$('savelog').addEventListener('click', () => {
+  const blob = new Blob([fullLog()], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'elks-boot.log';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
 $('file').addEventListener('change', async e => {
   const f = e.target.files?.[0];
   if (!f) return;
@@ -138,30 +262,34 @@ $('file').addEventListener('change', async e => {
   bootWith(new Uint8Array(await f.arrayBuffer()));
 });
 
-$('boot').addEventListener('click', async () => {
+/** 同じ場所に置かれたイメージから起動する */
+async function bootFromUrl() {
   setStatus('fd1440.img を取得中…');
   try {
     const r = await fetch('./fd1440.img');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     bootWith(new Uint8Array(await r.arrayBuffer()));
   } catch (e) {
-    setStatus(`同じ場所に fd1440.img が見つからない (${e.message})。ファイルを選んでください`, true);
+    setStatus(`fd1440.img が見つからない (${e.message})。ファイルを選んでください`, true);
   }
-});
+}
 
-const wasm = await init();
-wasmMemory = wasm.memory;
+$('boot').addEventListener('click', bootFromUrl);
 
-// 同じ場所にイメージがあれば自動で起動する
+// 読み込みに失敗すると「読み込み中…」のまま黙って止まる。
+// 何が起きたか分からないのが一番困るので、必ず画面に出す
+window.addEventListener('error', e => setStatus(`エラー: ${e.message}`, true));
+window.addEventListener('unhandledrejection', e => setStatus(`エラー: ${e.reason}`, true));
+
 try {
-  const r = await fetch('./fd1440.img', { method: 'HEAD' });
-  if (r.ok) {
-    $('boot').disabled = false;
-    $('boot').click();
-  } else {
-    throw new Error();
-  }
-} catch {
+  const wasm = await init();
+  wasmMemory = wasm.memory;
   $('boot').disabled = false;
   setStatus('ディスクイメージを選ぶと起動します');
+  // 同じ場所にイメージがあれば自動で起動する。
+  // ボタンを疑似クリックせず関数を直接呼ぶ — 起動経路をイベントに依存させない
+  const head = await fetch('./fd1440.img', { method: 'HEAD' }).catch(() => null);
+  if (head?.ok) await bootFromUrl();
+} catch (e) {
+  setStatus(`WASMの読み込みに失敗: ${e}`, true);
 }

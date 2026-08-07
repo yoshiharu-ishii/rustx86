@@ -200,8 +200,8 @@ impl Machine {
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
-        // キーボードは割り込み駆動。読み残しがある限り挙手し続ける
-        if self.devices.keyboard.has_data() {
+        // キーボードは割り込み駆動。**1バイトにつき1回だけ**挙手する
+        if self.devices.keyboard.take_irq() {
             self.devices.pic[0].raise(IRQ_KEYBOARD);
         }
         if self.pending_irq.is_none() {

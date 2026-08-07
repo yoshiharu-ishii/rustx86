@@ -26,6 +26,12 @@
   button:disabled { opacity: .45; cursor: default; }
   input[type=file] { font-size: .85rem; }
   #status { font-size: .9rem; opacity: .8; min-height: 1.6em; margin: .6rem 0 0; }
+  #log {
+    margin: 1rem 0 0; padding: .75rem; max-height: 22rem; overflow: auto;
+    background: rgba(128,128,128,.12); border-radius: .3rem;
+    font-family: ui-monospace, Menlo, monospace; font-size: .8rem; line-height: 1.4;
+    white-space: pre; tab-size: 8;
+  }
   .note { font-size: .875rem; opacity: .75; }
   code { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
   .warn { color: #b45309; }
@@ -43,12 +49,19 @@
     <label>ディスクイメージ <input type="file" id="file" accept=".img"></label>
     <button id="login" disabled>root でログイン</button>
     <button id="ls" disabled>ls を打つ</button>
+    <button id="showlog">ログを見る</button>
+    <button id="savelog">ログを保存</button>
   </div>
+  <pre id="log" hidden></pre>
   <p id="status">読み込み中…</p>
 
   <p class="note">
     <strong>画面をクリックしてからキーを打つ。</strong>入力は8042キーボードコントローラへ
     スキャンコードとして流れ、IRQ1でカーネルに届く。文字コードを直接渡してはいない。
+  </p>
+  <p class="note">
+    画面は25行しか無く、流れ去った行はVRAMに残らない。スクロールを検出して
+    <strong>直近1000行を控えている</strong>ので、ブートログを後から読み返せる。
   </p>
   <p class="note">
     ディスクイメージはリポジトリに含めていない (配布物のため)。
