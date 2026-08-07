@@ -1,5 +1,7 @@
+pub mod bus;
 pub mod cpu;
 
+pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
 pub use cpu::Cpu;
 
 pub const MEM_SIZE: usize = 1 << 20; // リアルモード 1MB
@@ -22,12 +24,16 @@ pub struct Machine {
     /// 保留中のハードウェア割り込みベクタ。IFが立っている命令境界で受け付ける。
     /// Tier 2a で 8259 PIC がここへ挙手する
     pub pending_irq: Option<u8>,
-    /// I/Oポート空間 (64K)。x86はメモリとは別のアドレス空間を持ち、
-    /// `IN`/`OUT` 命令だけがここに触れる。8080時代からの名残で、
-    /// PIC/PIT/UARTといったISA時代の装置は今もこちら側に居る。
+    /// I/Oポート空間にぶら下がる装置。中身は Tier 2b で実装する
+    pub devices: Devices,
+    /// 誰も名乗り出なかったポート番号。
     ///
-    /// 今はただのバイト配列。Tier 2a でここを装置への振り分けに置き換える。
-    pub ports: Vec<u8>,
+    /// 実機は未接続のポートを読むと 0xFF が返るだけで、OSはこれを使って
+    /// 装置の有無を探る。だから panic はできない。かといって黙って捨てると
+    /// 「なぜ動かないのか」の手がかりが消えるので、触られた番号だけ覚えておく
+    pub unhandled_io: std::collections::BTreeSet<u16>,
+    /// テキストVRAMに書き込みがあったか。描画側が読んだら下ろす
+    pub vram_dirty: bool,
     /// INT 10h テレタイプ出力の蓄積 (画面代わり)
     pub console: Vec<u8>,
     pub halted: bool,
@@ -39,7 +45,9 @@ impl Machine {
             cpu: Cpu::new(),
             mem: vec![0; MEM_SIZE],
             pending_irq: None,
-            ports: vec![0; 1 << 16],
+            devices: Devices::new(),
+            unhandled_io: std::collections::BTreeSet::new(),
+            vram_dirty: false,
             console: Vec::new(),
             halted: false,
         }
@@ -81,8 +89,21 @@ impl Machine {
         self.mem[(addr as usize) & (MEM_SIZE - 1)]
     }
 
+    /// メモリ書き込み。
+    ///
+    /// テキストVRAMは**メモリ空間に居座る装置**なので、素通しで `mem` に書く。
+    /// 実機でもビデオカードのRAMがCPUのアドレス空間に窓として現れているだけで、
+    /// 書き込み経路に特別な変換は無い。ここで足しているのは描画側への合図だけ。
+    ///
+    /// 読み出し ([`read8`](Self::read8)) には一切分岐を入れていない。
+    /// メモリアクセスは最も回数の多い経路なので、**書き込み側だけで済む
+    /// 仕掛けなら書き込み側に寄せる**。
     pub fn write8(&mut self, addr: u32, val: u8) {
-        self.mem[(addr as usize) & (MEM_SIZE - 1)] = val;
+        let a = (addr as usize) & (MEM_SIZE - 1);
+        self.mem[a] = val;
+        if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
+            self.vram_dirty = true;
+        }
     }
 
     pub fn read16(&self, addr: u32) -> u16 {
@@ -94,16 +115,69 @@ impl Machine {
         self.write8(addr.wrapping_add(1), (val >> 8) as u8);
     }
 
-    // --- I/Oポート空間 ---
-    // Tier 2a でここをPIC(0x20,0xA0)/PIT(0x40-43)/UART(0x3F8)への
-    // 振り分けに置き換える。今は素通しのバイト配列。
+    // --- I/Oポート空間の振り分け ---
 
+    /// ポートから読む。
+    ///
+    /// 未接続のポートは **0xFF** を返す。実機のISAバスは誰もドライブしないと
+    /// プルアップで全ビットが立つためで、OSはこの値を見て「装置が居ない」と
+    /// 判断する。ここで panic すると装置探索の段階で止まってしまう
     pub fn io_read8(&mut self, port: u16) -> u8 {
-        self.ports[port as usize]
+        match bus::decode_io(port) {
+            IoTarget::Pic { slave } => self.devices.pic[slave as usize][(port & 1) as usize],
+            IoTarget::Pit => self.devices.pit[(port & 3) as usize],
+            IoTarget::Keyboard => self.devices.keyboard[usize::from(port == 0x64)],
+            IoTarget::Uart => self.devices.uart[(port & 7) as usize],
+            IoTarget::Unmapped => {
+                self.unhandled_io.insert(port);
+                0xFF
+            }
+        }
     }
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
-        self.ports[port as usize] = val;
+        match bus::decode_io(port) {
+            IoTarget::Pic { slave } => self.devices.pic[slave as usize][(port & 1) as usize] = val,
+            IoTarget::Pit => self.devices.pit[(port & 3) as usize] = val,
+            IoTarget::Keyboard => self.devices.keyboard[usize::from(port == 0x64)] = val,
+            IoTarget::Uart => self.devices.uart[(port & 7) as usize] = val,
+            IoTarget::Unmapped => {
+                self.unhandled_io.insert(port);
+            }
+        }
+    }
+
+    // --- テキストVRAM ---
+
+    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)
+    pub fn text_vram(&self) -> &[u8] {
+        let b = bus::VRAM_TEXT_BASE as usize;
+        &self.mem[b..b + bus::TEXT_LEN]
+    }
+
+    /// 描画側が読んだ印。次の書き込みまで dirty が下りる
+    pub fn take_vram_dirty(&mut self) -> bool {
+        std::mem::replace(&mut self.vram_dirty, false)
+    }
+
+    /// テキスト画面を文字列にする (属性を捨てて文字コードだけ拾う)。
+    /// テストと確認用で、実際の描画は色も使う
+    pub fn text_screen_string(&self) -> String {
+        let v = self.text_vram();
+        (0..bus::TEXT_ROWS)
+            .map(|row| {
+                let line: String = (0..bus::TEXT_COLS)
+                    .map(|col| {
+                        let c = v[(row * bus::TEXT_COLS + col) * bus::TEXT_CELL];
+                        if (0x20..0x7F).contains(&c) { c as char } else { ' ' }
+                    })
+                    .collect();
+                line.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_string()
     }
 
     /// 16bitのI/Oは連続する2ポートへのアクセスとして扱う

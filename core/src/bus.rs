@@ -1,0 +1,106 @@
+//! アドレスの振り分け (バス)。
+//!
+//! x86には**アドレス空間が2つある**。メモリ空間と、64KしかないI/Oポート空間で、
+//! 後者には `IN`/`OUT` 命令だけが届く。8080時代からの名残で、PIC/PIT/UARTといった
+//! ISA時代の装置は今もこちら側に居る。このファイルはその2つのデコーダを持つ。
+//!
+//! 16bit時代のPCはアドレスが**定数として焼かれている**。ISAには装置を列挙する
+//! 仕組みが無く、「VGAのテキスト画面は 0xB8000」「COM1 は 0x3F8」と決め打ちで
+//! 全メーカーが合わせていた。だからデコーダは `match` で足りる。
+//! 装置を数える仕組み (PCIの設定空間) が要るのは Tier 5 からである。
+//!
+//! ## なぜブリッジを作らないか
+//!
+//! 現代PCにはノースブリッジ/サウスブリッジやPCIホストブリッジがあるが、
+//! あれは**装置が動的に増えるようになってから**必要になったものである。
+//! アドレスが定数なら、間に立って経路を決める者は要らない。
+
+/// メモリ空間の区画。
+///
+/// IBM PCは1MBを「下位640KBはRAM、上位384KBは装置とROMのための窓」と
+/// 決めた。この区切りが後年の「640KBの壁」になる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemRegion {
+    /// 0x00000-0x9FFFF: 通常のRAM (いわゆるコンベンショナルメモリ 640KB)
+    Ram,
+    /// 0xA0000-0xAFFFF: グラフィックス画面 (未実装。Tier 6)
+    VideoGraphics,
+    /// 0xB0000-0xB7FFF: モノクロテキスト画面 (MDA。未実装)
+    VideoMono,
+    /// 0xB8000-0xBFFFF: **カラーテキスト画面**。文字と属性が交互に並ぶ
+    VideoText,
+    /// 0xC0000-0xFFFFF: 拡張ROMとシステムBIOS
+    Rom,
+}
+
+/// カラーテキスト画面の先頭
+pub const VRAM_TEXT_BASE: u32 = 0xB_8000;
+/// 同 末尾 (0xBFFFF まで)
+pub const VRAM_TEXT_END: u32 = 0xB_FFFF;
+pub const TEXT_COLS: usize = 80;
+pub const TEXT_ROWS: usize = 25;
+/// 1文字が2バイト (文字コード + 属性) なのがテキストVRAMの肝
+pub const TEXT_CELL: usize = 2;
+pub const TEXT_LEN: usize = TEXT_COLS * TEXT_ROWS * TEXT_CELL;
+
+pub fn decode_mem(addr: u32) -> MemRegion {
+    match addr & 0xF_FFFF {
+        0x00000..=0x9FFFF => MemRegion::Ram,
+        0xA0000..=0xAFFFF => MemRegion::VideoGraphics,
+        0xB0000..=0xB7FFF => MemRegion::VideoMono,
+        0xB8000..=0xBFFFF => MemRegion::VideoText,
+        _ => MemRegion::Rom,
+    }
+}
+
+/// I/Oポート空間の宛先。
+///
+/// 番号がばらばらに見えるのは、IBM PCが装置を足していった順に空いている番地を
+/// 割り当てた結果である。設計ではなく履歴なので、規則を探しても見つからない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoTarget {
+    /// 0x20-0x21 / 0xA0-0xA1: 8259 PIC (マスタ / スレーブ)。
+    /// 2個あるのはIRQが8本では足りなくなり、片方をもう片方にぶら下げたため
+    Pic { slave: bool },
+    /// 0x40-0x43: 8254 PIT。OSのスケジューラが時を刻むのに使う
+    Pit,
+    /// 0x60 / 0x64: キーボードコントローラ (8042)
+    Keyboard,
+    /// 0x3F8-0x3FF: UART 16550 (COM1)。Linuxのシリアルコンソールもここ
+    Uart,
+    /// 誰も名乗り出ないポート
+    Unmapped,
+}
+
+pub fn decode_io(port: u16) -> IoTarget {
+    match port {
+        0x20 | 0x21 => IoTarget::Pic { slave: false },
+        0xA0 | 0xA1 => IoTarget::Pic { slave: true },
+        0x40..=0x43 => IoTarget::Pit,
+        0x60 | 0x64 => IoTarget::Keyboard,
+        0x3F8..=0x3FF => IoTarget::Uart,
+        _ => IoTarget::Unmapped,
+    }
+}
+
+/// 装置のレジスタ置き場。
+///
+/// Tier 2b で中身を実装する。今は「振り分けが正しいこと」を確かめるための箱で、
+/// 書かれた値をそのまま覚えるだけ。**継ぎ目を先に作っておくことに意味がある**。
+#[derive(Default)]
+pub struct Devices {
+    /// 8259 PIC マスタ (0x20-0x21) / スレーブ (0xA0-0xA1)
+    pub pic: [[u8; 2]; 2],
+    /// 8254 PIT (0x40-0x43)
+    pub pit: [u8; 4],
+    /// キーボードコントローラ (0x60, 0x64)
+    pub keyboard: [u8; 2],
+    /// UART 16550 (0x3F8-0x3FF)
+    pub uart: [u8; 8],
+}
+
+impl Devices {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
