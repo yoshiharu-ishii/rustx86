@@ -42,10 +42,26 @@ nasm -f bin -o asm/hello.bin asm/hello.asm
 ## 検証戦略
 
 - ブートセクタ実プログラムによるE2Eテスト (`core/tests/`)
-- Unicorn Engine (QEMUのCPU部) をオラクルにした比較実行 (`cosim/`、構築中)。
-  ランダム命令列を両方で実行してレジスタ・フラグを突き合わせ、
-  EFLAGSの意味論をfuzzingで検証する
+- **Unicorn co-sim** (`cosim/`): Unicorn Engine (QEMUのCPU部) をオラクルに、
+  同じ初期状態を両方に与えて1命令実行し、レジスタ・フラグ・メモリを突き合わせる。
+  命令テンプレート + 境界値混じりのランダム生成で、EFLAGS意味論 (特にAF/OF/PF) を
+  機械的に潰す。x86には網羅テストROMが存在しないため、これが主要な検証手段になる
 - 未実装オペコードは即panic (静かに壊れない方針)
+
+```bash
+cargo test                    # ブートセクタE2E (高速)
+cargo test -p rustx86-cosim   # co-sim (Unicornのビルドに数分かかる)
+```
+
+### co-simは「バグを検出できること」を確認済み
+
+緑のテストは、それ自体では検証能力を証明しない。ADCのAFフラグ計算からキャリー加算を
+落とす変異を注入したところ、ハーネスは命令バイト・レジスタ値つきで即座に検出した:
+
+```
+[ADC r/m8,r8] code=[10, d4] regs=[8000, 19ff, ...] flags_in=CF|PF
+  FLAGS: ours=PF|SF oracle=PF|AF|SF (差分 AF)
+```
 
 ## 設計メモ
 
