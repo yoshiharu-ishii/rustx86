@@ -51,6 +51,9 @@ pub const SF: u32 = 1 << 7;
 pub const IF: u32 = 1 << 9;
 pub const DF: u32 = 1 << 10;
 pub const OF: u32 = 1 << 11;
+/// トラップフラグ。立っていると1命令ごとに INT 1 が起きる。
+/// デバッガのシングルステップはこれで実現されている
+pub const TF: u32 = 1 << 8;
 
 pub struct Cpu {
     /// AX CX DX BX SP BP SI DI (将来の32bit拡張を見据えてu32で保持)
@@ -101,11 +104,11 @@ impl Cpu {
         }
     }
 
-    fn flag(&self, mask: u32) -> bool {
+    pub fn flag(&self, mask: u32) -> bool {
         self.flags & mask != 0
     }
 
-    fn set_flag(&mut self, mask: u32, on: bool) {
+    pub fn set_flag(&mut self, mask: u32, on: bool) {
         if on {
             self.flags |= mask;
         } else {
@@ -246,6 +249,132 @@ pub fn step(m: &mut Machine) {
         0x50..=0x57 => { let v = m.cpu.reg16((op & 7) as usize); push16(m, v); }
         0x58..=0x5F => { let v = pop16(m); m.cpu.set_reg16((op & 7) as usize, v); }
 
+        // セグメントレジスタのPUSH/POP。オペコードのbit3-4がそのまま
+        // ES/CS/SS/DS の番号になっている (0x06,0x0E,0x16,0x1E)
+        0x06 | 0x0E | 0x16 | 0x1E => { let v = m.cpu.sregs[(op >> 3) as usize & 3]; push16(m, v); }
+        // POP CS (0x0F) は8086にしか無く、186以降は2バイト命令の導入符になった。
+        // ここでは実装しない (Tier 4 で 0x0F を二バイト空間として使う)
+        0x07 | 0x17 | 0x1F => { let v = pop16(m); m.cpu.sregs[(op >> 3) as usize & 3] = v; }
+
+        // --- PUSHA/POPA (186) ---
+        0x60 => {
+            let sp = m.cpu.reg16(SP); // 退避するのは「PUSHA開始時点の」SP
+            for r in [AX, CX, DX, BX] {
+                let v = m.cpu.reg16(r);
+                push16(m, v);
+            }
+            push16(m, sp);
+            for r in [BP, SI, DI] {
+                let v = m.cpu.reg16(r);
+                push16(m, v);
+            }
+        }
+        0x61 => {
+            for r in [DI, SI, BP] {
+                let v = pop16(m);
+                m.cpu.set_reg16(r, v);
+            }
+            pop16(m); // 積んだSPは捨てる (POPAの結果SPは自然に元へ戻る)
+            for r in [BX, DX, CX, AX] {
+                let v = pop16(m);
+                m.cpu.set_reg16(r, v);
+            }
+        }
+
+        // --- PUSH imm (186) ---
+        0x68 => { let v = fetch16(m); push16(m, v); }
+        0x6A => { let v = fetch8(m) as i8 as u16; push16(m, v); }
+
+        // --- IMUL r16, r/m16, imm (186) ---
+        // 3オペランドの乗算。CF/OFは「結果が16bitに収まらなかったか」だけを表し、
+        // SF/ZF/AF/PF は未定義
+        0x69 | 0x6B => {
+            let (reg, rm) = modrm(m, &d);
+            let a = read_op16(m, &rm) as i16 as i32;
+            let b = if op == 0x69 { fetch16(m) as i16 as i32 } else { fetch8(m) as i8 as i32 };
+            let r = a * b;
+            m.cpu.set_reg16(reg, r as u16);
+            let ext = (r as i16 as i32) != r;
+            m.cpu.set_flag(CF, ext);
+            m.cpu.set_flag(OF, ext);
+        }
+
+        // --- ENTER/LEAVE (186): スタックフレームの作成と破棄 ---
+        0xC8 => {
+            let size = fetch16(m);
+            let level = fetch8(m) & 0x1F;
+            let bp = m.cpu.reg16(BP);
+            push16(m, bp);
+            let frame = m.cpu.reg16(SP);
+            if level > 0 {
+                // ネストした手続きの表示 (display) を積む。Pascal系言語のための機構で、
+                // Cしか使わない現代では level=0 しか出てこない
+                for _ in 1..level {
+                    let b = m.cpu.reg16(BP).wrapping_sub(2);
+                    m.cpu.set_reg16(BP, b);
+                    let v = m.read16(linear(m.cpu.sregs[SS], b));
+                    push16(m, v);
+                }
+                push16(m, frame);
+            }
+            m.cpu.set_reg16(BP, frame);
+            // 最後のSP調整は「今のSP」から引く。Intel SDMの疑似コードは
+            // `SP <- BP - Size` と書いているが、これが正しいのは level=0 のときだけで、
+            // level>0 では display を積んだ分 (level*2バイト) が抜け落ちる。
+            // AMDのマニュアルとQEMUの実装は現在のSPから引いており、そちらが実挙動。
+            // co-simがこの差を捕まえた
+            let sp = m.cpu.reg16(SP).wrapping_sub(size);
+            m.cpu.set_reg16(SP, sp);
+        }
+        0xC9 => {
+            let bp = m.cpu.reg16(BP);
+            m.cpu.set_reg16(SP, bp);
+            let v = pop16(m);
+            m.cpu.set_reg16(BP, v);
+        }
+
+        // --- LES/LDS: メモリから「オフセットとセグメント」を一度に取る ---
+        // far ポインタ (4バイト) を読み、下位2バイトを汎用レジスタへ、
+        // 上位2バイトをセグメントレジスタへ入れる
+        0xC4 | 0xC5 => {
+            let (reg, rm) = modrm(m, &d);
+            let addr = match rm {
+                Operand::Mem { addr, .. } => addr,
+                Operand::Reg(_) => panic!("LES/LDS with register operand"),
+            };
+            let off = m.read16(addr);
+            let seg = m.read16(addr.wrapping_add(2));
+            m.cpu.set_reg16(reg, off);
+            m.cpu.sregs[if op == 0xC4 { ES } else { DS }] = seg;
+        }
+
+        // --- XLAT: AL = [BX + AL] ---
+        // 256バイトの変換テーブルを1命令で引く。文字コード変換のための命令
+        0xD7 => {
+            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
+            let off = m.cpu.reg16(BX).wrapping_add(m.cpu.reg8(0) as u16);
+            let v = m.read8(linear(seg, off));
+            m.cpu.set_reg8(0, v);
+        }
+
+        // --- IN/OUT: I/Oポート空間へのアクセス ---
+        // オペコードのビットがそのまま形式を表す:
+        //   bit0 = 幅 (0:8bit 1:16bit)  bit1 = 向き (0:IN 1:OUT)  bit3 = ポート指定 (0:imm8 1:DX)
+        0xE4..=0xE7 | 0xEC..=0xEF => {
+            let port = if op & 8 != 0 { m.cpu.reg16(DX) } else { fetch8(m) as u16 };
+            let wide = op & 1 != 0;
+            let out = op & 2 != 0;
+            match (out, wide) {
+                (false, false) => { let v = m.io_read8(port); m.cpu.set_reg8(0, v); }
+                (false, true) => { let v = m.io_read16(port); m.cpu.set_reg16(AX, v); }
+                (true, false) => { let v = m.cpu.reg8(0); m.io_write8(port, v); }
+                (true, true) => { let v = m.cpu.reg16(AX); m.io_write16(port, v); }
+            }
+        }
+
+        // WAIT: コプロセッサ待ち。FPUが無いので何もしない
+        0x9B => {}
+
         // --- ジャンプ/コール ---
         0x70..=0x7F => {
             let rel = fetch8(m) as i8;
@@ -257,6 +386,32 @@ pub fn step(m: &mut Machine) {
         0xE9 => { let rel = fetch16(m); m.cpu.ip = m.cpu.ip.wrapping_add(rel); }
         0xEB => { let rel = fetch8(m) as i8; m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16); }
         0xC3 => { m.cpu.ip = pop16(m); }
+
+        // --- far転送: CSごと移る ---
+        // リアルモードでは「CSに値を代入する」だけだが、プロテクトモードでは
+        // 同じ命令がディスクリプタ引きと特権チェックに化ける (Tier 4)。
+        0xEA => { let off = fetch16(m); let seg = fetch16(m); m.cpu.sregs[CS] = seg; m.cpu.ip = off; }
+        0x9A => {
+            let off = fetch16(m);
+            let seg = fetch16(m);
+            let cs = m.cpu.sregs[CS];
+            push16(m, cs);
+            let ret = m.cpu.ip;
+            push16(m, ret);
+            m.cpu.sregs[CS] = seg;
+            m.cpu.ip = off;
+        }
+        0xCB => { m.cpu.ip = pop16(m); m.cpu.sregs[CS] = pop16(m); }
+        0xCA => {
+            let n = fetch16(m);
+            m.cpu.ip = pop16(m);
+            m.cpu.sregs[CS] = pop16(m);
+            let sp = m.cpu.reg16(SP).wrapping_add(n);
+            m.cpu.set_reg16(SP, sp);
+        }
+        // IRET: 割り込みハンドラからの復帰。CALLと違いFLAGSも戻す。
+        // 割り込み中に変わったIF/DFを呼び出し前の値へ戻すのが要点。
+        0xCF => iret(m),
         0xE2 => {
             // LOOP
             let rel = fetch8(m) as i8;
@@ -268,9 +423,16 @@ pub fn step(m: &mut Machine) {
         }
 
         // --- 割り込み (BIOS HLE) ---
-        0xCD => {
-            let n = fetch8(m);
-            m.bios_interrupt(n);
+        // Tier 1d でここを実IVTディスパッチに置き換える。
+        // OSは起動時にIVTを自分のハンドラで書き換えるので、
+        // ホスト関数へ横流しする今の方式ではOSが動かない。
+        0xCD => { let n = fetch8(m); interrupt(m, n); }
+        0xCC => interrupt(m, 3), // INT3 (デバッガのブレークポイント)
+        0xCE => {
+            // INTO: OFが立っているときだけ割り込み4。立っていなければ何もしない
+            if m.cpu.flag(OF) {
+                interrupt(m, 4);
+            }
         }
 
         // --- フラグ/制御 ---
@@ -377,18 +539,18 @@ pub fn step(m: &mut Machine) {
                 }
                 6 => {
                     let ax = m.cpu.reg16(AX);
-                    if a == 0 { panic!("divide by zero"); }
+                    if a == 0 { return divide_error(m, start_ip); }
                     let q = ax / a as u16;
-                    if q > 0xFF { panic!("divide overflow"); }
+                    if q > 0xFF { return divide_error(m, start_ip); }
                     m.cpu.set_reg8(0, q as u8);
                     m.cpu.set_reg8(4, (ax % a as u16) as u8);
                 }
                 _ => {
                     let ax = m.cpu.reg16(AX) as i16;
                     let b = a as i8 as i16;
-                    if b == 0 { panic!("divide by zero"); }
+                    if b == 0 { return divide_error(m, start_ip); }
                     let q = ax / b;
-                    if q > 127 || q < -128 { panic!("divide overflow"); }
+                    if q > 127 || q < -128 { return divide_error(m, start_ip); }
                     m.cpu.set_reg8(0, q as u8);
                     m.cpu.set_reg8(4, (ax % b) as u8);
                 }
@@ -423,18 +585,18 @@ pub fn step(m: &mut Machine) {
                 }
                 6 => {
                     let n = ((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32;
-                    if a == 0 { panic!("divide by zero"); }
+                    if a == 0 { return divide_error(m, start_ip); }
                     let q = n / a as u32;
-                    if q > 0xFFFF { panic!("divide overflow"); }
+                    if q > 0xFFFF { return divide_error(m, start_ip); }
                     m.cpu.set_reg16(AX, q as u16);
                     m.cpu.set_reg16(DX, (n % a as u32) as u16);
                 }
                 _ => {
                     let n = (((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32) as i32;
                     let b = a as i16 as i32;
-                    if b == 0 { panic!("divide by zero"); }
+                    if b == 0 { return divide_error(m, start_ip); }
                     let q = n / b;
-                    if q > 32767 || q < -32768 { panic!("divide overflow"); }
+                    if q > 32767 || q < -32768 { return divide_error(m, start_ip); }
                     m.cpu.set_reg16(AX, q as u16);
                     m.cpu.set_reg16(DX, (n % b) as u16);
                 }
@@ -463,7 +625,24 @@ pub fn step(m: &mut Machine) {
                 2 => { let t = read_op16(m, &rm); let ret = m.cpu.ip; push16(m, ret); m.cpu.ip = t; }
                 4 => { let t = read_op16(m, &rm); m.cpu.ip = t; }
                 6 => { let v = read_op16(m, &rm); push16(m, v); }
-                _ => panic!("GRP5 /{kind} (far call/jmp) not implemented"),
+                // /3 CALL far、/5 JMP far: メモリ上の4バイト far ポインタを読んで飛ぶ
+                3 | 5 => {
+                    let addr = match rm {
+                        Operand::Mem { addr, .. } => addr,
+                        Operand::Reg(_) => panic!("far call/jmp with register operand"),
+                    };
+                    let off = m.read16(addr);
+                    let seg = m.read16(addr.wrapping_add(2));
+                    if kind == 3 {
+                        let cs = m.cpu.sregs[CS];
+                        push16(m, cs);
+                        let ret = m.cpu.ip;
+                        push16(m, ret);
+                    }
+                    m.cpu.sregs[CS] = seg;
+                    m.cpu.ip = off;
+                }
+                _ => panic!("GRP5 /{kind} not implemented"),
             }
         }
 
@@ -499,4 +678,47 @@ pub fn step(m: &mut Machine) {
             m.cpu.sregs[CS], start_ip
         ),
     }
+}
+
+/// 割り込み・例外の共通入口。**実IVTを引いてハンドラへ飛ぶ**。
+///
+/// ソフトウェア割り込み (`INT n`)、例外 (ゼロ除算など)、ハードウェア割り込み
+/// (PICからのIRQ) は入口が違うだけで、ここから先は同じ道を通る。
+///
+/// 積む順序が `CALL far` と違う点に注意: **FLAGSを先に積む**。`IRET` が
+/// 逆順に取り出すので、ハンドラ実行中に変わったIF/DFが呼び出し前へ戻る。
+pub fn interrupt(m: &mut Machine, n: u8) {
+    let f = (m.cpu.flags as u16) | 0xF002;
+    push16(m, f);
+    // ハンドラ実行中は多重割り込みとシングルステップを止める。
+    // 必要ならハンドラ側が STI で開け直す (これが「割り込み禁止区間」の正体)
+    m.cpu.set_flag(IF, false);
+    m.cpu.set_flag(TF, false);
+    let cs = m.cpu.sregs[CS];
+    push16(m, cs);
+    let ip = m.cpu.ip;
+    push16(m, ip);
+    // IVTは 0x0000 から 4バイト × 256個。n番目に [オフセット, セグメント] が並ぶ。
+    // **OSはここを自分のハンドラで書き換えて割り込みを乗っ取る**
+    let vec = n as u32 * 4;
+    m.cpu.ip = m.read16(vec);
+    m.cpu.sregs[CS] = m.read16(vec + 2);
+}
+
+/// 割り込みからの復帰。IP・CS・FLAGS をこの順で取り出す
+pub fn iret(m: &mut Machine) {
+    m.cpu.ip = pop16(m);
+    m.cpu.sregs[CS] = pop16(m);
+    let f = pop16(m);
+    m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
+}
+
+/// ゼロ除算・商オーバーフローで上がる #DE (INT 0)。
+///
+/// **フォールトなので、積むのは「失敗した命令の先頭」**である。次の命令ではない。
+/// ハンドラが原因を直して `IRET` すれば同じ除算をやり直せる、という設計。
+/// (8086は次の命令を積む実装だったが、286以降で今の形に直された)
+fn divide_error(m: &mut Machine, start_ip: u16) {
+    m.cpu.ip = start_ip;
+    interrupt(m, 0);
 }
