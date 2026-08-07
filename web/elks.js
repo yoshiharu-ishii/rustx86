@@ -8,6 +8,10 @@
 // エミュレータ側に手を入れていないのがポイントである。UARTもVRAMも8042も
 // 「バイト列の口」を持っているので、CLIと同じ口にブラウザを繋いだだけになる。
 
+// 更新したのに古い挙動のままなら、ブラウザがこのファイルをキャッシュしている。
+// elks.html の <script src="./elks.js?v=N"> の N を上げると確実に読み直される。
+// (この罠で、3つ実装を書き換えても結果が1バイトも変わらず遠回りした)
+
 import init, { Emulator } from './pkg/rustx86_wasm.js';
 
 const $ = id => document.getElementById(id);
@@ -161,7 +165,20 @@ function draw() {
       }
     }
   }
-  if (logView && !logView.hidden) logView.textContent = fullLog();
+  if (logView && !logView.hidden) updateLogView();
+}
+
+/**
+ * ログ表示を更新する。
+ *
+ * **末尾に居るときだけ末尾へ追従する。** 利用者が上へ遡って読んでいる最中に
+ * 新しい行が来て勝手に飛ばされるのが一番困るので、位置を見てから決める。
+ */
+function updateLogView() {
+  const atBottom =
+    logView.scrollHeight - logView.scrollTop - logView.clientHeight < 24;
+  logView.textContent = fullLog();
+  if (atBottom) logView.scrollTop = logView.scrollHeight;
 }
 
 let wasmMemory = null;
@@ -263,6 +280,7 @@ $('showlog').addEventListener('click', () => {
   if (!logView.hidden) {
     logView.textContent = fullLog();
     logView.scrollTop = logView.scrollHeight;
+    logView.scrollIntoView({ block: 'nearest' });
   }
 });
 
