@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustx86 — 実行速度ベンチ (WASM)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    max-width: 48rem; margin: 0 auto; padding: 2rem 1.25rem; line-height: 1.7;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { opacity: .7; font-size: .9rem; margin-top: 0; }
+  fieldset {
+    border: 1px solid rgba(128,128,128,.4); border-radius: .5rem;
+    padding: .75rem 1rem 1rem; margin: 1.5rem 0 1rem;
+  }
+  legend { padding: 0 .4rem; font-size: .875rem; opacity: .8; }
+  .row { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: center; }
+  label { font-size: .9rem; }
+  input[type=number] { width: 5.5rem; font: inherit; padding: .2rem .4rem; }
+  select { font: inherit; padding: .2rem .3rem; }
+  input[type=file] { font-size: .85rem; max-width: 100%; }
+  button {
+    font: inherit; padding: .6rem 1.4rem; border-radius: .4rem;
+    border: 1px solid currentColor; background: transparent; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { margin: 1rem 0 0; min-height: 1.7em; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid rgba(128,128,128,.3); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.warmup td { opacity: .6; }
+  .note { font-size: .875rem; opacity: .75; }
+  .warn { color: #b45309; }
+  @media (prefers-color-scheme: dark) { .warn { color: #fbbf24; } }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
+</style>
+</head>
+<body>
+  <h1>rustx86 — 実行速度ベンチ (WASM)</h1>
+  <p class="sub">任意のブートセクタを流して命令毎秒を測る。ネイティブ側の基準線は README を参照。</p>
+
+  <fieldset>
+    <legend>ワークロード</legend>
+    <div class="row">
+      <label><input type="radio" name="src" value="builtin" checked> 埋め込み <code>asm/bench.bin</code></label>
+      <label><input type="radio" name="src" value="file"> ファイル <input type="file" id="file" accept=".bin" disabled></label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>計測条件</legend>
+    <div class="row">
+      <label>回数 <input type="number" id="runs" value="3" min="1" max="20"></label>
+      <label><input type="checkbox" id="untilHalt" checked> HLTまで走らせる</label>
+      <label>上限命令数 <input type="number" id="limit" value="400000000" min="1" step="1000000"></label>
+    </div>
+    <div class="row" style="margin-top: .75rem">
+      <label>事前の空転
+        <select id="warmup">
+          <option value="full" selected>完全 (1回まるごと捨てる) — 推奨</option>
+          <option value="light">軽い (1000命令) — メモリ確保だけ。効かないことの確認用</option>
+          <option value="none">なし — 冷えた状態の値を見る</option>
+        </select>
+      </label>
+    </div>
+    <p class="note" style="margin: .6rem 0 0">
+      HLTで終わらないワークロード (無限ループするOSなど) は、チェックを外して
+      <strong>命令数を固定</strong>して測る。命令数が同じでなければMIPSは比較できない。
+    </p>
+  </fieldset>
+
+  <button id="run">計測する</button>
+  <p id="status">読み込み中…</p>
+
+  <table id="results" hidden>
+    <thead><tr><th>回</th><th class="num">命令数</th><th class="num">実行時間</th><th class="num">MIPS</th><th class="num">1命令あたり</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <p class="note" id="summary"></p>
+
+  <hr style="margin: 2rem 0; border: none; border-top: 1px solid rgba(128,128,128,.3)">
+
+  <p class="note">
+    <strong>計測中はタブが固まる。</strong>分割せず一息に走らせているためで、途中でイベントループへ
+    戻すと他の処理が混ざって測定がぶれる。
+  </p>
+  <p class="note">
+    <strong>このタブを前面にしたまま測ること。</strong>非表示のタブはブラウザに
+    スロットリングされ、<strong>値が半分以下になる</strong> (実測: 表示時 104〜106 MIPS に対し
+    非表示時 34〜50 MIPS)。汚染された回には ⚠ が付き、結果は無効として扱う。
+  </p>
+  <p class="note">
+    <strong>1回目は遅く出る。</strong>既定で1回まるごと空転させているのはこのため。
+    切り分けで分かっているのは次の2点で、原因の特定までは至っていない。
+  </p>
+  <ul class="note">
+    <li><strong>メモリ確保ではない。</strong>確保だけを済ませる「軽い」空転では直らない
+      (1回目 41.1 MIPS のまま)。だから空転は1回まるごと走らせる必要がある</li>
+    <li><strong>ネイティブでも同じ形が出る</strong> (1回目 101.8、以降 107〜110)。
+      ただし落ち込みは7%程度。ホスト側のCPU立ち上がり (周波数制御やコア割り当て) が
+      少なくとも一部を占めている</li>
+  </ul>
+  <p class="note">
+    <strong>1回が短すぎる測定は低く出る。</strong>ウォームアップの占める割合が大きくなるためで、
+    同じワークロードでも 5000万命令 (約0.6秒) では 3.7億命令 (約3.5秒) より2割ほど低い値になる。
+    <strong>数秒かかる長さ</strong>で測ること。
+  </p>
+
+  <script type="module" src="./bench.js"></script>
+</body>
+</html>
