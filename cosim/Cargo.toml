@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 rustx86-core = { path = "../core" }
-
-[dev-dependencies]
+# オラクル本体。ハーネスがlib側にあるので dev-dependencies ではなく通常依存。
+# このクレート自体が default-members から外してあるため、通常のビルドには影響しない
 unicorn-engine = "2"

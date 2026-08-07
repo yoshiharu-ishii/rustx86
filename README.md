@@ -46,8 +46,10 @@ x86_64 (ロングモード) は**このリポジトリのゴールに含めな�
       シフト/回転 (GRP2)、MUL/DIV/NEG/NOT (GRP3)、INC/DEC/PUSH/CALL/JMP (GRP4/5)、
       TEST/XCHG/LEA/CBW/CWD/SAHF/LAHF/PUSHF/POPF、十進補正 (DAA/DAS/AAA/AAS/AAM/AAD)、
       ストリング命令 (MOVS/CMPS/STOS/LODS/SCAS、REP対応)
-- [ ] **1c: 穴埋め** — far jump/call、IRET、セグメントレジスタのPUSH/POP、
-      LES/LDS、XLAT、IN/OUT、186命令群 (PUSHA/ENTER/PUSH imm 等)
+- [x] **1c: 穴埋め** — far jump/call/ret、IRET、セグメントレジスタのPUSH/POP、
+      LES/LDS、XLAT、IN/OUT、186命令群 (PUSHA/POPA/PUSH imm/IMUL 3オペランド/ENTER/LEAVE)。
+      co-simにセグメントレジスタとスタック観測窓を追加し、
+      **`ENTER` のSP計算バグを1件検出**した (下記)
 - [ ] **1d: 割り込み機構** — IVTの実ディスパッチ、IF フラグ、割り込み受付タイミング。
       **CPUが純粋な関数でなくなる最初の一歩**。装置より先にここを固める
 
@@ -160,6 +162,43 @@ co-sim mismatch [DAA] code=[27] AX=009a flags_in=-
 
 **状態空間が小さいならランダムより総当たり**、という使い分けが要る。
 
+Tier 1c で足したセグメントレジスタとスタックの観測窓も、同じやり方で
+検出力を確かめてある。
+
+| 注入した変異 | 検出されたか |
+|---|---|
+| `CALL far` の積む順序を CS→IP から IP→CS へ | ✅ スタック窓の該当4バイトが入れ替わって出た |
+| `LES` が ES ではなく DS に書く | ✅ `ES: ours=0fff oracle=9fcb` / `DS: ours=9fcb oracle=0000` |
+
+### 実例: 仕様書の疑似コードが間違っていた (`ENTER`)
+
+Tier 1c で `ENTER` を実装した際、co-simが1件だけ差分を出した。
+
+```
+[ENTER imm16,level] code=[c8, 02, 00, 02] regs=[..., 2ff8, 2ff8, ...]
+  SP: ours=2ff4 oracle=2ff0
+```
+
+`ENTER` はスタックフレームを作る命令で、最後にSPを `imm16` バイト分下げる。
+実装はIntel SDMの疑似コードをそのまま写していた。
+
+```
+BP ← FrameTemp;
+SP ← BP − Size;      ← ここ
+```
+
+ところがこれが正しいのは **`level=0` のときだけ**である。`level>0` では
+ネストした手続きの表示 (display) を `level` 個積んでおり、その分
+SPはすでに下がっている。`FrameTemp` から引き直すと、積んだ分が帳消しになる。
+
+AMDのマニュアルは同じ箇所を「**現在の**SPから引く」と書いており、
+QEMUの実装もそちらに従っている。実挙動はAMDの記述の方だった。
+
+疑似コードを読んで写経した実装は、読んだ本人には正しく見える。
+**仕様書を疑うきっかけは、動くオラクルとの突き合わせでしか得られない**。
+`level>0` はPascal系のネスト手続き用で現代のコンパイラはまず出さないため、
+実OSを動かして踏む可能性も低い。co-simを置いた甲斐があった一件である。
+
 ## コード構成
 
 `cpu/mod.rs` は**振り分け表**に徹し、実際の計算は用途ごとのモジュールが持つ。
@@ -170,12 +209,13 @@ matchが1箇所に集まっていること自体が「この命令はどこで�
 
 | ファイル | 役割 | 行数 |
 |---|---|---|
-| `cpu/mod.rs` | オペコードの振り分け表 (巨大なmatch) | 502 |
+| `cpu/mod.rs` | オペコードの振り分け表 (巨大なmatch) | 686 |
 | `cpu/operand.rs` | ModRM解決、オペランド読み書き、アドレス変換、スタック | 116 |
 | `cpu/alu.rs` | 8種の演算とフラグ計算 (AF/OFの意味論) | 96 |
 | `cpu/shift.rs` | シフトと回転 (8/16bit共通) | 94 |
 | `cpu/string.rs` | ストリング命令とREPループ | 119 |
 | `cpu/decimal.rs` | 十進補正 (BCD) | 73 |
+| `lib.rs` | メモリ空間、**I/Oポート空間**、BIOS HLE | 125 |
 
 ## 設計メモ
 
