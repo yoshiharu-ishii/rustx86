@@ -219,3 +219,117 @@ pub fn scancode(ch: char) -> Option<u8> {
         _ => return None,
     })
 }
+
+/// ブラウザの `KeyboardEvent.code` からスキャンコード セット1 への対応表。
+///
+/// `code` は「押された**物理的なキーの位置**」を表す識別子で、
+/// スキャンコードとまったく同じ考え方をしている。だから変換は素直な対応付けで済み、
+/// **Ctrl も Shift も矢印も特別扱いが要らない** — OSが自分で組み立てる。
+///
+/// 文字に直してから渡す方式だと、Ctrl+C も Esc も表現できない。
+/// キーボードは文字を送る装置ではなく、キーの上げ下げを送る装置である。
+pub fn scancode_for_code(code: &str) -> Option<u8> {
+    // 文字キーは配列順に並んでいる (左上から数えた位置がそのまま番号)
+    const ROW_Q: [&str; 10] = [
+        "KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI", "KeyO", "KeyP",
+    ];
+    const ROW_A: [&str; 9] = [
+        "KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK", "KeyL",
+    ];
+    const ROW_Z: [&str; 7] = ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM"];
+
+    if let Some(i) = ROW_Q.iter().position(|k| *k == code) {
+        return Some(0x10 + i as u8);
+    }
+    if let Some(i) = ROW_A.iter().position(|k| *k == code) {
+        return Some(0x1E + i as u8);
+    }
+    if let Some(i) = ROW_Z.iter().position(|k| *k == code) {
+        return Some(0x2C + i as u8);
+    }
+    if let Some(d) = code.strip_prefix("Digit") {
+        let c = d.as_bytes()[0];
+        return Some(if c == b'0' { 0x0B } else { 0x02 + (c - b'1') });
+    }
+    if let Some(f) = code.strip_prefix("F") {
+        if let Ok(n) = f.parse::<u8>() {
+            if (1..=10).contains(&n) {
+                return Some(0x3A + n); // F1 = 0x3B
+            }
+        }
+    }
+    Some(match code {
+        "Escape" => 0x01,
+        "Minus" => 0x0C,
+        "Equal" => 0x0D,
+        "Backspace" => 0x0E,
+        "Tab" => 0x0F,
+        "BracketLeft" => 0x1A,
+        "BracketRight" => 0x1B,
+        "Enter" | "NumpadEnter" => 0x1C,
+        "ControlLeft" | "ControlRight" => 0x1D,
+        "Semicolon" => 0x27,
+        "Quote" => 0x28,
+        "Backquote" => 0x29,
+        "ShiftLeft" => 0x2A,
+        "Backslash" => 0x2B,
+        "Comma" => 0x33,
+        "Period" => 0x34,
+        "Slash" => 0x35,
+        "ShiftRight" => 0x36,
+        "AltLeft" | "AltRight" => 0x38,
+        "Space" => 0x39,
+        "CapsLock" => 0x3A,
+        // 矢印などは 0xE0 を前置する拡張キー。ここでは基本形だけ返し、
+        // 前置は [`Kbd8042::key`] が付ける
+        "ArrowUp" => 0x48,
+        "ArrowLeft" => 0x4B,
+        "ArrowRight" => 0x4D,
+        "ArrowDown" => 0x50,
+        "Home" => 0x47,
+        "End" => 0x4F,
+        "PageUp" => 0x49,
+        "PageDown" => 0x51,
+        "Insert" => 0x52,
+        "Delete" => 0x53,
+        _ => return None,
+    })
+}
+
+/// 0xE0 を前置して送るキー (PC/ATで後から足されたキー群)。
+///
+/// 8086時代のキーボードには無かったので番号が空いておらず、
+/// **「次のバイトは拡張キー」という目印を先に送る**方式で追加された。
+/// テンキーの Enter と本体の Enter が区別できるのもこの仕組みによる。
+fn is_extended(code: &str) -> bool {
+    matches!(
+        code,
+        "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "Home"
+            | "End"
+            | "PageUp"
+            | "PageDown"
+            | "Insert"
+            | "Delete"
+            | "ControlRight"
+            | "AltRight"
+            | "NumpadEnter"
+    )
+}
+
+impl Kbd8042 {
+    /// キーの上げ下げを送る。`down=false` ならブレークコード (最上位ビットを立てる)
+    pub fn key(&mut self, code: &str, down: bool) -> bool {
+        let Some(sc) = scancode_for_code(code) else {
+            return false;
+        };
+        if is_extended(code) {
+            self.keys.push_back(0xE0);
+        }
+        self.keys.push_back(if down { sc } else { sc | 0x80 });
+        true
+    }
+}

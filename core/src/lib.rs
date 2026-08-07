@@ -281,6 +281,9 @@ impl Machine {
             IoTarget::Cmos => {
                 if port == 0x71 { self.devices.cmos.read_data() } else { 0xFF }
             }
+            IoTarget::Crtc => {
+                if port == 0x3D5 { self.devices.crtc.read_data() } else { 0xFF }
+            }
             IoTarget::SystemControl => {
                 // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
                 // 時間を測る古い手口に付き合うため
@@ -323,6 +326,13 @@ impl Machine {
                     self.devices.cmos.write_data(val)
                 }
             }
+            IoTarget::Crtc => {
+                if port == 0x3D4 {
+                    self.devices.crtc.write_index(val)
+                } else {
+                    self.devices.crtc.write_data(val)
+                }
+            }
             IoTarget::SystemControl => self.devices.sysctl = val,
             IoTarget::Unmapped => {
                 self.unhandled_io.insert(port);
@@ -336,6 +346,12 @@ impl Machine {
     pub fn text_vram(&self) -> &[u8] {
         let b = bus::VRAM_TEXT_BASE as usize;
         &self.mem[b..b + bus::TEXT_LEN]
+    }
+
+    /// カーソルの位置 (行, 桁)。CRTCが持っている
+    pub fn cursor_pos(&self) -> (usize, usize) {
+        let off = self.devices.crtc.cursor_offset() as usize;
+        (off / bus::TEXT_COLS, off % bus::TEXT_COLS)
     }
 
     /// 描画側が読んだ印。次の書き込みまで dirty が下りる

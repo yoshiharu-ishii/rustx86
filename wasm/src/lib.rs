@@ -119,8 +119,27 @@ impl Emulator {
         self.m.devices.keyboard.type_ascii(s);
     }
 
-    /// 生のスキャンコードを流す (矢印キーなど、文字に対応しないキー用)
+    /// 生のスキャンコードを流す
     pub fn send_scancode(&mut self, code: u8) {
         self.m.devices.keyboard.feed(&[code]);
+    }
+
+    /// キーの上げ下げを送る。`code` は `KeyboardEvent.code` (物理キーの識別子)。
+    ///
+    /// 文字ではなく**キーの位置**を渡すのが要点である。こうすると Ctrl も Esc も
+    /// 矢印も特別扱いが要らず、修飾キーの組み立てはゲストのOSがやる。
+    /// 返り値は「そのキーを知っているか」
+    pub fn key(&mut self, code: &str, down: bool) -> bool {
+        self.m.devices.keyboard.key(code, down)
+    }
+
+    /// カーソルの行 (CRTCが持っている)
+    pub fn cursor_row(&self) -> usize {
+        self.m.cursor_pos().0
+    }
+
+    /// カーソルの桁
+    pub fn cursor_col(&self) -> usize {
+        self.m.cursor_pos().1
     }
 }
