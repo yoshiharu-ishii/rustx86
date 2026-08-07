@@ -39,7 +39,9 @@ export class Machine {
   constructor(image) {
     this.emu = Emulator.from_disk(image);
     this.running = false;
-    /** 画面が変わったときに呼ばれる。(cells, cursorRow, cursorCol) => void */
+    /** 直前のカーソル位置。動いたかどうかの判定に使う */
+    this.lastCursor = [-1, -1];
+    /** 画面が変わったときに呼ばれる。(cells, cursorRow, cursorCol, redraw) => void */
     this.onFrame = null;
   }
 
@@ -87,10 +89,16 @@ export class Machine {
     let changed = false;
     for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
       this.emu.run_slice(CHUNK);
-      if (this.emu.take_vram_dirty()) {
+      const [row, col] = this.cursor();
+      // **カーソルが動いただけでも描き直す。**
+      // viで矢印を押してもVRAMは変わらないので、文字の変化だけを見ていると
+      // カーソルが画面上で固まったままになる (これでviが使い物にならなかった)。
+      const moved = row !== this.lastCursor[0] || col !== this.lastCursor[1];
+      if (this.emu.take_vram_dirty() || moved) {
         changed = true;
+        this.lastCursor = [row, col];
         // 覗くのは細かく (スクロールを取りこぼさないため)
-        this.onFrame?.(this.vram(), ...this.cursor(), false);
+        this.onFrame?.(this.vram(), row, col, false);
       }
     }
     // 描かせるのは1フレームに1回だけ

@@ -263,22 +263,38 @@ export class Terminal {
    * 上の3行がそろって動いていればスクロールとみなす。
    */
   #detectScroll(prev, now, rowBytes) {
+    // **上の数行だけを見る。** 画面全体の一致を条件にすると、スクロールの途中
+    // (4000バイトのmemmoveの最中) に覗いたときに一致せず、取りこぼす。
+    // 上から順に動くので、先頭が一致していればスクロールしたと判断してよい。
+    //
+    // ただし**同じ内容の行が並んでいると、どんなずれ幅でも一致してしまう**。
+    // vi の画面は `~` だらけなので、これを弾かないと描き直すたびに
+    // スクロールとみなされ履歴がゴミで埋まる (vi を開くだけで22行入った)。
+    // だから「一致した行が全部同じ中身ではないこと」も要求する。
     const NEED = 3;
     for (let shift = 1; shift <= this.rows - NEED; shift++) {
       let ok = true;
       let content = false;
+      let varied = false;
+      let first = null;
       for (let r = 0; r < NEED && ok; r++) {
         const a = (r + shift) * rowBytes;
         const b = r * rowBytes;
+        let text = '';
         for (let i = 0; i < rowBytes; i += 2) {
           if (prev[a + i] !== now[b + i]) {
             ok = false;
             break;
           }
-          if (now[b + i] > 0x20) content = true;
+          const ch = now[b + i];
+          text += String.fromCharCode(ch);
+          if (ch > 0x20) content = true;
         }
+        if (!ok) break;
+        if (first === null) first = text;
+        else if (text !== first) varied = true;
       }
-      if (ok && content) return shift;
+      if (ok && content && varied) return shift;
     }
     return 0;
   }
