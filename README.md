@@ -76,7 +76,9 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       `cargo run --release --example boot -- images/fd1440.img 50000000 root "uname -a"`
 - [x] **2d: ブラウザ化** — WASM + canvas。テキストVRAMを直接描き、キー入力を
       8042へスキャンコードとして流す。**ブラウザ上でブート→login→シェルが動く**。
-      `web/elks.html`。端末は `web/terminal.js` に独立させた —
+      `web/elks.html`。責務ごとに3つに分けてある:
+      `terminal.js` (端末) / `machine.js` (機械を回す) / `main.js` (繋ぎ役)。
+      端末は —
       Homebrewテーマ、カーソル (CRTC)、物理キー入力 (Ctrl/Esc/矢印)、
       ドラッグ選択とコピー、スクロールバー付きの1000行スクロールバック。
       開発用サーバーは `python3 web/serve.py`
