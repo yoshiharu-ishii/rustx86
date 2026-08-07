@@ -108,6 +108,12 @@ impl Cpu {
         self.flags & mask != 0
     }
 
+    /// BIOS HLE が「成功/失敗」を返すのに使う。x86のBIOSは慣例として
+    /// キャリーフラグで成否を返す
+    pub fn set_flag_cf(&mut self, on: bool) {
+        self.set_flag(CF, on);
+    }
+
     pub fn set_flag(&mut self, mask: u32, on: bool) {
         if on {
             self.flags |= mask;
@@ -688,6 +694,16 @@ pub fn step(m: &mut Machine) {
 /// 積む順序が `CALL far` と違う点に注意: **FLAGSを先に積む**。`IRET` が
 /// 逆順に取り出すので、ハンドラ実行中に変わったIF/DFが呼び出し前へ戻る。
 pub fn interrupt(m: &mut Machine, n: u8) {
+    let (cs, ip) = (m.cpu.sregs[CS], m.cpu.ip);
+    let i = n as usize;
+    if m.int_counts[i] == 0 {
+        m.int_first[i] = (cs, ip);
+    }
+    m.int_counts[i] += 1;
+    if m.int_recent.len() == 32 {
+        m.int_recent.pop_front();
+    }
+    m.int_recent.push_back((n, cs, ip));
     let f = (m.cpu.flags as u16) | 0xF002;
     push16(m, f);
     // ハンドラ実行中は多重割り込みとシングルステップを止める。
@@ -720,5 +736,8 @@ pub fn iret(m: &mut Machine) {
 /// (8086は次の命令を積む実装だったが、286以降で今の形に直された)
 fn divide_error(m: &mut Machine, start_ip: u16) {
     m.cpu.ip = start_ip;
+    if m.first_fault.is_none() {
+        m.first_fault = Some((0, m.cpu.sregs[CS], start_ip));
+    }
     interrupt(m, 0);
 }

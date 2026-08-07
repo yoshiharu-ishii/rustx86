@@ -66,6 +66,10 @@ pub enum IoTarget {
     Pit,
     /// 0x60 / 0x64: キーボードコントローラ (8042)
     Keyboard,
+    /// 0x70 / 0x71: CMOS RTC (時計とマシンの構成情報)
+    Cmos,
+    /// 0x61: システム制御 (スピーカ、リフレッシュビット)
+    SystemControl,
     /// 0x3F8-0x3FF: UART 16550 (COM1)。Linuxのシリアルコンソールもここ
     Uart,
     /// 誰も名乗り出ないポート
@@ -78,6 +82,8 @@ pub fn decode_io(port: u16) -> IoTarget {
         0xA0 | 0xA1 => IoTarget::Pic { slave: true },
         0x40..=0x43 => IoTarget::Pit,
         0x60 | 0x64 => IoTarget::Keyboard,
+        0x61 => IoTarget::SystemControl,
+        0x70 | 0x71 => IoTarget::Cmos,
         0x3F8..=0x3FF => IoTarget::Uart,
         _ => IoTarget::Unmapped,
     }
@@ -95,8 +101,13 @@ pub struct Devices {
     pub pit: crate::dev::Pit8254,
     /// UART 16550 / COM1 (0x3F8-0x3FF)
     pub uart: crate::dev::Uart16550,
-    /// キーボードコントローラ (0x60, 0x64)。中身は未実装
-    pub keyboard: [u8; 2],
+    /// 8042 キーボードコントローラ (0x60, 0x64)。A20ゲートもここが握る
+    pub keyboard: crate::dev::Kbd8042,
+    /// MC146818 CMOS RTC (0x70, 0x71)
+    pub cmos: crate::dev::Cmos,
+    /// システム制御ポート (0x61)。bit4がDRAMリフレッシュの矩形波で、
+    /// OSはこれを数えて時間を測ることがある
+    pub sysctl: u8,
 }
 
 impl Default for Devices {
@@ -111,7 +122,9 @@ impl Devices {
             pic: [crate::dev::Pic8259::new(), crate::dev::Pic8259::new()],
             pit: crate::dev::Pit8254::new(),
             uart: crate::dev::Uart16550::new(),
-            keyboard: [0; 2],
+            keyboard: crate::dev::Kbd8042::new(),
+            cmos: crate::dev::Cmos::new(),
+            sysctl: 0,
         }
     }
 }
