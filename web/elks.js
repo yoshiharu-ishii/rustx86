@@ -62,33 +62,53 @@ let prevRows = null;
 function captureScroll(vram) {
   const rowBytes = cols * 2;
   const total = rowBytes * rows;
-  if (prevVram) {
-    let shifted = 0;
-    for (let shift = 1; shift < rows; shift++) {
-      const off = shift * rowBytes;
-      const len = total - off;
-      let same = true;
-      for (let i = 0; i < len; i++) {
-        // ほとんどの shift は先頭数バイトで外れるので、早く抜ける
-        if (prevVram[off + i] !== vram[i]) {
-          same = false;
+  if (!prevVram) {
+    prevVram = new Uint8Array(total);
+    prevVram.set(vram.subarray(0, total));
+    prevRows = rowsFrom(vram);
+    return;
+  }
+
+  const shift = detectScroll(prevVram, vram, rowBytes);
+  if (shift > 0) {
+    for (let i = 0; i < shift && i < prevRows.length; i++) log.push(prevRows[i]);
+    while (log.length > LOG_LINES) log.shift();
+  }
+  prevVram.set(vram.subarray(0, total));
+  prevRows = rowsFrom(vram);
+}
+
+/**
+ * 画面が何行スクロールしたかを返す (0 ならスクロールしていない)。
+ *
+ * **画面全体の一致は見ない。上から数行だけを見る。**
+ * 画面はカーソル行が常に書き換わっているので、全体一致を条件にすると
+ * ほとんどの瞬間で不成立になり、比較元が固まってしまう
+ * (実際にそれでログが数行しか取れなかった)。
+ *
+ * スクロールなら上の行がそっくり1つ上へ動くので、**先頭3行の一致**で足りる。
+ * 空行どうしが偶然そろうのを避けるため、中身のある行であることも要求する。
+ */
+function detectScroll(prev, now, rowBytes) {
+  const NEED = 3;
+  for (let shift = 1; shift <= rows - NEED; shift++) {
+    let ok = true;
+    let content = false;
+    for (let r = 0; r < NEED; r++) {
+      const a = (r + shift) * rowBytes;
+      const b = r * rowBytes;
+      for (let i = 0; i < rowBytes; i += 2) {
+        if (prev[a + i] !== now[b + i]) {
+          ok = false;
           break;
         }
+        if (now[b + i] > 0x20) content = true;
       }
-      if (same) {
-        shifted = shift;
-        break;
-      }
+      if (!ok) break;
     }
-    if (shifted > 0 && prevRows) {
-      for (let i = 0; i < shifted; i++) log.push(prevRows[i]);
-      while (log.length > LOG_LINES) log.shift();
-    }
-    if (shifted > 0) prevRows = rowsFrom(vram);
+    if (ok && content) return shift;
   }
-  if (!prevVram) prevVram = new Uint8Array(total);
-  prevVram.set(vram.subarray(0, total));
-  if (!prevRows) prevRows = rowsFrom(vram);
+  return 0;
 }
 
 /** バイト列から25行の文字列を作る。**スクロール検出時と表示時にだけ**呼ぶ */
