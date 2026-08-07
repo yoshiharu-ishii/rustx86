@@ -146,10 +146,19 @@ impl Kbd8042 {
     /// 離すと「ブレーク」(メイク + 0x80) が流れ、文字への変換はOSの仕事である。
     /// 配列を変えられるのも、Shiftが別のキーとして届くのも、この設計のおかげ。
     pub fn type_ascii(&mut self, s: &str) {
+        const LSHIFT: u8 = 0x2A;
         for ch in s.chars() {
-            if let Some(code) = scancode(ch) {
-                self.keys.push_back(code);
-                self.keys.push_back(code | 0x80);
+            let Some(code) = scancode(ch) else { continue };
+            // 大文字は「Shiftを押しながら同じキーを叩く」として送る。
+            // 文字コードを渡す装置ではないので、実機と同じ手順を踏む
+            let shifted = ch.is_ascii_uppercase();
+            if shifted {
+                self.keys.push_back(LSHIFT);
+            }
+            self.keys.push_back(code);
+            self.keys.push_back(code | 0x80);
+            if shifted {
+                self.keys.push_back(LSHIFT | 0x80);
             }
         }
     }
