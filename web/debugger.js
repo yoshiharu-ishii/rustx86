@@ -112,6 +112,14 @@ const HTML = `
   </section>
 
   <section>
+    <h2>Mode</h2>
+    <p class="note">リアルモードか保護モードか。保護モードでは
+      <strong>セレクタの裏の隠しレジスタ</strong> (base と Dビット) も出す。
+      保護モードで死ぬときの手掛かりは大抵ここにある。</p>
+    <pre id="rxMode"></pre>
+  </section>
+
+  <section>
     <h2>Next instruction</h2>
     <p class="note">CS:IP と、これから実行するバイト列。逆アセンブラはまだ無い。</p>
     <pre id="rxHere"></pre>
@@ -429,6 +437,15 @@ export class Debugger {
       `<tr><td class="k">steps</td><td class="v" colspan="3">${fmtInstr(c.instr)}</td></tr>`,
     );
     this.$('rxRegs').innerHTML = rows.join('');
+
+    // モード。保護モードに入ったら CR0/GDTR と隠しレジスタが読める
+    const segFmt = (n, s) =>
+      `${n}=${hex16(s.sel)}→base=${hex32(s.base)} ${s.big ? '32' : '16'}bit`;
+    this.$('rxMode').innerHTML = c.pe
+      ? `<span class="changed">protected</span>  CR0=${hex32(c.cr0)} ` +
+        `GDTR=${hex32(c.gdtrBase)}+${hex16(c.gdtrLimit)}<br>` +
+        `${segFmt('CS', c.cs)}  ${segFmt('DS', c.ds)}  ${segFmt('SS', c.ss)}`
+      : `real  CR0=${hex32(c.cr0)}`;
 
     this.$('rxHere').innerHTML =
       `<span class="v">${hex16(c.sregs[1])}:${hex16(c.ip)}</span>  ` +

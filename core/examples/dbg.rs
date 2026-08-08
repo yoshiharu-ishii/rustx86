@@ -31,7 +31,12 @@ fn main() {
     let mut disk: Option<Vec<u8>> = None;
     if let Some(path) = &img {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        m.boot_from_disk(data.clone()).expect("boot");
+        // 512バイトならブートセクタ単体 (asm/*.bin)、それ以外はディスクイメージ
+        if data.len() == 512 {
+            m.load_boot_sector(&data).expect("boot sector");
+        } else {
+            m.boot_from_disk(data.clone()).expect("boot");
+        }
         disk = Some(data);
     }
 
@@ -124,7 +129,11 @@ fn main() {
                     );
                     m = Machine::new();
                     if let Some(d) = &disk {
-                        m.boot_from_disk(d.clone()).unwrap();
+                        if d.len() == 512 {
+                            m.load_boot_sector(d).unwrap();
+                        } else {
+                            m.boot_from_disk(d.clone()).unwrap();
+                        }
                     }
                     m.dbg.record_trace(cap);
                     m.dbg.run_to(n);
@@ -305,6 +314,26 @@ fn info(m: &Machine) {
         c.flags,
         flag_names(c),
     );
+    // モードと、その根拠。保護モードで死ぬときの手掛かりは大抵ここにある
+    if c.pe() {
+        println!(
+            "mode=protected  CR0={:08x}  GDTR={:08x}+{:04x}",
+            c.cr0, c.gdtr_base, c.gdtr_limit
+        );
+        for (name, i) in [("CS", CS), ("DS", DS), ("SS", SS)] {
+            let h = &c.hidden[i];
+            println!(
+                "  {name}={:04x} -> base={:08x} limit={:08x} {} access={:02x}",
+                c.sregs[i],
+                h.base,
+                h.limit,
+                if h.big { "32bit" } else { "16bit" },
+                h.access,
+            );
+        }
+    } else {
+        println!("mode=real  CR0={:08x}", c.cr0);
+    }
     println!(
         "instrs={}  execute={:x?}  write={:x?}  I/O read={:x?} write={:x?}",
         m.dbg.instr, m.dbg.code, m.dbg.mem_write, m.dbg.io_read, m.dbg.io_write
