@@ -8,7 +8,7 @@
 // 画面を何命令ごとに覗くか — 実機なら水晶が決めることを、ブラウザでは
 // ここが決める。
 
-import init, { Emulator } from './pkg/rustx86_wasm.js?v=5';
+import init, { Emulator, cp437_table } from './pkg/rustx86_wasm.js?v=6';
 
 /** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
 const INSTRUCTIONS_PER_FRAME = 3_000_000;
@@ -29,9 +29,14 @@ export async function loadWasm() {
   // glue と .wasm 本体の両方にバージョンを付ける。
   // 片方だけ新しいと「その関数は無い」と言われる (実際に踏んだ)
   const wasm = await init({
-    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=5', import.meta.url),
+    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=6', import.meta.url),
   });
   wasmMemory = wasm.memory;
+}
+
+/** VRAMの1バイトを何の絵にするかの表 (CP437)。**Rust側と同じものを使う** */
+export function charset() {
+  return cp437_table();
 }
 
 export class Machine {

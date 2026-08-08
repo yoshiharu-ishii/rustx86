@@ -61,6 +61,17 @@ impl Emulator {
     }
 }
 
+/// コードページ437 の256文字をUnicodeへ写した表 (1本の文字列)。
+///
+/// **CLIの確認表示と同じ表をブラウザにも渡す**ための口である。
+/// 別々に持つと「CLIでは出るのにブラウザでは化ける」が起きる。
+/// DOSの画面は罫線とブロック文字 (0xB0-0xDF) で描かれているので、
+/// ここを素通しにすると枠もロゴも壊れる。
+#[wasm_bindgen]
+pub fn cp437_table() -> String {
+    rustx86_core::cp437::table_string()
+}
+
 /// 埋め込みワークロードの命令数は固定なので、ネイティブ側の測定と直接比較できる
 #[wasm_bindgen]
 pub fn bench_sector_len() -> usize {

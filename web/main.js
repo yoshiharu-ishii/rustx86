@@ -8,7 +8,7 @@
 // 機械は画面を知らず、端末は機械を知らない。互いを知っているのはここだけなので、
 // 別のOSを載せても、端末を差し替えても、直すのはこのファイルで済む。
 
-import { loadWasm, Machine } from './machine.js';
+import { loadWasm, charset, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 
 const $ = id => document.getElementById(id);
@@ -274,6 +274,9 @@ window.addEventListener('unhandledrejection', e => setStatus(`エラー: ${e.rea
 
 try {
   await loadWasm();
+  // 文字の表はwasmが読めてから受け取る。**CLIの確認表示と同じ表**なので、
+  // 「CLIでは出るのにブラウザでは化ける」が起きない
+  term.charset = [...charset()];
   setStatus('ディスクイメージをここにドロップすると起動します');
   const head = await fetch('./fd1440.img', { method: 'HEAD' }).catch(() => null);
   if (head?.ok) await bootFromUrl();
