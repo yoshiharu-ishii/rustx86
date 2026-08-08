@@ -128,6 +128,11 @@ impl Emulator {
         let n = instructions as u64;
         for _ in 0..n {
             self.m.step();
+            // デバッガが止めたらフレームを打ち切る。**見張っていなければ
+            // この判定は真偽値1つ**なので、通常の実行には効かない
+            if self.m.dbg.on && self.m.dbg.stop.is_some() {
+                break;
+            }
         }
     }
 
@@ -183,6 +188,144 @@ impl Emulator {
     /// 書き出した状態へ戻す
     pub fn load_state(&mut self, data: &[u8]) -> Result<(), JsError> {
         self.m.load_state(data).map_err(|e| JsError::new(&e))
+    }
+
+    // ---------- デバッガ ----------
+    //
+    // 画面の向こうで動いているものを、**同じページの中で**覗けるようにする。
+    // JSとの境界を細かい関数で埋めると糊が増えるので、まとまった状態は
+    // **JSONの文字列1本**で渡す。毎フレームではなく人間が見る速さ (10Hz程度)
+    // でしか呼ばないので、組み立ての費用は問題にならない
+
+    /// CPUの状態をJSONで返す
+    pub fn cpu_json(&self) -> String {
+        use rustx86_core::cpu::*;
+        let c = &self.m.cpu;
+        let lin = (c.sregs[CS] as u32) << 4 | c.ip as u32;
+        let bytes: Vec<String> = (0..8)
+            .map(|i| format!("{:02x}", self.m.read8(lin.wrapping_add(i))))
+            .collect();
+        let flags: Vec<&str> = [
+            (CF, "CF"), (PF, "PF"), (AF, "AF"), (ZF, "ZF"),
+            (SF, "SF"), (TF, "TF"), (IF, "IF"), (DF, "DF"), (OF, "OF"),
+        ]
+        .iter()
+        .filter(|(f, _)| c.flag(*f))
+        .map(|(_, n)| *n)
+        .collect();
+        format!(
+            r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
+               "bytes":"{}","instr":{},"halted":{},"lin":{}}}"#,
+            c.regs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            c.sregs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            c.ip,
+            c.flags,
+            flags.join(" "),
+            bytes.join(" "),
+            self.m.dbg.instr,
+            self.m.halted,
+            lin,
+        )
+    }
+
+    /// メモリを読む。**デバッガ用なので副作用は無い**
+    pub fn read_mem(&self, addr: u32, len: u32) -> Vec<u8> {
+        (0..len).map(|i| self.m.read8(addr.wrapping_add(i))).collect()
+    }
+
+    pub fn set_break(&mut self, lin: u32) {
+        self.m.dbg.break_at(lin);
+    }
+
+    pub fn watch_mem(&mut self, addr: u32) {
+        self.m.dbg.watch_mem(addr);
+    }
+
+    pub fn watch_io(&mut self, port: u16, read: bool, write: bool) {
+        self.m.dbg.watch_io(port, read, write);
+    }
+
+    pub fn clear_debug(&mut self) {
+        self.m.dbg.clear();
+    }
+
+    /// 1命令だけ進める。止まっていても進める (割り込みで起きることがある)
+    pub fn step_one(&mut self) {
+        self.m.dbg.run_for(1);
+        loop {
+            self.m.step();
+            if self.m.dbg.stop.is_some() {
+                break;
+            }
+        }
+        self.m.dbg.take_stop();
+    }
+
+    /// 止まった理由を取り出す。**取ると消える**ので、続行するとまた走り出す。
+    /// 止まっていなければ空文字
+    pub fn take_stop(&mut self) -> String {
+        use rustx86_core::debug::Stop;
+        match self.m.dbg.take_stop() {
+            None => String::new(),
+            Some(Stop::Break(a)) => format!("ブレーク {a:#07x}"),
+            Some(Stop::WriteMem { addr, old, new, at }) => format!(
+                "{addr:#07x} が {old:#04x} → {new:#04x} (書いたのは {:04x}:{:04x})",
+                at.0, at.1
+            ),
+            Some(Stop::WriteIo { port, val, at }) => {
+                format!("ポート{port:#06x} へ {val:#04x} ({:04x}:{:04x})", at.0, at.1)
+            }
+            Some(Stop::ReadIo { port, val, at }) => {
+                format!("ポート{port:#06x} から {val:#04x} ({:04x}:{:04x})", at.0, at.1)
+            }
+            Some(Stop::Count(n)) => format!("{n} 命令目"),
+        }
+    }
+
+    /// いま止まっているか (`take_stop` と違い**消さない**)
+    pub fn is_stopped(&self) -> bool {
+        self.m.dbg.stop.is_some()
+    }
+
+    /// 見張っているものの一覧をJSONで
+    pub fn watches_json(&self) -> String {
+        let d = &self.m.dbg;
+        format!(
+            r#"{{"code":[{}],"mem":[{}],"ioR":[{}],"ioW":[{}],"on":{}}}"#,
+            d.code.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            d.mem_write.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            d.io_read.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            d.io_write.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            d.on,
+        )
+    }
+
+    /// 命令数だけ数え始める / やめる。デバッガの画面を開いている間に使う
+    pub fn set_counting(&mut self, on: bool) {
+        self.m.dbg.set_counting(on);
+    }
+
+    /// 足跡を残し始める
+    pub fn record_trace(&mut self, n: usize) {
+        self.m.dbg.record_trace(n);
+    }
+
+    /// 足跡をJSONで
+    pub fn trace_json(&self) -> String {
+        let rows: Vec<String> = self
+            .m
+            .dbg
+            .trace
+            .iter()
+            .map(|s| {
+                let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
+                format!(
+                    r#"{{"i":{},"cs":{},"ip":{},"b":"{}"}}"#,
+                    s.instr, s.cs, s.ip, b.join(" ")
+                )
+            })
+            .collect();
+        format!("[{}]", rows.join(","))
     }
 
     /// カーソルの行 (CRTCが持っている)

@@ -88,6 +88,10 @@ pub struct Debug {
     pub io_read: BTreeSet<u16>,
     /// ここまで来たら止まる命令数
     pub until: Option<u64>,
+    /// 何も見張らずに**命令数だけ数える**。デバッガの画面を開いている間に使う。
+    /// これが無いと「見張るものが無い＝元締めが切れる＝命令数が0のまま」になり、
+    /// 何も壊れていないのに壊れて見える
+    pub count: bool,
     /// 止まった理由。**呼び出し側が取り去るまで残る**
     pub stop: Option<Stop>,
     /// いま実行中の命令の先頭。フックが「誰が書いたか」を答えるための元
@@ -113,7 +117,8 @@ impl Debug {
             || !self.io_write.is_empty()
             || !self.io_read.is_empty()
             || self.until.is_some()
-            || self.trace_cap > 0;
+            || self.trace_cap > 0
+            || self.count;
     }
 
     pub fn break_at(&mut self, lin: u32) {
@@ -143,17 +148,25 @@ impl Debug {
         self.until = Some(n);
         self.refresh();
     }
+    /// 命令数だけ数え始める / やめる
+    pub fn set_counting(&mut self, on: bool) {
+        self.count = on;
+        self.refresh();
+    }
+
     pub fn record_trace(&mut self, cap: usize) {
         self.trace_cap = cap;
         self.trace.clear();
         self.refresh();
     }
+    /// 見張るものを全部外す。**命令数と足跡の設定は残す** —
+    /// 「ブレークを消したら時計まで止まった」では驚く
     pub fn clear(&mut self) {
-        let cap = self.trace_cap;
-        let instr = self.instr;
+        let (cap, instr, count) = (self.trace_cap, self.instr, self.count);
         *self = Self::new();
         self.trace_cap = cap;
         self.instr = instr;
+        self.count = count;
         self.refresh();
     }
 

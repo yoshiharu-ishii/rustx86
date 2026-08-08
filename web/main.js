@@ -11,6 +11,7 @@
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
+import { Debugger } from './debugger.js?v=4';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -93,6 +94,7 @@ function syncControls() {
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
+  $('debug').disabled = !on;
   $('snapfile').disabled = !on;
   $('restore').disabled = !on || !localStorage.getItem(SNAP_KEY);
 }
@@ -115,6 +117,12 @@ function boot(image, label) {
     term.sample(cells, row, col);
     if (redraw) term.draw();
     advanceScript();
+  };
+  // デバッガが止めたら、理由を子ウインドウへ。**開いていなくても状態表示は出す**
+  machine.onDebugStop = (why) => {
+    dbg.onStop(why);
+    setStatus(`デバッガが止めた: ${why}`);
+    syncControls();
   };
   // 物理キーはそのまま、貼り付けはASCIIとして送る
   term.onKey = (code, down) => machine.key(code, down);
@@ -160,6 +168,23 @@ layoutSel.addEventListener('change', () => {
 });
 
 // --- 操作 ---
+
+// --- デバッガの子ウインドウ ---
+//
+// Emulator は再起動のたびに作り直されるので、**参照を握らせず毎回聞かせる**。
+// 握らせると再起動後に古い機械を覗き続けることになる
+const dbg = new Debugger({
+  emu: () => machine?.emu ?? null,
+  isPaused: () => machine?.paused ?? true,
+  setPaused: (v) => {
+    if (!machine) return;
+    if (v) machine.stop();
+    else machine.start();
+    syncControls();
+  },
+});
+
+$('debug').addEventListener('click', () => dbg.show());
 
 $('pause').addEventListener('click', () => {
   if (!machine) return;
