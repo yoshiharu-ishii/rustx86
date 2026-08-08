@@ -48,12 +48,10 @@ GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/
 #
 #   ELIZA   ✅ 80x25 のテキストだけで動く
 #   ROW4T   ✅ 同上 (罫線はコードページ437)
-#   ZMIY    ⚠️  80x50 を前提に描く。VGAの50行テキストが要る (下半分が画面外)
-#   HANGMAN ⚠️  CGAグラフィックス (モード0x04) を要求する (何も出ない)
-#
-# ZMIY は `INT 10h AH=1A` で表示装置を尋ねてくるので非VGAと答えているが、
-# それでも50行で描く。**1本のアプリのためにBIOSの細部を追い続けるのが
-# 「底が無い」側の仕事**なので、ここで止めてある (ADR-0004)。
+#   ZMIY    ✅ 50行の盤面を描き、見える25行の窓をCRTCで蛇に追従させる
+#             (ハードウェアスクロール)。**これが動かず追いかけた結果、
+#             こちらが CRTC の表示開始位置を無視していたのが見つかった**
+#   HANGMAN ⚠️  CGAグラフィックス (モード0x04) を要求する。Tier 6 まで動かない
 GAMES=(
   "eliza:GAMES/ELIZA/ELIZA.EXE:GAMES/ELIZA/RESPONSE.DAT"
   "zmiy:GAMES/ZMIY/ZMIY.EXE"

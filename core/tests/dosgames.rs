@@ -86,26 +86,53 @@ fn eliza_answers_back() {
     );
 }
 
-/// スネーク。**80x50 を前提に描くので下半分が画面外に出る。**
+/// **スネーク。ハードウェアスクロールで遊ぶ。**
 ///
-/// `INT 10h AH=1A` で表示装置を尋ねてきたので非VGAと答えているが、それでも
-/// 50行で描いてくる。テキストVRAMの窓は32KBあるので書き込み自体は通り、
-/// 25行を超えた分がどこにも映らない。**VGAの50行テキストは Tier 6**。
+/// zmiy は 50行の盤面を常にVRAMへ描き、**見える25行の窓をCRTCの開始位置で
+/// 蛇に追従させる**。ソースにそのまま書いてある:
 ///
-/// ここで確かめるのは「動くこと」ではなく、**上半分がちゃんと描けていること**である
+/// ```c
+/// if (game->screenheight < 50) {
+///     int newscrolloff = game->snakeposy[0] - 12;
+///     scrollscreen((newscrolloff << 6) + (newscrolloff << 4));
+/// }
+/// ```
+///
+/// これが動くには、描く側がCRTCの開始位置を見ている必要がある。
+/// **見ていなかったので、画面の下が永久に出てこなかった。**
 #[test]
-fn zmiy_draws_its_playfield() {
+fn zmiy_scrolls_the_window_with_the_snake() {
     let Some(mut m) = dos_prompt() else {
         eprintln!("images/fd14games.img が無いのでスキップ");
         return;
     };
     type_slowly(&mut m, "zmiy\n");
-    assert!(
-        run_until(&mut m, "SCORE:", 300_000_000),
-        "状態表示が出ない:\n{}",
-        m.text_screen_string()
+    assert!(run_until(&mut m, "SCORE:", 300_000_000), "起動しない");
+    assert_eq!(
+        m.devices.crtc.start_offset(),
+        0,
+        "蛇が上端付近にいる間は窓を動かさないはず"
     );
-    assert!(m.text_screen_string().contains("LEVEL:"));
+
+    // 下へ走らせると窓が追いかけてくる
+    let mut seen = vec![];
+    for _ in 0..12 {
+        m.devices.keyboard.key("ArrowDown", true);
+        m.devices.keyboard.key("ArrowDown", false);
+        for _ in 0..40_000_000 {
+            m.step();
+        }
+        seen.push(m.devices.crtc.start_offset());
+    }
+    let max = *seen.iter().max().unwrap();
+    assert!(max > 0, "窓が一度も動いていない: {seen:?}");
+    // 上限は 25行ぶん = 2000文字 (盤面50行 - 画面25行)。ソースの
+    // `if (newscrolloff > 25) newscrolloff = 25;` と一致する
+    assert_eq!(max, 2000, "窓の下限が合わない: {seen:?}");
+    assert!(
+        seen.windows(2).any(|w| w[1] > w[0]),
+        "窓が段階的に動いていない: {seen:?}"
+    );
 }
 
 /// 四目並べ。罫線とメニューがコードページ437で描かれる
