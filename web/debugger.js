@@ -97,19 +97,19 @@ const HTML = `
 
   <section>
     <h2>Registers</h2>
-    <p class="note">Orange = changed since the last update.</p>
+    <p class="note">オレンジは前回から変わったところ。</p>
     <table id="rxRegs"></table>
   </section>
 
   <section>
     <h2>Next instruction</h2>
-    <p class="note">CS:IP and the raw bytes about to run. No disassembler yet.</p>
+    <p class="note">CS:IP と、これから実行するバイト列。逆アセンブラはまだ無い。</p>
     <pre id="rxHere"></pre>
   </section>
 
   <section>
     <h2>Watchpoints</h2>
-    <p class="note">Stop the machine and report <em>which instruction</em> did it.</p>
+    <p class="note">機械を止めて、<strong>どの命令がやったか</strong>まで言う。</p>
     <div class="row">
       <input id="rxBp" placeholder="0x7c00 or 07c0:0000">
       <button id="rxAddBp">Break on execute</button>
@@ -122,17 +122,17 @@ const HTML = `
       <button id="rxClr">Clear all</button>
     </div>
     <p class="list" id="rxWatches"></p>
-    <p class="note">Worth watching: <code>0x450</code> cursor position /
-      <code>0x417</code> shift flags / <code>0x41a</code> keyboard queue /
-      port <code>0x3d5</code> CRTC (hardware scrolling)</p>
+    <p class="note">見どころ: <code>0x450</code> カーソル位置 /
+      <code>0x417</code> 修飾キー / <code>0x41a</code> キー待ち行列 /
+      ポート <code>0x3d5</code> CRTC (ハードウェアスクロール)</p>
   </section>
 
   <section>
     <h2>Execution history</h2>
-    <p class="note">The last N instructions actually executed &mdash; use it when the
-      crash site is not the crime scene. Off by default; it costs to record.
-      <strong>Nothing is added while the CPU is halted</strong>, so a gap between the
-      instruction count and the last entry means the machine was idle.</p>
+    <p class="note">実際に実行した直近N命令。<strong>倒れた場所は犯行現場ではない</strong>
+      ときに使う。費用がかかるので既定では残さない。
+      <strong>HLTの間は伸びない</strong>ので、命令数と最後の1行が離れていたら
+      その間ずっとアイドルしていたということ。</p>
     <div class="row">
       <button id="rxRec">Start recording</button>
       <button id="rxShowT">Show</button>
@@ -142,9 +142,9 @@ const HTML = `
 
   <section class="grow">
     <h2>Memory</h2>
-    <p class="note">Starts at <code>0x400</code>, the BIOS Data Area &mdash; 256 bytes
-      that hold the keyboard queue, the shift flags, the cursor and the video mode.
-      In real mode it is the single most informative page of memory there is.</p>
+    <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
+      キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
+      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
     <div class="row">
       <input id="rxMa" value="0x400">
       <input id="rxMl" value="256" style="width:5em">
@@ -292,7 +292,7 @@ export class Debugger {
     this.$('rxMl').oninput = () => this.dump();
     this.$('rxRec').onclick = () => {
       emu()?.record_trace(256);
-      this.$('rxTrace').textContent = 'Recording the last 256 instructions…';
+      this.$('rxTrace').textContent = '直近256命令を残し始めた';
     };
     this.$('rxShowT').onclick = () => this.showTrace();
   }
@@ -396,7 +396,7 @@ export class Debugger {
     if (!emu) return;
     const t = JSON.parse(emu.trace_json());
     if (!t.length) {
-      this.$('rxTrace').textContent = 'Nothing recorded. Press "Start recording", then run.';
+      this.$('rxTrace').textContent = 'まだ何も残していない。Start recording を押してから走らせる';
       return;
     }
     this.$('rxTrace').textContent = t

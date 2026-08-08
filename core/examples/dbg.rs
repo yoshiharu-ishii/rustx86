@@ -354,28 +354,28 @@ fn addr(s: &str) -> Option<u32> {
 fn help() {
     println!(
         "\
-watch
-  b <addr>         break before executing that address (0x7c00 or 07c0:0000)
-  w <addr>         break when that byte is written
-  wi <port> [rw]   break on I/O (default: writes only)
-  d                clear every watchpoint
-  info             registers and the watch list
+watch — 止めて、どの命令がやったかまで言う
+  b <addr>         その番地を実行する直前で止める (0x7c00 でも 07c0:0000 でも)
+  w <addr>         その番地に書き込んだら止める
+  wi <port> [rw]   I/Oで止める (既定は書き込みのみ)
+  d                見張りを全部外す
+  info             レジスタと見張りの一覧
 
 run
-  c [count]        continue (stops after 1e9 instructions and says how far it got)
-  si [n]           step n instructions (default 1)
-  until <text>     run until the text appears on screen
-  goto <count>     REWIND to that instruction (replays from the start)
+  c [count]        続行 (既定10億命令で打ち切り、走った数を必ず言う)
+  si [n]           n命令だけ進む (既定1)
+  until <text>     画面にその文字が出るまで走らせる
+  goto <count>     その命令数まで巻き戻す (最初から流し直す)
 
 look
-  r                where we are now
-  x <addr> [len]   hex dump
-  screen           the guest screen
-  record [n]       start recording executed instructions
-  t [n]            show the recording
+  r                いまの位置
+  x <addr> [len]   メモリを16進で (既定 0x400 = BIOSデータエリア)
+  screen           ゲストの画面
+  record [n]       実行した命令を残し始める
+  t [n]            残したものを見る
 
 save
-  save / load      snapshot
-  q                quit"
+  save / load      スナップショット
+  q                終了"
     );
 }
