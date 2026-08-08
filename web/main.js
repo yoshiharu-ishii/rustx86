@@ -11,7 +11,7 @@
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
-import { Debugger } from './debugger.js?v=9';
+import { Debugger } from './debugger.js?v=13';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });

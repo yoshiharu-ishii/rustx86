@@ -6,7 +6,8 @@
 // ここはエミュレータ本体とは独立した計測ツールとして置いている。
 // 任意のブートセクタを、HLTまで or 命令数固定で流せる。
 
-import init, { Emulator } from './pkg/rustx86_wasm.js?v=6';
+import init, { Emulator } from './pkg/rustx86_wasm.js?v=10';
+import { Debugger, SlicedRunner } from './debugger.js?v=13';
 
 const $ = id => document.getElementById(id);
 const $status = $('status');
@@ -123,6 +124,13 @@ function addRow(i, r, isWarmup) {
 
 async function runBench() {
   $run.disabled = true;
+  // **デバッグ用の機械を止める。**
+  //
+  // 裏で刻み続けたまま計測すると、同じコアを取り合って数字が下がる。
+  // 「タブが非表示だと半分になる」のと同じ種類の汚染で、しかも
+  // 自分で作った汚染なので気づきにくい
+  const wasRunning = runner ? !runner.paused : false;
+  runner?.stop();
   $tbody.replaceChildren();
   $results.hidden = true;
   $summary.textContent = '';
@@ -202,9 +210,42 @@ async function runBench() {
     $summary.className = 'note warn';
   } finally {
     $run.disabled = false;
+    if (wasRunning) runner?.start();
   }
 }
 
 await init();
 $status.textContent = '準備完了。ボタンを押すと計測を始めます。';
 $run.addEventListener('click', runBench);
+
+
+// --- デバッガ ---
+//
+// **計測に使う機械とは別に立てる。** 計測は `emu.run()` を一息に呼ぶ経路で、
+// そこへブレークポイントを混ぜると測っているものが変わってしまう。
+// ここで見るのは「同じワークロードが何をしているか」であって、速度ではない。
+
+/** デバッグ用の機械と、その実行ループ。押されるまで作らない */
+let dbgEmu = null;
+let runner = null;
+
+const dbg = new Debugger({
+  emu: () => dbgEmu,
+  isPaused: () => runner?.paused ?? true,
+  setPaused: (v) => (v ? runner?.stop() : runner?.start()),
+});
+
+$('debug').addEventListener('click', async () => {
+  if (!dbgEmu) {
+    const sector = await selectedSector();
+    dbgEmu = sector === null ? Emulator.bench() : new Emulator(sector);
+    runner = new SlicedRunner(dbgEmu, { onStop: (why) => dbg.onStop(why) });
+    runner.start();
+    // 動作確認用の窓口。手元で開いているときだけ出す (main.js と同じ扱い)
+    if (['localhost', '127.0.0.1'].includes(location.hostname)) {
+      window.__dbgEmu = dbgEmu;
+      window.__dbgRunner = runner;
+    }
+  }
+  dbg.show();
+});

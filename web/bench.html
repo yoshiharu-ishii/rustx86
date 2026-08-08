@@ -73,6 +73,10 @@
   </fieldset>
 
   <button id="run">計測する</button>
+  <button id="debug">デバッガ</button>
+  <p class="note">デバッガは<strong>計測とは別の機械</strong>を立てて刻みながら走らせる。
+    刻めば計測にならないので、混ぜない。同じワークロード
+    (<code>asm/bench.asm</code>) が何をしているかを覗くためのもの。</p>
   <p id="status">読み込み中…</p>
 
   <table id="results" hidden>

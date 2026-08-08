@@ -155,6 +155,61 @@ const HTML = `
   </section>
 `;
 
+/**
+ * 1フレームぶんずつ走らせる小さな実行ループ。
+ *
+ * **デバッガを載せたいページが、実行ループを自前で書かなくて済むように**
+ * ここに置く。`main.js` の Machine は自前の (画面描画と絡んだ) ループを
+ * 既に持っているので使わない。ベンチのように「計測のときは一息に走らせ、
+ * デバッグのときだけ刻む」ページ向けである。
+ *
+ * 刻むこと自体は計測を歪めるので、**計測経路では使わない**。
+ */
+export class SlicedRunner {
+  constructor(emu, { chunk = 200_000, perFrame = 2_000_000, onStop } = {}) {
+    this.emu = emu;
+    this.chunk = chunk;
+    this.perFrame = perFrame;
+    this.onStop = onStop;
+    this.running = false;
+  }
+
+  get paused() {
+    return !this.running;
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this.#schedule();
+  }
+
+  stop() {
+    this.running = false;
+  }
+
+  // タブが裏に回ると requestAnimationFrame は発火しない。
+  // machine.js と同じ理由でタイマに落とす
+  #schedule() {
+    if (document.hidden) setTimeout(() => this.#frame(), 16);
+    else requestAnimationFrame(() => this.#frame());
+  }
+
+  #frame() {
+    if (!this.running) return;
+    for (let done = 0; done < this.perFrame; done += this.chunk) {
+      this.emu.run_slice(this.chunk);
+      if (this.emu.is_stopped()) {
+        this.running = false;
+        this.onStop?.(this.emu.take_stop());
+        return;
+      }
+      if (this.emu.halted()) break;
+    }
+    this.#schedule();
+  }
+}
+
 const R16 = ['AX', 'CX', 'DX', 'BX', 'SP', 'BP', 'SI', 'DI'];
 const SR = ['ES', 'CS', 'SS', 'DS', 'FS', 'GS'];
 
@@ -341,7 +396,7 @@ export class Debugger {
     rows.push(
       `<tr>${cell('IP', hex16(c.ip))}${cell('FL', hex16(c.flags))}</tr>`,
       `<tr><td class="k">flags</td><td class="v" colspan="3">${c.flagNames || '—'}</td></tr>`,
-      `<tr><td class="k">instrs</td><td class="v" colspan="3">${c.instr.toLocaleString()}</td></tr>`,
+      `<tr><td class="k">instrs</td><td class="v" colspan="3">${fmtInstr(c.instr)}</td></tr>`,
     );
     this.$('rxRegs').innerHTML = rows.join('');
 
@@ -404,6 +459,24 @@ export class Debugger {
       .map((s) => `${String(s.i).padStart(12)}: ${hex16(s.cs)}:${hex16(s.ip)}  ${s.b}`)
       .join('\n');
   }
+}
+
+/**
+ * 命令数の見せ方。
+ *
+ * 走らせている間は1フレームぶん (固定命令数) ずつしか進まないので、
+ * **下の桁は常にゼロ**で、桁を全部出しても読めないだけである。だから
+ * まず大きさを出す。
+ *
+ * ただし正確な桁を捨ててはいけない。この数は
+ * **`goto` で巻き戻すときの座標**であり、`Step 1` では1ずつ動く。
+ * 丸めた数を打ち直しても、そこへは戻れない。だから両方出す。
+ */
+function fmtInstr(n) {
+  if (n < 1e6) return n.toLocaleString();
+  const [v, u] = n >= 1e9 ? [n / 1e9, 'G'] : [n / 1e6, 'M'];
+  return `<strong>${v.toFixed(2)} ${u}</strong>` +
+    `<span class="k" style="margin-left:.6em">${n.toLocaleString()}</span>`;
 }
 
 const hex16 = (v) => (v >>> 0).toString(16).padStart(4, '0');
