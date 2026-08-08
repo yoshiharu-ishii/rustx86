@@ -13,10 +13,27 @@ use rustx86_core::Machine;
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: boot <disk.img>");
+    // 命令数の上限。**使う人が当てる数字ではなく、暴走を止める番人**である。
+    //
+    // 以前は既定 5000万で、FreeDOSを動かすには9億と手で渡す必要があった。
+    // その9億に根拠は無く、試して決めた当てずっぽうだった。**道具の側がファジー**で、
+    // 足りないと「合図が出ないまま打ち切り」になり、エミュレータのバグと
+    // 見分けがつかない。
+    //
+    // 本当に止まったかどうかは [`stuck`] が判定できるので、上限は
+    // 「何かの拍子に無限に回り続けるのを防ぐ」ためだけに置けばよい。
+    // 既定を十分大きく取り、代わりに**実際に何命令かかったかを毎回表示する**。
+    // そうすれば当てずっぽうの数字が測った数字に変わる。
+    const DEFAULT_MAX: u64 = 5_000_000_000;
+    /// 最後の手順の後、画面が**これ以上書き換わらなくなった**と見なすまでの命令数。
+    /// 待つ合図が無いのはここだけなので、時間ではなく**画面の静けさ**で打ち切る
+    const QUIET: u64 = 5_000_000;
+    /// それでも止まらないとき (時計で描き変わり続けるゲームなど) の上限
+    const SETTLE_MAX: u64 = 250_000_000;
     let max: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(50_000_000);
+        .unwrap_or(DEFAULT_MAX);
 
     let image = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut m = Machine::new();
@@ -41,20 +58,22 @@ fn main() {
             && !m.devices.keyboard.has_data()
     }
 
-    fn run_until<'a>(m: &mut Machine, needle: &str, budget: u64) -> bool {
-        for _ in 0..budget {
+    /// 画面に `needle` が出るまで走らせ、**かかった命令数**を返す。
+    /// 出ないまま上限に達したか本当に止まったら `None`
+    fn run_until<'a>(m: &mut Machine, needle: &str, budget: u64) -> Option<u64> {
+        for i in 0..budget {
             if stuck(m) {
-                break;
+                return None;
             }
             m.step();
             // 画面を毎命令組み立ててはいけない。1命令ごとに80x25文字のStringを
             // 作ることになり、起動が数百倍遅くなる (実際にやって390秒かかった)。
             // Tier 2a で入れた dirty フラグで、**書き換わったときだけ**見る
             if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
-                return true;
+                return Some(i + 1);
             }
         }
-        false
+        None
     }
 
     // 引数は **「この文字列が出たら」「これを打つ」の対**。
@@ -80,12 +99,21 @@ fn main() {
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut n = 0u64;
-        for (wait_for, send) in &script {
-            if !run_until(&mut m, wait_for, max) {
-                eprintln!("[{wait_for:?} が出ないまま打ち切り]");
+        for (i, (wait_for, send)) in script.iter().enumerate() {
+            let Some(cost) = run_until(&mut m, wait_for, max) else {
+                // **止まったのか、上限が足りなかったのかを言い分ける。**
+                // 混ぜると「エミュレータのバグ」に見えてしまう
+                if stuck(&m) {
+                    eprintln!("[{wait_for:?} を待っている間に機械が止まった]");
+                } else {
+                    eprintln!(
+                        "[{wait_for:?} が {max} 命令では出なかった。                         第2引数で上限を増やせる]"
+                    );
+                }
                 return n;
-            }
-            eprintln!("[{wait_for:?} を検出 → {send:?} を入力]");
+            };
+            n += cost;
+            eprintln!("[{wait_for:?} を検出 ({cost} 命令) → {send:?} を入力]");
             // `sc:3f,bf` の形なら**生のスキャンコードを流す**。
             // ファンクションキーのように文字を持たないキーを送るための口で、
             // DOSの F5 (CONFIG/AUTOEXEC を飛ばす) を打つのに要る
@@ -113,13 +141,25 @@ fn main() {
                     }
                 }
             }
-            // 打った内容が処理されるまで回す
-            for _ in 0..250_000_000 {
-                if stuck(&m) {
-                    break;
+            // **打った後に固定で回さない。**
+            //
+            // 以前はここで2.5億命令ぶん回していたが、これも当てずっぽうの数字だった。
+            // しかも実際の仕事がここで終わってしまい、次の `run_until` が
+            // 「1命令で検出」と報告するので、**どこに時間がかかっているかが
+            // 見えなくなっていた**。待つのは次の合図に任せる。
+            //
+            // 最後の手順の後だけは待つ相手が居ないので、画面が落ち着くまで回す
+            if i + 1 == script.len() {
+                let mut quiet = 0u64;
+                for _ in 0..SETTLE_MAX {
+                    if stuck(&m) || quiet >= QUIET {
+                        break;
+                    }
+                    m.step();
+                    n += 1;
+                    // 書き換わったら数え直す。止まったら静けさが積み上がる
+                    quiet = if m.take_vram_dirty() { 0 } else { quiet + 1 };
                 }
-                m.step();
-                n += 1;
             }
         }
         n
