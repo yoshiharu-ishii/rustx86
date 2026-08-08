@@ -55,6 +55,12 @@ pub struct Machine {
     pub unhandled_io: std::collections::BTreeSet<u16>,
     /// テキストVRAMに書き込みがあったか。描画側が読んだら下ろす
     pub vram_dirty: bool,
+    /// `0x66` (オペランドサイズ) を付けて実行されたオペコード。
+    ///
+    /// **幅対応を忘れた命令は静かに壊れる。** 即値や退避の長さが変わるので、
+    /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
+    /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
+    pub prefixed_ops: std::collections::BTreeSet<u8>,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -89,6 +95,7 @@ impl Machine {
             devices: Devices::new(),
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
+            prefixed_ops: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
@@ -185,6 +192,15 @@ impl Machine {
 
     pub fn read16(&self, addr: u32) -> u16 {
         self.read8(addr) as u16 | (self.read8(addr.wrapping_add(1)) as u16) << 8
+    }
+
+    pub fn read32(&self, addr: u32) -> u32 {
+        self.read16(addr) as u32 | (self.read16(addr.wrapping_add(2)) as u32) << 16
+    }
+
+    pub fn write32(&mut self, addr: u32, val: u32) {
+        self.write16(addr, val as u16);
+        self.write16(addr.wrapping_add(2), (val >> 16) as u16);
     }
 
     pub fn write16(&mut self, addr: u32, val: u16) {
