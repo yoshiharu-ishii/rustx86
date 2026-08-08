@@ -325,6 +325,10 @@ cargo install wasm-pack                    # JSとの繋ぎを自動生成する
 ```
 
 `core` は**外部クレートに依存していない**ので、`cargo test` はこれだけで通る。
+
+**何が起きているかまで知りたいときは [ビルドの最小構成](docs/build.md) を参照。**
+`--target web` を選んだ理由、wasm-pack が生成するもの、wasm特有の落とし穴
+(メモリが伸びるとJSのビューが死ぬ / panicの中身が消える) を書いてある。
 NASM は `asm/*.asm` を書き換えるときだけ要る (`.bin` はコミット済み)。
 
 Unicorn との突き合わせ (`cosim`) はビルドに数分かかるため、
