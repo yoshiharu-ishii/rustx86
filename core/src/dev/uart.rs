@@ -129,3 +129,29 @@ impl Uart16550 {
         String::from_utf8_lossy(&self.tx).into_owned()
     }
 }
+
+impl Uart16550 {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u16(self.divisor);
+        w.u8(self.ier);
+        w.u8(self.lcr);
+        w.u8(self.mcr);
+        w.u8(self.fcr);
+        w.bool(self.irq_pending);
+        // 送信済みの内容は状態ではなく履歴なので保存しない。
+        // 受信待ちの列は「まだ読まれていない入力」なので状態である
+        let rx: Vec<u8> = self.rx.iter().copied().collect();
+        w.bytes(&rx);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.divisor = r.u16()?;
+        self.ier = r.u8()?;
+        self.lcr = r.u8()?;
+        self.mcr = r.u8()?;
+        self.fcr = r.u8()?;
+        self.irq_pending = r.bool()?;
+        self.rx = r.bytes()?.into();
+        Ok(())
+    }
+}

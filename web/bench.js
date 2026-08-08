@@ -6,7 +6,7 @@
 // ここはエミュレータ本体とは独立した計測ツールとして置いている。
 // 任意のブートセクタを、HLTまで or 命令数固定で流せる。
 
-import init, { Emulator } from './pkg/rustx86_wasm.js';
+import init, { Emulator } from './pkg/rustx86_wasm.js?v=6';
 
 const $ = id => document.getElementById(id);
 const $status = $('status');

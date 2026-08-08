@@ -1,23 +1,17 @@
+pub mod bios;
 pub mod bus;
 pub mod cpu;
 pub mod dev;
+pub mod snapshot;
 pub mod disk;
 
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
+pub use bios::BIOS_SEG;
 pub use cpu::Cpu;
 pub use disk::Disk;
 
 pub const MEM_SIZE: usize = 1 << 20; // リアルモード 1MB
 
-/// BIOS HLE の入口として予約したセグメント。
-///
-/// 起動時にIVTの全256エントリを `BIOS_SEG:n` で埋める。実行がここへ来たら
-/// バイト列を解釈せずホスト側の関数で肩代わりし、`IRET` で戻る。
-///
-/// この形にしているのは、**OSがIVTを書き換えた瞬間に自然とHLEが外れる**ため。
-/// OSが自分のハンドラを登録したベクタはもう `BIOS_SEG` を指していないので、
-/// 何の分岐も足さずに乗っ取りが成立する。実機のBIOSとOSの関係そのものである。
-pub const BIOS_SEG: u16 = 0xF000;
 
 /// 何命令ごとに装置を進めるか。
 ///
@@ -69,6 +63,10 @@ pub struct Machine {
     pub console: Vec<u8>,
     /// ブートしたディスク。INT 13h のHLEが読む
     pub disk: Option<Disk>,
+    /// BIOS が覚えているShiftの状態 (INT 16h の変換に使う)
+    pub(crate) kbd_shift: bool,
+    /// INT 16h AH=01 で覗いたが、まだ取られていないキー
+    pub(crate) kbd_peeked: Option<u16>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
     pub first_fault: Option<(u8, u16, u16)>,
@@ -93,6 +91,8 @@ impl Machine {
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
+            kbd_shift: false,
+            kbd_peeked: None,
             first_fault: None,
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],
@@ -109,78 +109,15 @@ impl Machine {
         if sector[510] != 0x55 || sector[511] != 0xAA {
             return Err("missing boot signature 0x55AA".into());
         }
-        self.install_bios_vectors();
-        self.install_bios_data_area();
-        self.install_pic_defaults();
+        self.power_on_self_test();
         self.mem[0x7C00..0x7E00].copy_from_slice(sector);
         self.cpu.set_cs_ip(0x0000, 0x7C00);
         self.cpu.regs[cpu::DX] = 0x0080; // DL = ブートドライブ番号
         Ok(())
     }
 
-    /// IVTの全256エントリを BIOS HLE の入口で埋める。実BIOSが起動時にやることと同じ。
-    ///
-    /// OSはこの上から自分のハンドラを書き込んで割り込みを乗っ取る。
-    /// DOSが「BIOSのINT 13hをフックして自分の処理を挟んでから元へ流す」
-    /// というチェーンを作れるのも、ここが単なるメモリだからである。
-    fn install_bios_vectors(&mut self) {
-        for n in 0..256u32 {
-            self.write16(n * 4, n as u16); // オフセット = ベクタ番号
-            self.write16(n * 4 + 2, BIOS_SEG);
-        }
-    }
 
-    /// BIOSデータエリア (0x400-0x4FF) を作る。
-    ///
-    /// 実BIOSが起動時に埋める「マシンの仕様書」で、**OSはここを読んで
-    /// 画面の大きさやポート番号を知る**。IVTと同じく単なるメモリなので、
-    /// 我々も同じ場所に同じ形で置けばOSからは区別がつかない。
-    ///
-    /// ここが空だとELKSのコンソールドライバが桁数0の画面に書こうとして
-    /// 何も出なくなる (実際にそれで詰まった)。
-    fn install_bios_data_area(&mut self) {
-        self.write16(0x400, 0x3F8); // COM1 のポート番号
-        self.write16(0x408, 0x378); // LPT1
-        // 装置構成: フロッピー1台 + 80x25カラー + シリアル1本
-        self.write16(0x410, 0x0021 | (1 << 9));
-        self.write16(0x413, 640); // コンベンショナルメモリ (KB)
-        self.write8(0x449, 0x03); // ビデオモード 3 = 80x25 カラーテキスト
-        self.write16(0x44A, 80); // 桁数
-        self.write16(0x44C, 0x1000); // 1ページのバイト数
-        self.write16(0x44E, 0x0000); // 表示中ページの先頭オフセット
-        for page in 0..8u32 {
-            self.write16(0x450 + page * 2, 0); // 各ページのカーソル位置
-        }
-        self.write16(0x460, 0x0607); // カーソルの形
-        self.write8(0x462, 0); // 表示中のページ番号
-        self.write16(0x463, 0x3D4); // CRTC のポート番号 (カラー)
-        self.write8(0x475, 0); // ハードディスクの台数
-        self.write8(0x484, 24); // 行数 - 1
-    }
 
-    /// PICを実BIOSと同じ配置で初期化する。
-    ///
-    /// **これを忘れると悲惨なことになる。** ICW2で決めるベクタのベースが0のままだと、
-    /// タイマのIRQ0が「ベクタ0 = ゼロ除算例外」として配送される。OSから見れば
-    /// 突然デタラメな場所でゼロ除算が起きたことになり、`panic: DIVIDE FAULT` で死ぬ。
-    /// 実際にELKSがこれで落ちた。
-    ///
-    /// OSはBIOSが初期化済みであることを前提に、マスクを緩めるだけのことが多い。
-    /// マスタをベクタ 0x08-0x0F、スレーブを 0x70-0x77 に置くのがPC/ATの決まりである。
-    ///
-    /// なお 0x08 はプロテクトモードではCPUの例外番号 (#DF) と衝突する。
-    /// Linuxが起動時にわざわざ 0x20 へ付け替えるのはこのためで、
-    /// この衝突は Tier 4 でもう一度顔を出す。
-    fn install_pic_defaults(&mut self) {
-        for (i, base, icw3) in [(0usize, 0x08u8, 0x04u8), (1, 0x70, 0x02)] {
-            let p = &mut self.devices.pic[i];
-            p.write_command(0x11); // ICW1: 初期化開始 + ICW4あり
-            p.write_data(base); // ICW2: ベクタのベース
-            p.write_data(icw3); // ICW3: カスケードの結線
-            p.write_data(0x01); // ICW4: 8086モード
-            p.write_data(0xFF); // 全マスク。OSが必要な線だけ開ける
-        }
-    }
 
     /// ハードウェア割り込みベクタを直接立てる (PICを介さない経路。テスト用)
     pub fn raise_irq(&mut self, vector: u8) {
@@ -214,9 +151,7 @@ impl Machine {
         let d = Disk::from_image(image)?;
         let boot = d.read_sector(0).ok_or("ブートセクタが読めない")?.to_vec();
         self.disk = Some(d);
-        self.install_bios_vectors();
-        self.install_bios_data_area();
-        self.install_pic_defaults();
+        self.power_on_self_test();
         self.mem[0x7C00..0x7E00].copy_from_slice(&boot);
         self.cpu.set_cs_ip(0x0000, 0x7C00);
         self.cpu.regs[cpu::DX] = 0x0000; // DL = 0 (フロッピーA)
@@ -348,6 +283,113 @@ impl Machine {
         &self.mem[b..b + bus::TEXT_LEN]
     }
 
+    /// 機械の状態をまるごと書き出す。
+    ///
+    /// **CPUだけでは足りない。** PICのマスクが失われれば以後の割り込みが
+    /// 来なくなり、PITのカウンタが戻れば時計が飛ぶ。装置もメモリも
+    /// ディスクも含めて初めて「あの瞬間から再開」ができる。
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut w = snapshot::Writer::new();
+        snapshot::write_header(&mut w);
+
+        // CPU
+        for r in self.cpu.regs {
+            w.u32(r);
+        }
+        for s in self.cpu.sregs {
+            w.u16(s);
+        }
+        w.u16(self.cpu.ip);
+        w.u32(self.cpu.flags);
+
+        // 機械の進行状態
+        w.bool(self.halted);
+        w.opt_u8(self.pending_irq);
+
+        // 装置
+        for p in &self.devices.pic {
+            p.save(&mut w);
+        }
+        self.devices.pit.save(&mut w);
+        self.devices.uart.save(&mut w);
+        self.devices.keyboard.save(&mut w);
+        self.devices.cmos.save(&mut w);
+        self.devices.crtc.save(&mut w);
+
+        // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
+        w.rle(&self.mem);
+        match &self.disk {
+            Some(d) => {
+                w.bool(true);
+                w.rle(&d.data);
+            }
+            None => w.bool(false),
+        }
+        w.buf
+    }
+
+    /// 書き出した状態へ戻す。
+    ///
+    /// 途中で失敗すると**半端に書き換わった機械**が残るので、
+    /// まず新しい機械の上に組み立ててから丸ごと差し替える
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut m = Machine::new();
+        let mut r = snapshot::Reader::new(data);
+        snapshot::read_header(&mut r)?;
+
+        for i in 0..8 {
+            m.cpu.regs[i] = r.u32()?;
+        }
+        for i in 0..6 {
+            m.cpu.sregs[i] = r.u16()?;
+        }
+        m.cpu.ip = r.u16()?;
+        m.cpu.flags = r.u32()?;
+
+        m.halted = r.bool()?;
+        m.pending_irq = r.opt_u8()?;
+
+        for i in 0..2 {
+            m.devices.pic[i].load(&mut r)?;
+        }
+        m.devices.pit.load(&mut r)?;
+        m.devices.uart.load(&mut r)?;
+        m.devices.keyboard.load(&mut r)?;
+        m.devices.cmos.load(&mut r)?;
+        m.devices.crtc.load(&mut r)?;
+
+        let mem = r.rle()?;
+        if mem.len() != MEM_SIZE {
+            return Err(format!("メモリの大きさが合わない ({} != {MEM_SIZE})", mem.len()));
+        }
+        m.mem = mem;
+        m.disk = if r.bool()? {
+            Some(Disk::from_image(r.rle()?)?)
+        } else {
+            None
+        };
+
+        *self = m;
+        Ok(())
+    }
+
+    /// BIOSサービスが返した成否をフラグとして呼び出し元へ届ける。
+    ///
+    /// **`IRET` はスタックに積まれたFLAGSで上書きしてしまう。** サービスが
+    /// `CF` や `ZF` を立てても、そのまま戻ると消える。実BIOSも同じ事情を
+    /// 抱えていて、**積まれている方のFLAGSを書き換えてから**戻る。
+    ///
+    /// x86のBIOSが慣例として「成否はキャリーフラグで返す」形なのに、
+    /// この一手間が要るのは面白いところである。
+    fn return_flags_to_caller(&mut self) {
+        // スタック: [SP]=IP [SP+2]=CS [SP+4]=FLAGS
+        let sp = self.cpu.regs[cpu::SP] as u16;
+        let addr = cpu::operand::linear(self.cpu.sregs[cpu::SS], sp.wrapping_add(4));
+        let stacked = self.read16(addr);
+        let keep = (cpu::CF | cpu::ZF) as u16;
+        self.write16(addr, (stacked & !keep) | (self.cpu.flags as u16 & keep));
+    }
+
     /// カーソルの位置 (行, 桁)。CRTCが持っている
     pub fn cursor_pos(&self) -> (usize, usize) {
         let off = self.devices.crtc.cursor_offset() as usize;
@@ -389,195 +431,9 @@ impl Machine {
         self.io_write8(port.wrapping_add(1), (val >> 8) as u8);
     }
 
-    /// BIOS HLE: 実BIOSは実装せず、必要なサービスだけホスト側の関数で肩代わりする。
-    ///
-    /// OSがIVTを書き換えたベクタはここへ来ない。**未実装のサービスは即panicする** —
-    /// 静かに間違った値を返すと、遥か後方で意味不明な暴走として現れるためである。
-    pub fn bios_interrupt(&mut self, n: u8) {
-        let ah = (self.cpu.regs[cpu::AX] >> 8) as u8;
-        match n {
-            // --- INT 10h: ビデオ ---
-            0x10 => match ah {
-                0x00 => {} // ビデオモード設定 (テキストのみなので何もしない)
-                0x01 | 0x02 | 0x03 => {} // カーソル形状・位置
-                0x0E => {
-                    // テレタイプ出力: AL
-                    let c = self.cpu.regs[cpu::AX] as u8;
-                    self.console.push(c);
-                }
-                0x0F => {
-                    // 現在のビデオモードを返す: AL=モード AH=桁数 BH=ページ
-                    self.cpu.regs[cpu::AX] = 80 << 8 | 0x03;
-                    self.cpu.regs[cpu::BX] &= 0x00FF;
-                }
-                _ => panic!("INT 10h AH={ah:#04x} 未実装"),
-            },
 
-            // --- INT 08h: タイマ割り込み (IRQ0) ---
-            // OSが自前のハンドラを入れるまではBIOSが受ける。実BIOSは
-            // BDAのティックカウンタを進め、INT 1Ch (利用者用フック) を呼び、
-            // PICにEOIを打つ。**EOIを忘れると以後の割り込みが二度と来なくなる**
-            0x08 => {
-                let ticks = self.read16(0x46C) as u32 | (self.read16(0x46E) as u32) << 16;
-                let next = ticks.wrapping_add(1);
-                self.write16(0x46C, next as u16);
-                self.write16(0x46E, (next >> 16) as u16);
-                self.devices.pic[0].write_command(0x20); // 非特定EOI
-            }
 
-            // --- INT 09h: キーボード割り込み (IRQ1) ---
-            0x09 => {
-                let _ = self.io_read8(0x60); // スキャンコードを捨てる
-                self.devices.pic[0].write_command(0x20);
-            }
 
-            // --- INT 0Ah-0Fh / 70h-77h: ハンドラ未登録のハードウェア割り込み ---
-            // 実BIOSも「EOIを打って帰るだけ」のスタブを置いている。
-            // ここで落とすと、装置が1つ挙手しただけでマシンが死ぬ
-            0x0A..=0x0F => self.devices.pic[0].write_command(0x20),
-            0x70..=0x77 => {
-                self.devices.pic[1].write_command(0x20);
-                self.devices.pic[0].write_command(0x20); // カスケード元にも必要
-            }
-
-            // --- INT 1Ch: 利用者用タイマフック。既定は何もしない ---
-            0x1C => {}
-
-            // --- INT 11h: 装置構成 ---
-            0x11 => self.cpu.regs[cpu::AX] = 0x0021, // フロッピー1台 + 80x25カラー
-
-            // --- INT 12h: コンベンショナルメモリの大きさ (KB) ---
-            // ELKSのブートセクタはこれを1命令目で呼び、返り値から自分の
-            // 移動先セグメントを計算する
-            0x12 => self.cpu.regs[cpu::AX] = 640,
-
-            // --- INT 13h: ディスク ---
-            0x13 => self.bios_disk(ah),
-
-            // --- INT 15h: システムサービス ---
-            0x15 => {
-                // 未対応の機能は「サポートしていない」と答える。
-                // OSは戻り値を見て別の手段へ回るので、ここで落としてはいけない
-                self.cpu.set_flag_cf(true);
-                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x8600;
-            }
-
-            // --- INT 16h: キーボード ---
-            0x16 => match ah {
-                0x00 | 0x10 => self.cpu.regs[cpu::AX] = 0, // 入力なし
-                0x01 | 0x11 => self.cpu.set_flag(cpu::ZF, true), // バッファ空
-                _ => panic!("INT 16h AH={ah:#04x} 未実装"),
-            },
-
-            // --- INT 1Ah: 時刻 ---
-            0x1A => match ah {
-                0x00 => {
-                    self.cpu.regs[cpu::CX] = 0;
-                    self.cpu.regs[cpu::DX] = 0;
-                    self.cpu.regs[cpu::AX] &= 0xFF00;
-                }
-                _ => panic!("INT 1Ah AH={ah:#04x} 未実装"),
-            },
-
-            _ => panic!(
-                "INT {n:#04x} AH={ah:#04x} 未実装 (CS:IP={:04x}:{:04x})",
-                self.cpu.sregs[cpu::CS],
-                self.cpu.ip
-            ),
-        }
-    }
-
-    /// INT 13h。ディスクイメージの該当セクタをメモリへ写す
-    fn bios_disk(&mut self, ah: u8) {
-        let Some(disk) = &self.disk else {
-            self.disk_error(0x80); // タイムアウト = ドライブ無し
-            return;
-        };
-        match ah {
-            // AH=00: リセット。何もせず成功
-            0x00 => self.disk_ok(0),
-            // AH=02: セクタ読み出し / AH=03: セクタ書き込み。
-            // CHSの解き方と転送先の求め方は同じで、向きだけが違う
-            0x02 | 0x03 => {
-                let ax = self.cpu.regs[cpu::AX];
-                let cx = self.cpu.regs[cpu::CX] as u16;
-                let dx = self.cpu.regs[cpu::DX] as u16;
-                let count = (ax & 0xFF) as usize;
-                // CHSの詰め方: CH=シリンダ下位8bit、CLのbit6-7がシリンダ上位2bit、
-                // CLのbit0-5がセクタ番号 (1始まり)。10bit分をひねって押し込んでいる
-                let cyl = (cx >> 8) | ((cx & 0xC0) << 2);
-                let sec = (cx & 0x3F) as u8;
-                let head = (dx >> 8) as u8;
-                let Some(lba) = disk.chs_to_lba(cyl, head, sec) else {
-                    self.disk_error(0x04); // セクタが見つからない
-                    return;
-                };
-                let addr =
-                    cpu::operand::linear(self.cpu.sregs[cpu::ES], self.cpu.regs[cpu::BX] as u16);
-                if ah == 0x02 {
-                    let mut buf = Vec::with_capacity(count * disk::SECTOR_SIZE);
-                    for i in 0..count {
-                        match disk.read_sector(lba + i) {
-                            Some(s) => buf.extend_from_slice(s),
-                            None => {
-                                self.disk_error(0x04);
-                                return;
-                            }
-                        }
-                    }
-                    for (i, b) in buf.iter().enumerate() {
-                        self.write8(addr.wrapping_add(i as u32), *b);
-                    }
-                } else {
-                    // 書き込みはイメージ上だけで、ファイルには反映しない。
-                    // ルートファイルシステムをマウントするだけでもOSは書きに来るので、
-                    // 応答しないと起動できない
-                    let mut buf = vec![0u8; count * disk::SECTOR_SIZE];
-                    for (i, b) in buf.iter_mut().enumerate() {
-                        *b = self.read8(addr.wrapping_add(i as u32));
-                    }
-                    let d = self.disk.as_mut().unwrap();
-                    for i in 0..count {
-                        let s = &buf[i * disk::SECTOR_SIZE..(i + 1) * disk::SECTOR_SIZE];
-                        if !d.write_sector(lba + i, s) {
-                            self.disk_error(0x04);
-                            return;
-                        }
-                    }
-                }
-                self.disk_ok(count as u8);
-            }
-            // AH=08: ドライブの形状を返す
-            0x08 => {
-                let (c, h, s) = (disk.cylinders, disk.heads, disk.sectors);
-                self.cpu.regs[cpu::CX] =
-                    ((((c - 1) & 0xFF) << 8) | (((c - 1) >> 2) & 0xC0) | s as u16) as u32;
-                self.cpu.regs[cpu::DX] = (((h - 1) as u32) << 8) | 1; // DL = ドライブ台数
-                self.cpu.regs[cpu::BX] = (self.cpu.regs[cpu::BX] & 0xFF00) | 0x04; // 1.44MB
-                self.disk_ok(0);
-            }
-            // AH=15: ドライブの種類
-            0x15 => {
-                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x0100;
-                self.cpu.set_flag_cf(false);
-            }
-            // AH=16: メディア交換の有無 / AH=17,18: フォーマット準備。
-            // 「変わっていない」「対応している」と答えるだけでよい
-            0x16 => self.disk_ok(0),
-            0x17 | 0x18 => self.disk_ok(0),
-            _ => panic!("INT 13h AH={ah:#04x} 未実装"),
-        }
-    }
-
-    fn disk_ok(&mut self, sectors: u8) {
-        self.cpu.regs[cpu::AX] = sectors as u32; // AH=0 (成功)
-        self.cpu.set_flag_cf(false);
-    }
-
-    fn disk_error(&mut self, code: u8) {
-        self.cpu.regs[cpu::AX] = (code as u32) << 8;
-        self.cpu.set_flag_cf(true);
-    }
 
     /// 1サイクル進める。
     ///
@@ -611,8 +467,13 @@ impl Machine {
         //    OSがIVTを書き換えていればここには来ない
         if self.cpu.sregs[cpu::CS] == BIOS_SEG {
             let vec = self.cpu.ip as u8;
-            self.bios_interrupt(vec);
-            cpu::iret(self);
+            // 完了しなかったサービス (キー待ちなど) はIRETせずに戻る。
+            // 次のサイクルで同じINTがやり直され、実BIOSが割り込みを待って
+            // 回っているのと同じ状態になる
+            if self.bios_interrupt(vec) {
+                self.return_flags_to_caller();
+                cpu::iret(self);
+            }
             return;
         }
 

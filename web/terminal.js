@@ -3,7 +3,7 @@
 // **エミュレータのことは何も知らない。** 受け取るのは「今の画面 (文字と属性)」と
 // 「カーソル位置」だけで、返すのは「押されたキー」と「選択された文字列」である。
 // 中身がELKSでもDOSでも、あるいはただのテキストでも同じように動く。
-// `elks.js` から切り離してあるのはそのため。
+// `machine.js` (機械) や `main.js` (繋ぎ役) から切り離してあるのはそのため。
 //
 // 持っている機能:
 //   - VGAテキスト (80x25、文字+属性) の描画
@@ -59,9 +59,18 @@ export class Terminal {
 
     /** 画面外へ流れた行 (文字列) */
     this.scrollback = [];
+    /** 同じ行の属性 (色)。**履歴も色付きで読めるように控える** */
+    this.scrollbackAttrs = [];
     /** 今の画面 25行 (文字列)。スクロール検出と選択に使う */
     this.screen = [];
-    /** 今の画面の生バイト (文字+属性)。描画に使う */
+    /**
+     * 今の画面の生バイト (文字+属性)。**自前の領域に写しを持つ。**
+     *
+     * wasmのメモリを直接見る参照を持ち続けてはいけない。wasm側で大きな確保が
+     * あるとリニアメモリが伸び、**それまでの参照は無効になる**。
+     * 実際、状態の保存 (数MBを確保する) をした瞬間に画面が真っ黒になった。
+     * 写すのは4000バイトなので、抱えている危険に比べれば安い。
+     */
     this.cells = null;
     /** 前回の生バイト。スクロールの検出に使う */
     this.prevCells = null;
@@ -73,6 +82,26 @@ export class Terminal {
 
     /** キーが押された/離されたときに呼ばれる。(code, down) => boolean */
     this.onKey = null;
+    /** 貼り付けられたときに呼ばれる。(text) => void */
+    this.onPaste = null;
+    /** 文字として打たれたときに呼ばれる (JP配列のとき)。(ch) => void */
+    this.onChar = null;
+
+    /**
+     * キーボード配列。
+     *
+     * **スキャンコードはキーの「位置」なので、配列とは無関係である。**
+     * ずれるのはその先 — ゲストのOSが位置から文字を決める段階で、
+     * ELKSはUS配列の対応表しか持っていない。
+     *
+     * だからJIS配列の実機で `@` のキー (US配列でいう `[` の位置) を押すと、
+     * ELKSは `[` を出す。合わせるには**位置ではなく文字を送る**しかない。
+     *
+     * - `us`: 位置 (KeyboardEvent.code) をそのまま送る。実機に忠実
+     * - `jp`: ブラウザが解釈した文字 (KeyboardEvent.key) を送る。
+     *   ゲストのUS配列に合わせて組み立て直すので、見たままが入る
+     */
+    this.layout = opts.layout ?? 'jp';
 
     canvas.width = this.cols * CELL_W + SCROLLBAR_W;
     canvas.height = this.rows * CELL_H;
@@ -88,6 +117,7 @@ export class Terminal {
   /** 端末の中身を空にする */
   reset() {
     this.scrollback.length = 0;
+    this.scrollbackAttrs.length = 0;
     this.screen = [];
     this.prevCells = null;
     this.offset = 0;
@@ -108,27 +138,35 @@ export class Terminal {
    * だから安い方だけを細かく呼べるように分けてある。
    */
   sample(cells, cursorRow, cursorCol) {
-    this.cells = cells;
     this.cursor.row = cursorRow;
     this.cursor.col = cursorCol;
 
     const rowBytes = this.cols * 2;
     const size = rowBytes * this.rows;
+    if (!this.cells) this.cells = new Uint8Array(size);
+    this.cells.set(cells.subarray(0, size));
     if (!this.prevCells) {
       this.prevCells = new Uint8Array(size);
-      this.prevCells.set(cells.subarray(0, size));
+      this.prevCells.set(this.cells);
       return;
     }
-    const shift = this.#detectScroll(this.prevCells, cells, rowBytes);
+    const shift = this.#detectScroll(this.prevCells, this.cells, rowBytes);
     if (shift > 0) {
       // 流れた行は**スクロール前の画面**から取る。
       // 文字列を作るのはここだけなので、毎回作る必要がない
       const before = this.#rowsFrom(this.prevCells);
-      for (let i = 0; i < shift; i++) this.scrollback.push(before[i]);
-      while (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift();
+      const attrs = this.#attrsFrom(this.prevCells);
+      for (let i = 0; i < shift; i++) {
+        this.scrollback.push(before[i]);
+        this.scrollbackAttrs.push(attrs[i]);
+      }
+      while (this.scrollback.length > this.scrollbackLimit) {
+        this.scrollback.shift();
+        this.scrollbackAttrs.shift();
+      }
       if (this.offset > 0) this.offset = Math.min(this.offset + shift, this.scrollback.length);
     }
-    this.prevCells.set(cells.subarray(0, size));
+    this.prevCells.set(this.cells);
   }
 
   /** 控えた行 + 今の画面 */
@@ -198,11 +236,16 @@ export class Terminal {
 
   #drawHistory() {
     const { ctx } = this;
-    const lines = this.#visibleLines();
-    ctx.fillStyle = HOMEBREW.dim;
+    const { lines, attrs } = this.#visibleWithAttrs();
     for (let row = 0; row < this.rows; row++) {
       const line = lines[row];
-      if (line) ctx.fillText(line, 0, row * CELL_H);
+      if (!line) continue;
+      const at = attrs[row];
+      for (let col = 0; col < line.length; col++) {
+        // 属性を控えていない行 (今の画面ぶん) は既定色で描く
+        ctx.fillStyle = at ? PALETTE[at[col] & 0x0f] : HOMEBREW.fg;
+        ctx.fillText(line[col], col * CELL_W, row * CELL_H);
+      }
     }
     ctx.fillStyle = HOMEBREW.banner;
     ctx.fillRect(0, 0, this.cols * CELL_W, CELL_H);
@@ -241,6 +284,19 @@ export class Terminal {
   }
 
   // ---------- 内部 ----------
+
+  /** バイト列から属性だけ取り出す (色を保った履歴のため) */
+  #attrsFrom(cells) {
+    const out = [];
+    for (let row = 0; row < this.rows; row++) {
+      const a = new Uint8Array(this.cols);
+      for (let col = 0; col < this.cols; col++) {
+        a[col] = cells[(row * this.cols + col) * 2 + 1];
+      }
+      out.push(a);
+    }
+    return out;
+  }
 
   #rowsFrom(cells) {
     const out = [];
@@ -300,6 +356,17 @@ export class Terminal {
   }
 
   /** 今表示している25行 */
+  /** 今表示している25行を、属性付きで返す */
+  #visibleWithAttrs() {
+    const all = this.allLines();
+    const allAttrs = [...this.scrollbackAttrs, ...new Array(this.screen.length).fill(null)];
+    const start = Math.max(0, all.length - this.rows - this.offset);
+    return {
+      lines: all.slice(start, start + this.rows),
+      attrs: allAttrs.slice(start, start + this.rows),
+    };
+  }
+
   #visibleLines() {
     if (this.offset === 0) return this.screen;
     const all = this.allLines();
@@ -368,10 +435,22 @@ export class Terminal {
       dragging = null;
     });
 
+    // 貼り付け。canvas は編集可能な要素ではないので paste は document に来る。
+    // **文字列は物理キーに直せない**ので、こちらはASCIIとして送る
+    // (Shiftの上げ下げはゲスト側の都合に合わせてRustが組み立てる)
+    document.addEventListener('paste', e => {
+      if (document.activeElement !== c) return;
+      const text = e.clipboardData?.getData('text');
+      if (text) {
+        this.onPaste?.(text);
+        e.preventDefault();
+      }
+    });
+
     c.addEventListener('keydown', e => {
       // コピーは端末が受け取る (ゲストへは渡さない)
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC' && this.selectedText()) {
-        navigator.clipboard?.writeText(this.selectedText());
+        this.#copy(this.selectedText());
         this.selection = null;
         this.draw();
         e.preventDefault();
@@ -379,11 +458,66 @@ export class Terminal {
       }
       // 打ったら最新へ戻る
       if (this.offset !== 0) this.scrollTo(0);
-      if (this.onKey?.(e.code, true)) e.preventDefault();
+
+      if (this.#sendKey(e, true)) e.preventDefault();
     });
+
     c.addEventListener('keyup', e => {
-      if (this.onKey?.(e.code, false)) e.preventDefault();
+      if (this.#sendKey(e, false)) e.preventDefault();
     });
+  }
+
+  /**
+   * キーをゲストへ流す。配列によって「位置」と「文字」を使い分ける。
+   *
+   * 修飾キーと、文字に対応しないキー (Enter/Esc/矢印など) は
+   * **どちらの配列でも位置で送る** — その並びは配列によらず同じだからである。
+   */
+  #sendKey(e, down) {
+    const isModifier = /^(Control|Alt|Meta|Shift)/.test(e.code);
+    const printable = e.key.length === 1;
+
+    if (this.layout === 'us' || !printable || e.ctrlKey || e.altKey || e.metaKey) {
+      // JP配列でも Shift は握りつぶす。文字を送る側 (下) が自分で組み立てるので、
+      // 両方から送ると二重になる
+      if (this.layout === 'jp' && /^Shift/.test(e.code)) return true;
+      return this.onKey?.(e.code, down) ?? false;
+    }
+    if (isModifier) return this.onKey?.(e.code, down) ?? false;
+    // 文字は押したときだけ送る (離すときの相方は文字を送る側が付ける)
+    if (down) this.onChar?.(e.key);
+    return true;
+  }
+
+  /**
+   * 文字列をクリップボードへ。
+   *
+   * `navigator.clipboard` は**セキュアな配信元でしか存在しない**。
+   * localhost は該当するが、LAN内のIPアドレスで開くと消える。
+   * 黙って何も起きないのが一番困るので、古いやり方に落とす。
+   */
+  #copy(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => this.#copyFallback(text));
+    } else {
+      this.#copyFallback(text);
+    }
+  }
+
+  #copyFallback(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+    } catch {
+      /* ここまで来たら諦める */
+    }
+    ta.remove();
+    this.canvas.focus();
   }
 
   #scrollbarTo(ev) {
