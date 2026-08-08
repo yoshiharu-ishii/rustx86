@@ -407,6 +407,9 @@ cargo run --release --example boot -- images/fd14games.img '' \
   "full shell command line" '\FREEDOS\BIN\COMMAND.COM\n' \
   'A:\>' 'dir\n'
 
+# デバッガ (gdb風)
+cargo run --release --example dbg -- images/fd14games.img
+
 # ブートセクタ1つを実行
 cargo run --example run -- asm/hello.bin
 
@@ -417,6 +420,44 @@ cargo run --release --example bench_raw -- asm/bench.bin   # CPUだけの速度
 # ブートセクタのビルド (要nasm。.bin もコミット済みなので通常は不要)
 nasm -f bin -o asm/hello.bin asm/hello.asm
 ```
+
+### デバッガ
+
+`dbg` は gdb 風の対話デバッガで、**実機のデバッガに無いものを足してある**。
+
+```
+$ cargo run --release --example dbg -- images/fd14games.img
+rustx86 デバッガ。`help` で一覧、`q` で終了
+           0: 0000:7c00  eb 3c 90 46 52 44 4f 53
+
+until FreeDOS kernel
+"FreeDOS kernel" を検出 (1033830 命令)
+
+w 0x450
+書き込み監視 0x00450
+
+c
+→ 0x00450 が 0x0e から 0x0f に変わった (書いたのは f000:0010、1033870 命令目)
+```
+
+最後の行が要点で、**「誰がこの番地を書いたか」に命令の位置で答える**。
+0x450 は BDA のカーソル位置で、ここを更新していなかったために
+FreeDOS で Tab がカーソルを先頭へ飛ばすバグが出ていた。
+
+エミュレータならではの命令が3つある。
+
+| 命令 | すること |
+|---|---|
+| `goto <命令数>` | **その命令数まで巻き戻す**。決定的なので最初から流し直せば必ず同じ状態になる |
+| `until <文字列>` | **画面にその文字が出るまで**走らせる。OSの起動を追う単位はこれ |
+| `save` / `load` | スナップショット。分岐点で保存して何度でも試せる |
+
+`panic` した場所は犯行現場ではないので、順に進めても犯人には辿り着かない。
+要るのは**時間をさかのぼる**ことと**誰が触ったか**である。
+
+見張るものを何も置かなければ、フックは真偽値1つの判定で抜ける。
+実測でも `375.9 → 375.2 MIPS` (best-of-3、ばらつきは±10%) で**差は測れない**。
+
 
 引数は **「この文字列が画面に出たら」「これを打つ」の対**である。
 何命令目で打つかではなく**画面を見てから打つ**のは、起動にかかる時間が
