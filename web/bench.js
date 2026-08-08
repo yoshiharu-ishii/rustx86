@@ -14,8 +14,8 @@
 // 単独ページ (`bench.html`) は「計測だけの静かな部屋」として残してある。
 // 同じ部品を空のページに載せているだけで、中身は同一である。
 
-import { Emulator } from './pkg/rustx86_wasm.js?v=11';
-import { SlicedRunner } from './debugger.js?v=21';
+import { Emulator } from './pkg/rustx86_wasm.js?v=22';
+import { SlicedRunner } from './debugger.js?v=22';
 
 const HTML = `
   <fieldset>

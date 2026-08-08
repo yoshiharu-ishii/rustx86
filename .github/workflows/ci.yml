@@ -1,0 +1,133 @@
+# PRと、mainへのマージで回すCI。
+#
+# ジョブは「CI」1本に統合し、各ステージの結果は本文つきの Check run
+# (「〜 結果」) として発行する。ジョブ標準のCheckは選択してもログページへの
+# リンクにしかならないため。各ステージは continue-on-error で最後まで走らせ、
+# 全レポートを発行してからまとめて合否判定する (テストが落ちても
+# wasmビルドの結果は見たい)。fuurai-dungeon で確立した型。
+#
+# ## ステージの選び方 — 手元で回していないものを本命にする
+#
+# `cargo test` は開発中に毎回手で回しているので、CIが足す価値は保険である。
+# 効くのは手元で忘れるもの:
+#
+# - **wasmビルドが本命。** ネイティブのテストが全部通るのにブラウザでだけ
+#   壊れる事故がある (`std::time::Instant` は wasm32 に存在しない、など。
+#   docs/build.md 参照)。これを止められるのはこのステージだけ
+# - **web整合** は「糊だけ新しい」事故 (`emu.key is not a function`) の検査。
+#   tools/build-web.sh --check がそのまま走る
+#
+# ## 入れていないもの (理由つき)
+#
+# - **cosim** — Unicorn Engine のビルドに数分かかる。毎PRの値段に合わない。
+#   命令の実装を変えたときに手で回す (`cargo test -p rustx86-cosim`)
+# - **clippy / fmt** — まだ一度も走らせておらず、今ゲートにすると赤いまま
+#   始まる。警告のみのCheckは「緑だが指摘あり」という読めない状態を作るので
+#   置かない。掃除コミットと同時にゲートとして足す (次のPRで)
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown
+
+      - name: テスト
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## テスト (cargo test)'
+            echo ''
+            echo '`default-members = ["core"]` なので core だけが走る。'
+            echo 'cosim (Unicorn) はビルドが数分かかるため毎PRでは回さない。'
+            echo ''
+            echo '```'
+            cargo test 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > test-report.md
+      - uses: ./.github/actions/publish-check
+        with:
+          name: テスト 結果
+          title: ${{ steps.test.outcome == 'success' && '全テスト合格' || 'テスト失敗あり' }}
+          outcome: ${{ steps.test.outcome }}
+          report-file: test-report.md
+
+      - name: wasmビルド
+        id: wasm
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## wasmビルド (cargo build --target wasm32-unknown-unknown)'
+            echo ''
+            echo 'ネイティブのテストが全部通っても、wasm32 でだけ壊れることがある'
+            echo '(`std::time::Instant` が無い、など)。それを止めるのがこのステージ。'
+            echo ''
+            echo '```'
+            cargo build -p rustx86-wasm --target wasm32-unknown-unknown --release 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            if [ "${RC:-0}" = "0" ]; then
+              SIZE=$(wc -c < target/wasm32-unknown-unknown/release/rustx86_wasm.wasm)
+              echo ''
+              echo '| 成果物 | サイズ |'
+              echo '|---|---|'
+              echo "| rustx86_wasm.wasm (wasm-opt前) | $(( SIZE / 1024 )) KB |"
+            fi
+            exit ${RC:-0}
+          } > wasm-report.md
+      - uses: ./.github/actions/publish-check
+        with:
+          name: wasmビルド 結果
+          title: ${{ steps.wasm.outcome == 'success' && 'ビルド成功' || 'ビルド失敗' }}
+          outcome: ${{ steps.wasm.outcome }}
+          report-file: wasm-report.md
+
+      - name: web整合
+        id: web
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## web整合 (tools/build-web.sh --check)'
+            echo ''
+            echo 'キャッシュ破りの `?v=` が web/ 全体で1つの番号に揃っているかを見る。'
+            echo '片方だけ新しいと `emu.key is not a function` になる (実際に踏んだ)。'
+            echo ''
+            echo '```'
+            tools/build-web.sh --check 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > web-report.md
+      - uses: ./.github/actions/publish-check
+        with:
+          name: web整合 結果
+          title: ${{ steps.web.outcome == 'success' && '?v= は揃っている' || '?v= が揃っていない' }}
+          outcome: ${{ steps.web.outcome }}
+          report-file: web-report.md
+
+      - name: 合否判定
+        run: |
+          echo "test: ${{ steps.test.outcome }}"
+          echo "wasm: ${{ steps.wasm.outcome }}"
+          echo "web:  ${{ steps.web.outcome }}"
+          test "${{ steps.test.outcome }}" = "success" \
+            && test "${{ steps.wasm.outcome }}" = "success" \
+            && test "${{ steps.web.outcome }}" = "success"
