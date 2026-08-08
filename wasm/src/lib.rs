@@ -267,18 +267,20 @@ impl Emulator {
         use rustx86_core::debug::Stop;
         match self.m.dbg.take_stop() {
             None => String::new(),
-            Some(Stop::Break(a)) => format!("ブレーク {a:#07x}"),
+            Some(Stop::Break(a)) => format!("breakpoint at {a:#07x}"),
+            // **書いた命令の位置まで言う**のがこの道具の要点なので、
+            // どの文面にも `by CS:IP` を落とさない
             Some(Stop::WriteMem { addr, old, new, at }) => format!(
-                "{addr:#07x} が {old:#04x} → {new:#04x} (書いたのは {:04x}:{:04x})",
+                "{addr:#07x} changed {old:#04x} -> {new:#04x} by {:04x}:{:04x}",
                 at.0, at.1
             ),
             Some(Stop::WriteIo { port, val, at }) => {
-                format!("ポート{port:#06x} へ {val:#04x} ({:04x}:{:04x})", at.0, at.1)
+                format!("wrote {val:#04x} to port {port:#06x} by {:04x}:{:04x}", at.0, at.1)
             }
             Some(Stop::ReadIo { port, val, at }) => {
-                format!("ポート{port:#06x} から {val:#04x} ({:04x}:{:04x})", at.0, at.1)
+                format!("read {val:#04x} from port {port:#06x} by {:04x}:{:04x}", at.0, at.1)
             }
-            Some(Stop::Count(n)) => format!("{n} 命令目"),
+            Some(Stop::Count(n)) => format!("reached instruction {n}"),
         }
     }
 

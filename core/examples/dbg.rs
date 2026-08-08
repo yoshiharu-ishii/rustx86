@@ -35,7 +35,7 @@ fn main() {
         disk = Some(data);
     }
 
-    println!("rustx86 デバッガ。`help` で一覧、`q` で終了");
+    println!("rustx86 debugger.  `help` for commands, `q` to quit");
     show_where(&m);
 
     let stdin = std::io::stdin();
@@ -59,28 +59,28 @@ fn main() {
             "b" | "break" => match arg1.and_then(addr) {
                 Some(a) => {
                     m.dbg.break_at(a);
-                    println!("ブレークポイント {a:#07x}");
+                    println!("break on execute at {a:#07x}");
                 }
-                None => println!("使い方: b 0x7c00  /  b 07c0:0000"),
+                None => println!("usage: b 0x7c00  |  b 07c0:0000"),
             },
             "w" | "watch" => match arg1.and_then(addr) {
                 Some(a) => {
                     m.dbg.watch_mem(a);
-                    println!("書き込み監視 {a:#07x}");
+                    println!("break on write to {a:#07x}");
                 }
-                None => println!("使い方: w 0x450"),
+                None => println!("usage: w 0x450"),
             },
             "wi" => match arg1.and_then(|s| addr(s)).map(|a| a as u16) {
                 Some(p) => {
                     let rw = rest.get(1).copied().unwrap_or("w");
                     m.dbg.watch_io(p, rw.contains('r'), rw.contains('w'));
-                    println!("I/O監視 ポート{p:#06x} ({rw})");
+                    println!("break on I/O port {p:#06x} ({rw})");
                 }
-                None => println!("使い方: wi 0x3d5 [rw]"),
+                None => println!("usage: wi 0x3d5 [rw]"),
             },
             "d" | "delete" => {
                 m.dbg.clear();
-                println!("見張りを全部外した");
+                println!("all watchpoints cleared");
             }
             "info" => info(&m),
 
@@ -103,7 +103,7 @@ fn main() {
             "until" | "u" => {
                 let needle = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
                 if needle.is_empty() {
-                    println!("使い方: until FreeDOS kernel");
+                    println!("usage: until FreeDOS kernel");
                 } else {
                     until(&mut m, needle, GUARD);
                 }
@@ -124,7 +124,7 @@ fn main() {
                     }
                     m.dbg.record_trace(cap);
                     m.dbg.run_to(n);
-                    print!("{n} 命令目まで流し直し中… ");
+                    print!("replaying to instruction {n}… ");
                     let _ = std::io::stdout().flush();
                     run(&mut m, n + 1);
                     m.dbg.code = code;
@@ -132,7 +132,7 @@ fn main() {
                     m.dbg.io_write = iow;
                     m.dbg.io_read = ior;
                 }
-                None => println!("使い方: goto 36000000"),
+                None => println!("usage: goto 36000000"),
             },
 
             // --- 見る ---
@@ -142,7 +142,7 @@ fn main() {
                     let n = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(64);
                     dump(&m, a, n);
                 }
-                None => println!("使い方: x 0x450 [長さ]"),
+                None => println!("usage: x 0x400 [len]   (0x400 = BIOS Data Area)"),
             },
             "screen" => println!("{}", m.text_screen_string()),
             "t" | "trace" => {
@@ -152,23 +152,23 @@ fn main() {
             "record" => {
                 let n = arg1.and_then(|s| s.parse().ok()).unwrap_or(256);
                 m.dbg.record_trace(n);
-                println!("足跡を直近{n}命令ぶん残す");
+                println!("recording the last {n} instructions");
             }
 
             // --- 保存 ---
             "save" => {
                 snap = Some(m.save_state());
-                println!("{} 命令目を保存", m.dbg.instr);
+                println!("saved at instruction {}", m.dbg.instr);
             }
             "load" => match &snap {
                 Some(s) => match m.load_state(s) {
                     Ok(()) => show_where(&m),
-                    Err(e) => println!("戻せない: {e}"),
+                    Err(e) => println!("cannot restore: {e}"),
                 },
-                None => println!("まだ save していない"),
+                None => println!("nothing saved yet"),
             },
 
-            _ => println!("`{cmd}` は知らない。`help` を見る"),
+            _ => println!("unknown command `{cmd}`.  try `help`"),
         }
     }
 }
@@ -188,7 +188,7 @@ fn run(m: &mut Machine, cap: u64) {
         }
         // 本当に止まった機械なら、いくら回しても何も起きない
         if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
-            println!("機械が止まった (HLT)");
+            println!("the machine stopped for good (HLT)");
             break;
         }
     }
@@ -196,7 +196,7 @@ fn run(m: &mut Machine, cap: u64) {
         Some(s) => println!("{}", why(m, &s)),
         // 何にも当たらずに上限へ来た。**黙って戻らない** — 「止まった」と
         // 見分けがつかなくなる
-        None if n >= cap => println!("→ {n} 命令走ったが何にも当たらない (`c <命令数>` で伸ばせる)"),
+        None if n >= cap => println!("-> ran {n} instructions, nothing hit (`c <count>` to run longer)"),
         None => {}
     }
     show_where(m);
@@ -220,40 +220,39 @@ fn until(m: &mut Machine, needle: &str, cap: u64) {
             break;
         }
         if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
-            println!("{:?} を検出 ({} 命令)", needle, m.dbg.instr - start);
+            println!("found {:?} after {} instructions", needle, m.dbg.instr - start);
             break;
         }
         if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
-            println!("機械が止まった (HLT)。{:?} は出ていない", needle);
+            println!("the machine stopped for good (HLT); {needle:?} never appeared");
             break;
         }
     }
     if n >= cap {
-        println!("→ {n} 命令走ったが {needle:?} は出ない (`until` の前に `c` で進めるか、上限を疑う)");
+        println!("-> ran {n} instructions, {needle:?} never appeared");
     }
     show_where(m);
 }
 
-/// 止まった理由を、**次に何を見ればいいかまで**含めて言う
+/// 止まった理由。**表示はブラウザ側と同じ文面にする** —
+/// 同じ道具が窓によって違う言い方をすると、検索も比較もできなくなる
 fn why(m: &Machine, s: &Stop) -> String {
+    let n = m.dbg.instr;
     match s {
-        Stop::Break(a) => format!("→ ブレーク {a:#07x} ({} 命令目)", m.dbg.instr),
+        Stop::Break(a) => format!("-> breakpoint at {a:#07x} (instr {n})"),
         Stop::WriteMem { addr, old, new, at } => format!(
-            "→ {addr:#07x} が {old:#04x} から {new:#04x} に変わった \
-             (書いたのは {:04x}:{:04x}、{} 命令目)",
-            at.0, at.1, m.dbg.instr
+            "-> {addr:#07x} changed {old:#04x} -> {new:#04x} by {:04x}:{:04x} (instr {n})",
+            at.0, at.1
         ),
         Stop::WriteIo { port, val, at } => format!(
-            "→ ポート{port:#06x} に {val:#04x} を書いた \
-             ({:04x}:{:04x}、{} 命令目)",
-            at.0, at.1, m.dbg.instr
+            "-> wrote {val:#04x} to port {port:#06x} by {:04x}:{:04x} (instr {n})",
+            at.0, at.1
         ),
         Stop::ReadIo { port, val, at } => format!(
-            "→ ポート{port:#06x} を読み {val:#04x} が返った \
-             ({:04x}:{:04x}、{} 命令目)",
-            at.0, at.1, m.dbg.instr
+            "-> read {val:#04x} from port {port:#06x} by {:04x}:{:04x} (instr {n})",
+            at.0, at.1
         ),
-        Stop::Count(n) => format!("→ {n} 命令目"),
+        Stop::Count(n) => format!("-> reached instruction {n}"),
     }
 }
 
@@ -297,7 +296,7 @@ fn info(m: &Machine) {
         flag_names(c),
     );
     println!(
-        "命令数={}  ブレーク={:x?}  番地監視={:x?}  I/O監視 r={:x?} w={:x?}",
+        "instrs={}  execute={:x?}  write={:x?}  I/O read={:x?} write={:x?}",
         m.dbg.instr, m.dbg.code, m.dbg.mem_write, m.dbg.io_read, m.dbg.io_write
     );
 }
@@ -332,7 +331,7 @@ fn dump(m: &Machine, addr: u32, len: u32) {
 fn trace(m: &Machine, n: usize) {
     let t = &m.dbg.trace;
     if t.is_empty() {
-        println!("足跡を残していない。`record 256` を先に打つ");
+        println!("nothing recorded.  run `record 256` first");
         return;
     }
     for s in t.iter().skip(t.len().saturating_sub(n)) {
@@ -355,28 +354,28 @@ fn addr(s: &str) -> Option<u32> {
 fn help() {
     println!(
         "\
-見張る
-  b <番地>        実行ブレークポイント (0x7c00 でも 07c0:0000 でも可)
-  w <番地>        その番地への書き込みで止める
-  wi <ポート> [rw] I/Oで止める (既定は書き込みのみ)
-  d               見張りを全部外す
-  info            レジスタと見張りの一覧
+watch
+  b <addr>         break before executing that address (0x7c00 or 07c0:0000)
+  w <addr>         break when that byte is written
+  wi <port> [rw]   break on I/O (default: writes only)
+  d                clear every watchpoint
+  info             registers and the watch list
 
-走らせる
-  c [命令数]      続行 (既定10億命令で打ち切り、走った数を言う)
-  si [n]          n命令だけ進む (既定1)
-  until <文字列>  画面にその文字が出るまで走らせる
-  goto <命令数>   **その命令数まで巻き戻す** (最初から流し直す)
+run
+  c [count]        continue (stops after 1e9 instructions and says how far it got)
+  si [n]           step n instructions (default 1)
+  until <text>     run until the text appears on screen
+  goto <count>     REWIND to that instruction (replays from the start)
 
-見る
-  r               いまの位置
-  x <番地> [長さ] メモリを16進で出す
-  screen          画面
-  record [n]      足跡を残し始める
-  t [n]           足跡を見る
+look
+  r                where we are now
+  x <addr> [len]   hex dump
+  screen           the guest screen
+  record [n]       start recording executed instructions
+  t [n]            show the recording
 
-保存
-  save / load     スナップショット
-  q               終了"
+save
+  save / load      snapshot
+  q                quit"
     );
 }

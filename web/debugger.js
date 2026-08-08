@@ -35,7 +35,15 @@
 
 const CSS = `
   .rx-dbg { background: #0b0e14; color: #c9d1d9;
-            font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+            font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+            /* 縦に伸ばす。**下に地の色が覗くのを防ぐ** — 子ウインドウでは
+               パネルが窓より短いと、下半分が白いままになる */
+            display: flex; flex-direction: column; min-height: 100vh; }
+  /* 余った高さを食う欄。いちばん下に置いて、メモリダンプで埋める */
+  .rx-dbg .grow { flex: 1 1 auto; display: flex; flex-direction: column;
+                  min-height: 0; border-bottom: none; }
+  .rx-dbg .grow pre { flex: 1 1 auto; overflow: auto; min-height: 0; }
+  .rx-dbg .note { color: #6e7681; font-size: 11.5px; margin: 0 0 8px; }
   .rx-dbg h2 { margin: 0 0 8px; font-size: 12px; color: #8b949e; font-weight: 600;
                letter-spacing: .04em; }
   .rx-dbg header { position: sticky; top: 0; background: #0b0e14; padding: 10px 12px 6px;
@@ -64,8 +72,10 @@ const CSS = `
 
   /* ページ内に落ちたときだけ効く。画面の右に浮かせる */
   .rx-dbg.panel { position: fixed; top: 12px; right: 12px; width: 480px;
-                  max-height: calc(100vh - 24px); overflow: auto; z-index: 9999;
-                  border: 1px solid #30363d; border-radius: 8px;
+                  /* 子ウインドウ用の min-height:100vh を打ち消す。
+                     残すと max-height と競合して窓からはみ出す */
+                  min-height: 0; height: calc(100vh - 24px); overflow: auto;
+                  z-index: 9999; border: 1px solid #30363d; border-radius: 8px;
                   box-shadow: 0 8px 32px rgba(0,0,0,.5); }
   .rx-dbg .close { margin-left: auto; }
 `;
@@ -73,64 +83,75 @@ const CSS = `
 const HTML = `
   <header>
     <div class="row">
-      <h2 style="margin:0">rustx86 デバッガ</h2>
-      <button class="close" id="rxClose" hidden>閉じる</button>
+      <h2 style="margin:0">rustx86 debugger</h2>
+      <button class="close" id="rxClose" hidden>Close</button>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="rxPause">止める</button>
-      <button id="rxStep">1命令</button>
-      <button id="rxCont">続行</button>
+      <button id="rxPause">Pause</button>
+      <button id="rxStep">Step 1</button>
+      <button id="rxCont">Continue</button>
       <span class="state" id="rxState">—</span>
     </div>
     <p class="why" id="rxWhy"></p>
   </header>
 
   <section>
-    <h2>レジスタ</h2>
+    <h2>Registers</h2>
+    <p class="note">Orange = changed since the last update.</p>
     <table id="rxRegs"></table>
   </section>
 
   <section>
-    <h2>いまの命令</h2>
+    <h2>Next instruction</h2>
+    <p class="note">CS:IP and the raw bytes about to run. No disassembler yet.</p>
     <pre id="rxHere"></pre>
   </section>
 
   <section>
-    <h2>見張る</h2>
+    <h2>Watchpoints</h2>
+    <p class="note">Stop the machine and report <em>which instruction</em> did it.</p>
     <div class="row">
-      <input id="rxBp" placeholder="0x7c00 / 07c0:0000">
-      <button id="rxAddBp">ブレーク</button>
+      <input id="rxBp" placeholder="0x7c00 or 07c0:0000">
+      <button id="rxAddBp">Break on execute</button>
     </div>
     <div class="row" style="margin-top:6px">
       <input id="rxWp" placeholder="0x450">
-      <button id="rxAddWp">書き込み</button>
+      <button id="rxAddWp">Break on write</button>
       <input id="rxIo" placeholder="0x3d5">
-      <button id="rxAddIo">I/O</button>
-      <button id="rxClr">全部外す</button>
+      <button id="rxAddIo">Break on I/O</button>
+      <button id="rxClr">Clear all</button>
     </div>
     <p class="list" id="rxWatches"></p>
-    <p class="hint">よく見る番地: <code>0x450</code> カーソル位置 /
-      <code>0x417</code> 修飾キー / <code>0x41a</code> キー待ち行列 /
-      ポート <code>0x3d5</code> CRTC</p>
+    <p class="note">Worth watching: <code>0x450</code> cursor position /
+      <code>0x417</code> shift flags / <code>0x41a</code> keyboard queue /
+      port <code>0x3d5</code> CRTC (hardware scrolling)</p>
   </section>
 
   <section>
-    <h2>メモリ</h2>
+    <h2>Execution history</h2>
+    <p class="note">The last N instructions actually executed &mdash; use it when the
+      crash site is not the crime scene. Off by default; it costs to record.
+      <strong>Nothing is added while the CPU is halted</strong>, so a gap between the
+      instruction count and the last entry means the machine was idle.</p>
     <div class="row">
-      <input id="rxMa" value="0x450">
-      <input id="rxMl" value="64" style="width:5em">
-      <button id="rxDump">見る</button>
+      <button id="rxRec">Start recording</button>
+      <button id="rxShowT">Show</button>
+    </div>
+    <pre id="rxTrace" style="margin-top:6px; max-height:11em; overflow:auto"></pre>
+  </section>
+
+  <section class="grow">
+    <h2>Memory</h2>
+    <p class="note">Starts at <code>0x400</code>, the BIOS Data Area &mdash; 256 bytes
+      that hold the keyboard queue, the shift flags, the cursor and the video mode.
+      In real mode it is the single most informative page of memory there is.</p>
+    <div class="row">
+      <input id="rxMa" value="0x400">
+      <input id="rxMl" value="256" style="width:5em">
+      <label class="note" style="margin:0"><input type="checkbox" id="rxLive"
+        checked style="width:auto"> live</label>
     </div>
     <pre id="rxMem" style="margin-top:6px"></pre>
-  </section>
-
-  <section>
-    <h2>足跡</h2>
-    <div class="row">
-      <button id="rxRec">残し始める</button>
-      <button id="rxShowT">見る</button>
-    </div>
-    <pre id="rxTrace" style="margin-top:6px"></pre>
   </section>
 `;
 
@@ -265,10 +286,13 @@ export class Debugger {
       this.render();
     };
 
-    this.$('rxDump').onclick = () => this.dump();
+    // メモリは押さずに見えるようにする。**下に空白を残さない**ためでもあり、
+    // 「見張っていないが目は離したくない」番地を眺めるのに向く
+    this.$('rxMa').oninput = () => this.dump();
+    this.$('rxMl').oninput = () => this.dump();
     this.$('rxRec').onclick = () => {
       emu()?.record_trace(256);
-      this.$('rxTrace').textContent = '足跡を残し始めた (直近256命令)';
+      this.$('rxTrace').textContent = 'Recording the last 256 instructions…';
     };
     this.$('rxShowT').onclick = () => this.showTrace();
   }
@@ -277,7 +301,7 @@ export class Debugger {
     if (!this.open) return;
     const emu = this.host.emu();
     if (!emu) {
-      this.$('rxState').textContent = 'マシンがまだ無い';
+      this.$('rxState').textContent = 'no machine';
       return;
     }
     const c = JSON.parse(emu.cpu_json());
@@ -285,9 +309,9 @@ export class Debugger {
     const paused = this.host.isPaused();
 
     const st = this.$('rxState');
-    st.textContent = stopped ? '止まっている' : paused ? '一時停止' : '走っている';
+    st.textContent = stopped ? 'stopped' : paused ? 'paused' : 'running';
     st.className = 'state ' + (stopped || paused ? 'stopped' : 'running');
-    this.$('rxPause').textContent = paused ? '走らせる' : '止める';
+    this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
 
     // レジスタ。**前回と変わったところに色を付ける** — 1命令進めたときに
     // どれが動いたかが目で分かる
@@ -317,7 +341,7 @@ export class Debugger {
     rows.push(
       `<tr>${cell('IP', hex16(c.ip))}${cell('FL', hex16(c.flags))}</tr>`,
       `<tr><td class="k">flags</td><td class="v" colspan="3">${c.flagNames || '—'}</td></tr>`,
-      `<tr><td class="k">命令数</td><td class="v" colspan="3">${c.instr.toLocaleString()}</td></tr>`,
+      `<tr><td class="k">instrs</td><td class="v" colspan="3">${c.instr.toLocaleString()}</td></tr>`,
     );
     this.$('rxRegs').innerHTML = rows.join('');
 
@@ -328,16 +352,19 @@ export class Debugger {
     const w = JSON.parse(emu.watches_json());
     const f = (a, n) => (a.length ? `${n}: ` + a.map((v) => '0x' + v.toString(16)).join(' ') : '');
     this.$('rxWatches').textContent =
-      [f(w.code, 'ブレーク'), f(w.mem, '書き込み'), f(w.ioR, 'I/O読'), f(w.ioW, 'I/O書')]
+      [f(w.code, 'execute'), f(w.mem, 'write'), f(w.ioR, 'I/O read'), f(w.ioW, 'I/O write')]
         .filter(Boolean)
-        .join(' / ') || '何も見張っていない';
+        .join('  /  ') || 'nothing watched';
+
+    // メモリは最後に置いた欄を埋めるので、走っている間も追いかける
+    if (this.$('rxLive').checked) this.dump();
   }
 
   /** 親が「止まった」と気づいたときに呼ぶ。理由の文字列はここで預かる */
   onStop(why) {
     this.lastWhy = why;
     if (this.open) {
-      this.$('rxWhy').textContent = '→ ' + why;
+      this.$('rxWhy').textContent = '-> ' + why;
       this.render();
     }
   }
@@ -345,7 +372,7 @@ export class Debugger {
   dump() {
     const emu = this.host.emu();
     const a = parseAddr(this.$('rxMa').value);
-    const len = Math.min(parseInt(this.$('rxMl').value, 10) || 64, 1024);
+    const len = Math.min(parseInt(this.$('rxMl').value, 10) || 256, 4096);
     if (a === null || !emu) return;
     // **毎回取り直す。** wasmのメモリが伸びると前の参照は無効になる
     const b = emu.read_mem(a >>> 0, len);
@@ -369,7 +396,7 @@ export class Debugger {
     if (!emu) return;
     const t = JSON.parse(emu.trace_json());
     if (!t.length) {
-      this.$('rxTrace').textContent = '足跡がない。「残し始める」を押してから走らせる';
+      this.$('rxTrace').textContent = 'Nothing recorded. Press "Start recording", then run.';
       return;
     }
     this.$('rxTrace').textContent = t
