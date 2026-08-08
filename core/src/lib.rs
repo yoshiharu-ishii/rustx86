@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod cpu;
 pub mod dev;
+pub mod snapshot;
 pub mod disk;
 
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
@@ -346,6 +347,96 @@ impl Machine {
     pub fn text_vram(&self) -> &[u8] {
         let b = bus::VRAM_TEXT_BASE as usize;
         &self.mem[b..b + bus::TEXT_LEN]
+    }
+
+    /// 機械の状態をまるごと書き出す。
+    ///
+    /// **CPUだけでは足りない。** PICのマスクが失われれば以後の割り込みが
+    /// 来なくなり、PITのカウンタが戻れば時計が飛ぶ。装置もメモリも
+    /// ディスクも含めて初めて「あの瞬間から再開」ができる。
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut w = snapshot::Writer::new();
+        snapshot::write_header(&mut w);
+
+        // CPU
+        for r in self.cpu.regs {
+            w.u32(r);
+        }
+        for s in self.cpu.sregs {
+            w.u16(s);
+        }
+        w.u16(self.cpu.ip);
+        w.u32(self.cpu.flags);
+
+        // 機械の進行状態
+        w.bool(self.halted);
+        w.opt_u8(self.pending_irq);
+
+        // 装置
+        for p in &self.devices.pic {
+            p.save(&mut w);
+        }
+        self.devices.pit.save(&mut w);
+        self.devices.uart.save(&mut w);
+        self.devices.keyboard.save(&mut w);
+        self.devices.cmos.save(&mut w);
+        self.devices.crtc.save(&mut w);
+
+        // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
+        w.rle(&self.mem);
+        match &self.disk {
+            Some(d) => {
+                w.bool(true);
+                w.rle(&d.data);
+            }
+            None => w.bool(false),
+        }
+        w.buf
+    }
+
+    /// 書き出した状態へ戻す。
+    ///
+    /// 途中で失敗すると**半端に書き換わった機械**が残るので、
+    /// まず新しい機械の上に組み立ててから丸ごと差し替える
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut m = Machine::new();
+        let mut r = snapshot::Reader::new(data);
+        snapshot::read_header(&mut r)?;
+
+        for i in 0..8 {
+            m.cpu.regs[i] = r.u32()?;
+        }
+        for i in 0..6 {
+            m.cpu.sregs[i] = r.u16()?;
+        }
+        m.cpu.ip = r.u16()?;
+        m.cpu.flags = r.u32()?;
+
+        m.halted = r.bool()?;
+        m.pending_irq = r.opt_u8()?;
+
+        for i in 0..2 {
+            m.devices.pic[i].load(&mut r)?;
+        }
+        m.devices.pit.load(&mut r)?;
+        m.devices.uart.load(&mut r)?;
+        m.devices.keyboard.load(&mut r)?;
+        m.devices.cmos.load(&mut r)?;
+        m.devices.crtc.load(&mut r)?;
+
+        let mem = r.rle()?;
+        if mem.len() != MEM_SIZE {
+            return Err(format!("メモリの大きさが合わない ({} != {MEM_SIZE})", mem.len()));
+        }
+        m.mem = mem;
+        m.disk = if r.bool()? {
+            Some(Disk::from_image(r.rle()?)?)
+        } else {
+            None
+        };
+
+        *self = m;
+        Ok(())
     }
 
     /// カーソルの位置 (行, 桁)。CRTCが持っている

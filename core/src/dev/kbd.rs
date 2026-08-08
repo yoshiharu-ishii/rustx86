@@ -333,3 +333,25 @@ impl Kbd8042 {
         true
     }
 }
+
+impl Kbd8042 {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u8(self.output_buf);
+        w.bool(self.has_output);
+        w.opt_u8(self.pending);
+        w.u8(self.output_port);
+        w.bool(self.irq_asserted);
+        let keys: Vec<u8> = self.keys.iter().copied().collect();
+        w.bytes(&keys);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.output_buf = r.u8()?;
+        self.has_output = r.bool()?;
+        self.pending = r.opt_u8()?;
+        self.output_port = r.u8()?;
+        self.irq_asserted = r.bool()?;
+        self.keys = r.bytes()?.into();
+        Ok(())
+    }
+}

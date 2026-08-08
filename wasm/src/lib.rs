@@ -133,6 +133,17 @@ impl Emulator {
         self.m.devices.keyboard.key(code, down)
     }
 
+    /// 機械の状態をまるごと書き出す (CPU・装置・メモリ・ディスク)。
+    /// JSONに束ねるのは呼び出し側の仕事で、ここは中身だけを返す
+    pub fn save_state(&self) -> Vec<u8> {
+        self.m.save_state()
+    }
+
+    /// 書き出した状態へ戻す
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), JsError> {
+        self.m.load_state(data).map_err(|e| JsError::new(&e))
+    }
+
     /// カーソルの行 (CRTCが持っている)
     pub fn cursor_row(&self) -> usize {
         self.m.cursor_pos().0

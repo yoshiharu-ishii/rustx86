@@ -68,6 +68,9 @@
     <div class="toolbar">
       <button id="boot" disabled>再起動</button>
       <button id="pause" disabled>一時停止</button>
+      <button id="snap" disabled>状態を保存</button>
+      <button id="restore" disabled>状態を復元</button>
+      <button id="snapfile" disabled>状態をJSONで書き出す</button>
       <button id="save">ログを保存</button>
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
@@ -86,6 +89,10 @@
     <dd>ドラッグで選択して <kbd>⌘C</kbd>。<kbd>⌘V</kbd> で貼り付け</dd>
     <dt>ディスク</dt>
     <dd>イメージをこの画面に<strong>ドラッグ&amp;ドロップ</strong>すると、そのOSが起動する</dd>
+    <dt>状態の保存</dt>
+    <dd>CPU・装置・メモリ・ディスクを丸ごと控える。<strong>割り込みの直前で止めて保存し、
+        何度でもそこから始められる</strong>。この端末に残す (保存/復元) ほか、
+        JSONで書き出して<strong>ドロップで読み戻せる</strong></dd>
   </dl>
 
   <p class="note">

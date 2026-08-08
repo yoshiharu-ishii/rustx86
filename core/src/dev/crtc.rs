@@ -54,3 +54,20 @@ impl Crtc {
         (self.regs[REG_START_HI as usize] as u16) << 8 | self.regs[REG_START_LO as usize] as u16
     }
 }
+
+impl Crtc {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u8(self.index);
+        w.bytes(&self.regs);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.index = r.u8()?;
+        let regs = r.bytes()?;
+        if regs.len() != self.regs.len() {
+            return Err("CRTCのレジスタ数が合わない".into());
+        }
+        self.regs.copy_from_slice(&regs);
+        Ok(())
+    }
+}

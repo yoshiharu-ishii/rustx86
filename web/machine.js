@@ -76,6 +76,19 @@ export class Machine {
     return !this.running;
   }
 
+  /** 状態をまるごと書き出す (CPU・装置・メモリ・ディスク) */
+  saveState() {
+    return this.emu.save_state();
+  }
+
+  /** 書き出した状態へ戻す。時計の基準も入れ直す */
+  loadState(bytes) {
+    this.emu.load_state(bytes);
+    this.lastCursor = [-1, -1];
+    this.lastMeasure = performance.now();
+    this.executed = 0;
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
