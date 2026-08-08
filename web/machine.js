@@ -8,7 +8,7 @@
 // 画面を何命令ごとに覗くか — 実機なら水晶が決めることを、ブラウザでは
 // ここが決める。
 
-import init, { Emulator } from './pkg/rustx86_wasm.js?v=5';
+import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js?v=7';
 
 /** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
 const INSTRUCTIONS_PER_FRAME = 3_000_000;
@@ -24,14 +24,36 @@ const CHUNK = 6_000;
 
 let wasmMemory = null;
 
+// wasmのインポート解決はインスタンス化の時点で行われるので、**init より前に**置く
+globalThis.__rustx86_panic ??= msg => console.error(msg);
+
 /** WASMを読み込む。ページの最初に一度だけ */
 export async function loadWasm() {
   // glue と .wasm 本体の両方にバージョンを付ける。
   // 片方だけ新しいと「その関数は無い」と言われる (実際に踏んだ)
   const wasm = await init({
-    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=5', import.meta.url),
+    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=7', import.meta.url),
   });
   wasmMemory = wasm.memory;
+  // **パニックの中身を拾えるようにする。** これが無いとJS側には
+  // `RuntimeError: unreachable` としか見えず、「何が未実装で止まったか」という
+  // このエミュレータで一番役に立つ情報が消える
+  install_panic_hook();
+}
+
+/**
+ * パニックが起きたときに呼ばれる関数を差し替える。
+ *
+ * wasm側のフックは `globalThis.__rustx86_panic` を呼ぶ。パニック後の
+ * インスタンスには触れないので、**受け取れるのはこの一度きり**である。
+ */
+export function onPanic(fn) {
+  globalThis.__rustx86_panic = fn;
+}
+
+/** VRAMの1バイトを何の絵にするかの表 (CP437)。**Rust側と同じものを使う** */
+export function charset() {
+  return cp437_table();
 }
 
 export class Machine {
@@ -135,7 +157,19 @@ export class Machine {
       this.lastMeasure = now;
     }
     for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
-      this.emu.run_slice(CHUNK);
+      try {
+        this.emu.run_slice(CHUNK);
+      } catch (e) {
+        // wasmがパニックした。**ここで止めて、描き直さずに抜ける。**
+        //
+        // 描き直すと最後の絵が消えてしまう。「どこまで行けたか」が見えることが
+        // このエミュレータの一番の情報なので、画面は倒れた瞬間のまま残す。
+        // パニックの中身は machine.js のフックが先に受け取っている。
+        this.running = false;
+        this.crashed = true;
+        this.onCrash?.(e);
+        return;
+      }
       const [row, col] = this.cursor();
       // **カーソルが動いただけでも描き直す。**
       // viで矢印を押してもVRAMは変わらないので、文字の変化だけを見ていると

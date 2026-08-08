@@ -13,6 +13,36 @@
 use rustx86_core::Machine;
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen]
+extern "C" {
+    /// パニックの内容をJS側へ渡す口。ページが `globalThis.__rustx86_panic` を
+    /// 定義しておく (無ければ `console.error` にだけ出る)
+    #[wasm_bindgen(js_name = __rustx86_panic)]
+    fn report_panic(msg: &str);
+
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(msg: &str);
+}
+
+/// パニックの内容をブラウザまで届ける。
+///
+/// **これが無いとJS側には `RuntimeError: unreachable` としか見えない。**
+/// このエミュレータは「未実装のサービスや命令は黙って0を返さず即panicして
+/// 正体を報告する」方針で作ってあり、`INT 10h AH=0x13 未実装` や
+/// `unimplemented opcode 0x66 at 22c8:0759` という**名前**こそが価値である。
+/// 素のwasmはその文字列を捨ててしまうので、ここで拾い直す。
+///
+/// パニックの後のwasmインスタンスは触れないので、**フックの中で渡しきる**。
+/// 「後から取りに行く」形にはできない。
+#[wasm_bindgen]
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.to_string();
+        console_error(&msg);
+        report_panic(&msg);
+    }));
+}
+
 /// ベンチ用ワークロード (`asm/bench.asm` の成果物) をwasmバイナリに埋め込む。
 ///
 /// ページ側からfetchさせてもよいが、埋め込んでおくと `file://` で開いても
@@ -59,6 +89,17 @@ impl Emulator {
     pub fn console(&self) -> String {
         self.m.console_string()
     }
+}
+
+/// コードページ437 の256文字をUnicodeへ写した表 (1本の文字列)。
+///
+/// **CLIの確認表示と同じ表をブラウザにも渡す**ための口である。
+/// 別々に持つと「CLIでは出るのにブラウザでは化ける」が起きる。
+/// DOSの画面は罫線とブロック文字 (0xB0-0xDF) で描かれているので、
+/// ここを素通しにすると枠もロゴも壊れる。
+#[wasm_bindgen]
+pub fn cp437_table() -> String {
+    rustx86_core::cp437::table_string()
 }
 
 /// 埋め込みワークロードの命令数は固定なので、ネイティブ側の測定と直接比較できる

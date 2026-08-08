@@ -1,5 +1,6 @@
 pub mod bios;
 pub mod bus;
+pub mod cp437;
 pub mod cpu;
 pub mod dev;
 pub mod snapshot;
@@ -134,6 +135,9 @@ impl Machine {
         if self.devices.pit.tick(PIT_CLOCKS_PER_TICK) > 0 {
             self.devices.pic[0].raise(IRQ_TIMER);
         }
+        // 時計もPITと同じクロックで進める。**ここで進めるのが要点**で、
+        // INT 08h の中で進めるとOSが自前のハンドラを入れた瞬間に時計が止まる
+        self.devices.cmos.tick(PIT_CLOCKS_PER_TICK);
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
@@ -396,6 +400,15 @@ impl Machine {
         (off / bus::TEXT_COLS, off % bus::TEXT_COLS)
     }
 
+    /// カーソルを (行, 桁) へ動かす
+    pub fn set_cursor_pos(&mut self, row: usize, col: usize) {
+        let row = row.min(bus::TEXT_ROWS - 1);
+        let col = col.min(bus::TEXT_COLS - 1);
+        self.devices
+            .crtc
+            .set_cursor_offset((row * bus::TEXT_COLS + col) as u16);
+    }
+
     /// 描画側が読んだ印。次の書き込みまで dirty が下りる
     pub fn take_vram_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.vram_dirty, false)
@@ -408,10 +421,7 @@ impl Machine {
         (0..bus::TEXT_ROWS)
             .map(|row| {
                 let line: String = (0..bus::TEXT_COLS)
-                    .map(|col| {
-                        let c = v[(row * bus::TEXT_COLS + col) * bus::TEXT_CELL];
-                        if (0x20..0x7F).contains(&c) { c as char } else { ' ' }
-                    })
+                    .map(|col| cp437::to_char(v[(row * bus::TEXT_COLS + col) * bus::TEXT_CELL]))
                     .collect();
                 line.trim_end().to_string()
             })

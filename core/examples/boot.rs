@@ -42,24 +42,38 @@ fn main() {
         false
     }
 
-    let script: Vec<String> = std::env::args().skip(3).collect();
+    // 引数は **「この文字列が出たら」「これを打つ」の対**。
+    // 何命令目で打つかではなく画面を見てから打つのは、起動時間が環境で変わるためで、
+    // 人間が画面を見て打つのと同じ手順になっている。
+    //
+    // 引数なしのときは ELKS の既定 (login: を待って root と打つ)。
+    //
+    // ```text
+    // boot images/fd14boot.img 400000000 "Select from Menu" '\n' 'C:\>' 'dir\n'
+    // ```
+    fn unescape(s: &str) -> String {
+        s.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+    }
+    let args: Vec<String> = std::env::args().skip(3).collect();
+    let script: Vec<(String, String)> = if args.is_empty() {
+        vec![("login:".into(), "root\n".into())]
+    } else {
+        args.chunks(2)
+            .map(|c| (c[0].clone(), unescape(c.get(1).map(String::as_str).unwrap_or(""))))
+            .collect()
+    };
+
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if !run_until(&mut m, "login:", max) {
-            return 0u64;
-        }
-        eprintln!("[login: を検出]");
-        // 既定は root でログインする。引数があればそれを順に打つ
-        let lines: Vec<String> = if script.is_empty() {
-            vec!["root\n".into()]
-        } else {
-            script.iter().map(|s| format!("{s}\n")).collect()
-        };
         let mut n = 0u64;
-        for line in lines {
-            m.devices.keyboard.type_ascii(&line);
-            eprintln!("[入力: {}]", line.trim_end());
+        for (wait_for, send) in &script {
+            if !run_until(&mut m, wait_for, max) {
+                eprintln!("[{wait_for:?} が出ないまま打ち切り]");
+                return n;
+            }
+            eprintln!("[{wait_for:?} を検出 → {send:?} を入力]");
+            m.devices.keyboard.type_ascii(send);
             // 打った内容が処理されるまで少し回す
-            for _ in 0..3_000_000 {
+            for _ in 0..250_000_000 {
                 if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
                     break;
                 }
@@ -85,6 +99,37 @@ fn main() {
         println!("--- テキストVRAM ---\n{screen}\n--- (ここまで) ---");
     }
 
+    // **色だけで描かれた絵**は文字を見るだけでは消える。
+    // テトリスのブロックのように「背景色を付けた空白」で描くソフトがあるので、
+    // 背景が黒でないセルは塗りつぶしとして見せる (実際これで一度騙された)
+    {
+        let v = m.text_vram();
+        let painted: String = (0..25)
+            .map(|row| {
+                let line: String = (0..80)
+                    .map(|col| {
+                        let i = (row * 80 + col) * 2;
+                        let (ch, attr) = (v[i], v[i + 1]);
+                        if ch == b' ' && (attr >> 4) & 7 != 0 {
+                            '█' // 色だけのセル
+                        } else {
+                            rustx86_core::cp437::to_char(ch)
+                        }
+                    })
+                    .collect();
+                line.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if painted.trim() != m.text_screen_string().trim() {
+            println!("--- テキストVRAM (色付きセルを塗って表示) ---\n{}\n--- (ここまで) ---", painted.trim_end());
+        }
+    }
+
+    // カーソルの居場所は「画面が空に見える」ときの手がかりになる。
+    // 書いた先が見ている場所と違う、という取り違えがすぐ分かる
+    let (crow, ccol) = m.cursor_pos();
+    println!("--- カーソル: 行{crow} 桁{ccol} ---");
     println!("--- 状態 ---");
     match result {
         Ok(n) => println!("{n} 命令 実行。halted={}", m.halted),

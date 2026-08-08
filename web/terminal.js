@@ -48,7 +48,7 @@ const BLINK_MS = 530;
 export class Terminal {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{cols?: number, rows?: number, scrollback?: number}} opts
+   * @param {{cols?: number, rows?: number, scrollback?: number, charset?: string}} opts
    */
   constructor(canvas, opts = {}) {
     this.canvas = canvas;
@@ -56,6 +56,19 @@ export class Terminal {
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 25;
     this.scrollbackLimit = opts.scrollback ?? 1000;
+    /**
+     * VRAMの1バイトを何の絵にするかの表 (コードページ437、256文字)。
+     *
+     * **表はRust側が持っていて、それを受け取る。**JS側で別に持つと
+     * 「CLIでは出るのにブラウザでは化ける」が起きる。DOSの画面は罫線と
+     * ブロック文字 (0xB0-0xDF) で描かれているので、素通しにすると枠もロゴも壊れる。
+     * 渡されなければASCIIだけの表を自前で作る (端末単体で使えるように)。
+     */
+    this.charset = opts.charset
+      ? [...opts.charset]
+      : Array.from({ length: 256 }, (_, i) =>
+          i >= 0x20 && i < 0x7f ? String.fromCharCode(i) : ' ',
+        );
 
     /** 画面外へ流れた行 (文字列) */
     this.scrollback = [];
@@ -222,9 +235,10 @@ export class Terminal {
           ctx.fillStyle = bg;
           ctx.fillRect(x, y, CELL_W, CELL_H);
         }
-        if (ch >= 0x20 && ch < 0x7f) {
+        const g = this.charset[ch];
+        if (g !== ' ') {
           ctx.fillStyle = PALETTE[attr & 0x0f];
-          ctx.fillText(String.fromCharCode(ch), x, y);
+          ctx.fillText(g, x, y);
         }
       }
     }
@@ -303,8 +317,7 @@ export class Terminal {
     for (let row = 0; row < this.rows; row++) {
       let line = '';
       for (let col = 0; col < this.cols; col++) {
-        const ch = cells[(row * this.cols + col) * 2];
-        line += ch >= 0x20 && ch < 0x7f ? String.fromCharCode(ch) : ' ';
+        line += this.charset[cells[(row * this.cols + col) * 2]];
       }
       out.push(line.replace(/\s+$/, ''));
     }
@@ -343,7 +356,7 @@ export class Terminal {
             break;
           }
           const ch = now[b + i];
-          text += String.fromCharCode(ch);
+          text += this.charset[ch];
           if (ch > 0x20) content = true;
         }
         if (!ok) break;

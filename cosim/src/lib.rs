@@ -379,7 +379,7 @@ pub fn random_case(rng: &mut Rng, t: &Template) -> TestCase {
         // ESを 0x0FFF までに抑えるのは、ストリング命令の書き込み先 ES:DI が
         // 1MBを超えるとオラクル (Unicorn) が未マップ領域に書いて落ちるため。
         // 自作CPU側は linear() が 20bit でラップするので落ちない。
-        // この非対称は A20 ゲートの話であり、Tier 4 で正面から扱う
+        // この非対称は A20 ゲートの話であり、Tier 3 で正面から扱う
         sregs: [rng.interesting_u16() & 0x0FFF, 0, 0, 0],
         flags: (rng.next_u16() & (FLAG_MASK_ALL | 0x0400)),
         data: std::array::from_fn(|_| rng.interesting_u8()),
@@ -387,7 +387,7 @@ pub fn random_case(rng: &mut Rng, t: &Template) -> TestCase {
         // RETF/IRET が pop した値はそのままCSに入るため、CS:IP が 1MB を
         // 超えるとオラクル (Unicorn) が未マップ領域を触って落ちる。
         // 自作CPU側は linear() が 20bit でラップするので落ちない —
-        // この非対称は A20 ゲートの話であり、Tier 4 で正面から扱う
+        // この非対称は A20 ゲートの話であり、Tier 3 で正面から扱う
         stack: std::array::from_fn(|i| {
             if i % 2 == 1 {
                 rng.next_u16() as u8 & 0x0F

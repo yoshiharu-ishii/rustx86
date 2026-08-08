@@ -94,7 +94,7 @@ impl Machine {
     ///
     /// なお 0x08 はプロテクトモードではCPUの例外番号 (#DF) と衝突する。
     /// Linuxが起動時にわざわざ 0x20 へ付け替えるのはこのためで、
-    /// この衝突は Tier 4 でもう一度顔を出す。
+    /// この衝突は Tier 3 でもう一度顔を出す。
     fn install_pic_defaults(&mut self) {
         for (i, base, icw3) in [(0usize, 0x08u8, 0x04u8), (1, 0x70, 0x02)] {
             let p = &mut self.devices.pic[i];
@@ -116,14 +116,44 @@ impl Machine {
             // --- INT 10h: ビデオ ---
             0x10 => match ah {
                 0x00 => {} // ビデオモード設定 (テキストのみなので何もしない)
-                0x01 | 0x02 | 0x03 => {} // カーソル形状・位置
-                0x0E => {
-                    // テレタイプ出力: AL
-                    let c = self.cpu.regs[cpu::AX] as u8;
-                    self.console.push(c);
+                0x01 => {} // カーソルの形 (描画側が決めているので覚えない)
+                // AH=02: カーソルを動かす (DH=行 DL=桁)。
+                // **DOSの画面はカーソル移動と書き込みの組で作られる。**
+                // ELKSはVRAMを直接叩くのでここが空でも動いていた
+                0x02 => {
+                    let dx = self.cpu.regs[cpu::DX] as u16;
+                    self.set_cursor_pos((dx >> 8) as usize, (dx & 0xFF) as usize);
                 }
+                // AH=03: カーソルの位置と形を返す
+                0x03 => {
+                    let (row, col) = self.cursor_pos();
+                    self.cpu.regs[cpu::DX] = (row as u32) << 8 | col as u32;
+                    self.cpu.regs[cpu::CX] = 0x0607; // カーソルの形 (BDAと同じ)
+                }
+                // AH=0E: テレタイプ出力。
+                //
+                // **実BIOSと同じくテキストVRAMへ書く。** 以前はデバッグ用の
+                // 文字列へ積むだけだったので、BIOS越しに描くOS (DOS) の画面が
+                // ブラウザに出なかった。ELKSがVRAMを直接叩くOSだったため、
+                // この穴は今まで表に出ていなかった
+                0x0E => self.teletype(self.cpu.regs[cpu::AX] as u8),
                 // AH=05: 表示ページの切り替え (1ページしか無いので何もしない)
                 0x05 => {}
+                // AH=11: 文字ジェネレータ (フォント)。
+                //
+                // **このエミュレータはフォントを持っていない。**文字の絵はブラウザ側の
+                // フォントで描いているので、ゲストがフォントを載せ替えても効かない。
+                // AL=30 の「情報を教えろ」にだけ答え、載せ替えは黙って受ける。
+                // DOSはここから**画面の行数**を知るので、返さないと画面計算が壊れる
+                0x11 => {
+                    if self.cpu.regs[cpu::AX] as u8 == 0x30 {
+                        self.cpu.regs[cpu::CX] = 16; // 1文字あたりの走査線数
+                        self.cpu.regs[cpu::DX] =
+                            (self.cpu.regs[cpu::DX] & 0xFF00) | (bus::TEXT_ROWS as u32 - 1);
+                        self.cpu.regs[cpu::BP] = 0; // ES:BP = フォントの在り処。持っていない
+                        self.cpu.sregs[cpu::ES] = 0;
+                    }
+                }
                 // AH=06/07: 画面の一部を上/下へずらす。
                 // **DOSの画面はこれで動く** — COMMAND.COMの改行もクリアもここを通る
                 0x06 | 0x07 => {
@@ -289,11 +319,53 @@ impl Machine {
             },
 
             // --- INT 1Ah: 時刻 ---
+            //
+            // AH=00 はBIOSが数えているティック、AH=02/04 はCMOSのRTCと、
+            // **出どころが違う2つの時計**がある。起動時にRTCを一度読んで
+            // ティックの側を合わせるのがDOSの流儀で、以後の時刻表示は
+            // ティックの側から作られる。
             0x1A => match ah {
+                // AH=00: 起動からのティック数 (CX:DX)。AL=日付が変わった回数
                 0x00 => {
-                    self.cpu.regs[cpu::CX] = 0;
-                    self.cpu.regs[cpu::DX] = 0;
-                    self.cpu.regs[cpu::AX] &= 0xFF00;
+                    let ticks = self.read16(0x46C) as u32 | (self.read16(0x46E) as u32) << 16;
+                    self.cpu.regs[cpu::CX] = ticks >> 16;
+                    self.cpu.regs[cpu::DX] = ticks & 0xFFFF;
+                    self.cpu.regs[cpu::AX] &= 0xFF00; // 日付跨ぎは数えていない
+                }
+                // AH=02: RTCから時刻を読む (CH=時 CL=分 DH=秒、いずれもBCD)
+                0x02 => {
+                    let (h, m, s) = self.devices.cmos.time_bcd();
+                    self.cpu.regs[cpu::CX] = (h as u32) << 8 | m as u32;
+                    self.cpu.regs[cpu::DX] = (s as u32) << 8; // DL=0: 夏時間ではない
+                    self.cpu.set_flag(cpu::CF, false); // 電池は生きている
+                }
+                // AH=04: RTCから日付を読む (CH=世紀 CL=年 DH=月 DL=日、BCD)
+                0x04 => {
+                    let (c, y, mo, d) = self.devices.cmos.date_bcd();
+                    self.cpu.regs[cpu::CX] = (c as u32) << 8 | y as u32;
+                    self.cpu.regs[cpu::DX] = (mo as u32) << 8 | d as u32;
+                    self.cpu.set_flag(cpu::CF, false);
+                }
+                // AH=01: ティック数を設定する。**DOSはRTCを読んでここへ書き戻す** —
+                // 以後の時刻表示はティックの側から作られるので、この一手で
+                // 2つの時計の辻褄が合う
+                0x01 => {
+                    self.write16(0x46C, self.cpu.regs[cpu::DX] as u16);
+                    self.write16(0x46E, self.cpu.regs[cpu::CX] as u16);
+                }
+                // AH=03: RTCの時刻を設定する (DOSの `TIME`)
+                0x03 => {
+                    let cx = self.cpu.regs[cpu::CX];
+                    let dx = self.cpu.regs[cpu::DX];
+                    self.devices.cmos.set_time_bcd((cx >> 8) as u8, cx as u8, (dx >> 8) as u8);
+                }
+                // AH=05: RTCの日付を設定する (DOSの `DATE`)
+                0x05 => {
+                    let cx = self.cpu.regs[cpu::CX];
+                    let dx = self.cpu.regs[cpu::DX];
+                    self.devices
+                        .cmos
+                        .set_date_bcd((cx >> 8) as u8, cx as u8, (dx >> 8) as u8, dx as u8);
                 }
                 _ => panic!("INT 1Ah AH={ah:#04x} 未実装"),
             },
@@ -349,6 +421,39 @@ impl Machine {
 
     /// テキスト画面の一部を上 (`up=true`) または下へずらす。
     /// `lines` が0なら範囲を空白で埋める (画面クリアはこの形で来る)
+    /// テレタイプ出力1文字ぶん。カーソルを進め、右端で折り返し、
+    /// 最下行を越えたら画面全体を1行上げる。**これがBIOSコンソールの本体**である
+    fn teletype(&mut self, c: u8) {
+        self.console.push(c); // 診断用の写し (CLIで起動ログを読むため)
+        let (mut row, mut col) = self.cursor_pos();
+        match c {
+            b'\r' => col = 0,
+            b'\n' => row += 1,
+            0x08 => col = col.saturating_sub(1), // バックスペースは消さずに戻るだけ
+            0x07 => {}                           // ベル。音はまだ鳴らさない (箱B3)
+            _ => {
+                let addr =
+                    bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                self.write8(addr, c);
+                // 属性はページ0の既定 (BLで指定されるのはグラフィックモードだけ)
+                if self.read8(addr + 1) == 0 {
+                    self.write8(addr + 1, 0x07);
+                }
+                col += 1;
+            }
+        }
+        if col >= bus::TEXT_COLS {
+            col = 0;
+            row += 1;
+        }
+        if row >= bus::TEXT_ROWS {
+            // 1行上げて最下行を空ける。実BIOSも同じことをしている
+            self.scroll_window(0, 0, bus::TEXT_ROWS - 1, bus::TEXT_COLS - 1, 1, 0x07, true);
+            row = bus::TEXT_ROWS - 1;
+        }
+        self.set_cursor_pos(row, col);
+    }
+
     fn scroll_window(
         &mut self,
         top: usize,
@@ -485,6 +590,13 @@ impl Machine {
             // 「変わっていない」「対応している」と答えるだけでよい
             0x16 => self.disk_ok(0),
             0x17 | 0x18 => self.disk_ok(0),
+            // AH=41: LBA拡張 (EDD) があるか。
+            //
+            // **無いと正直に答える。** EDDはハードディスクのための拡張で、
+            // フロッピーには存在しない。CF=1 を返せばゲストはCHSへ引き返す。
+            // ここで嘘をつくと、以後 AH=42 のパケット形式で読みに来られて詰む。
+            // Tier 6c でCD-ROMをやるときに初めて「ある」と答えることになる
+            0x41 => self.disk_error(0x01), // 機能が無効
             _ => panic!("INT 13h AH={ah:#04x} 未実装"),
         }
     }
