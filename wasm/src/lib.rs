@@ -66,3 +66,80 @@ impl Emulator {
 pub fn bench_sector_len() -> usize {
     BENCH_SECTOR.len()
 }
+
+// ---------- OSを動かすための口 ----------
+
+#[wasm_bindgen]
+impl Emulator {
+    /// ディスクイメージ (フロッピー) から起動する
+    pub fn from_disk(image: &[u8]) -> Result<Emulator, JsError> {
+        let mut m = Machine::new();
+        m.boot_from_disk(image.to_vec())
+            .map_err(|e| JsError::new(&e))?;
+        Ok(Emulator { m })
+    }
+
+    /// 指定した命令数だけ進める。**1フレーム分の仕事**として呼ぶ。
+    ///
+    /// HLTで止まっていても抜けない — タイマ割り込みで起きるのを待つ必要があるため。
+    /// アイドル中のOSは「HLTして割り込みを待つ」を繰り返している
+    pub fn run_slice(&mut self, instructions: f64) {
+        let n = instructions as u64;
+        for _ in 0..n {
+            self.m.step();
+        }
+    }
+
+    /// テキストVRAM (80×25、文字と属性が交互) の先頭ポインタ。
+    /// JS側はwasmのメモリを直接読む — コピーを作らないため
+    pub fn text_vram_ptr(&self) -> *const u8 {
+        self.m.text_vram().as_ptr()
+    }
+
+    pub fn text_vram_len(&self) -> usize {
+        rustx86_core::bus::TEXT_LEN
+    }
+
+    pub fn text_cols(&self) -> usize {
+        rustx86_core::bus::TEXT_COLS
+    }
+
+    pub fn text_rows(&self) -> usize {
+        rustx86_core::bus::TEXT_ROWS
+    }
+
+    /// 画面が書き換わったか。**読むと下りる**ので描画の要否判定に使う。
+    /// 毎フレーム画面を組み立て直すのは無駄が大きい
+    pub fn take_vram_dirty(&mut self) -> bool {
+        self.m.take_vram_dirty()
+    }
+
+    /// 文字列をキーボードから打つ。8042にスキャンコードが流れ、IRQ1が上がる
+    pub fn type_text(&mut self, s: &str) {
+        self.m.devices.keyboard.type_ascii(s);
+    }
+
+    /// 生のスキャンコードを流す
+    pub fn send_scancode(&mut self, code: u8) {
+        self.m.devices.keyboard.feed(&[code]);
+    }
+
+    /// キーの上げ下げを送る。`code` は `KeyboardEvent.code` (物理キーの識別子)。
+    ///
+    /// 文字ではなく**キーの位置**を渡すのが要点である。こうすると Ctrl も Esc も
+    /// 矢印も特別扱いが要らず、修飾キーの組み立てはゲストのOSがやる。
+    /// 返り値は「そのキーを知っているか」
+    pub fn key(&mut self, code: &str, down: bool) -> bool {
+        self.m.devices.keyboard.key(code, down)
+    }
+
+    /// カーソルの行 (CRTCが持っている)
+    pub fn cursor_row(&self) -> usize {
+        self.m.cursor_pos().0
+    }
+
+    /// カーソルの桁
+    pub fn cursor_col(&self) -> usize {
+        self.m.cursor_pos().1
+    }
+}

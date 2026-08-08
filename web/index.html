@@ -21,12 +21,13 @@
   <p>Rust製のx86エミュレータ。リアルモード8086から歴史の地層を順に登る教材。</p>
 
   <ul>
+    <li><a href="./elks.html">16bit UNIX (ELKS) を動かす</a> — ブートから login、シェルまで</li>
     <li><a href="./bench.html">実行速度ベンチ</a> — 任意のブートセクタを流して命令毎秒を測る</li>
   </ul>
 
   <p class="note">
-    エミュレータ本体の画面は Tier 2d (WASM + xterm.js) でここに載る。
-    それまではベンチだけが動く。
+    ディスクイメージはリポジトリに含めていない (配布物のため)。
+    ELKSのリリースから <code>fd1440.img</code> を取得して選ぶ。
   </p>
 </body>
 </html>

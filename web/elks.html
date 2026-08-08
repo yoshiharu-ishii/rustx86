@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustx86 — ブラウザで動く16bit UNIX (ELKS)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; line-height: 1.7;
+  }
+  h1 { font-size: 1.35rem; margin-bottom: .25rem; }
+  .sub { opacity: .7; font-size: .9rem; margin-top: 0; }
+  #screen {
+    display: block; width: 100%; max-width: 738px; margin: 1rem 0;
+    background: #000; border-radius: .3rem; cursor: text;
+  }
+  #screen:focus { outline: 2px solid #00aa00; outline-offset: 2px; }
+  .bar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin: 1rem 0 0; }
+  button {
+    font: inherit; padding: .45rem 1.1rem; border-radius: .4rem;
+    border: 1px solid currentColor; background: transparent; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=file] { font-size: .85rem; }
+  #status { font-size: .9rem; opacity: .8; min-height: 1.6em; margin: .6rem 0 0; }
+  .note { font-size: .875rem; opacity: .75; }
+  code, kbd { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
+  kbd { border: 1px solid rgba(128,128,128,.5); border-radius: .25rem; padding: 0 .3em; }
+  .warn { color: #b45309; }
+  @media (prefers-color-scheme: dark) { .warn { color: #fbbf24; } }
+</style>
+</head>
+<body>
+  <h1>rustx86 — ブラウザで動く16bit UNIX</h1>
+  <p class="sub">Rustで書いた8086エミュレータの上で <a href="https://github.com/ghaerr/elks">ELKS</a> を起動する。画面はテキストVRAM (0xB8000) を直接描いている。</p>
+
+  <canvas id="screen" tabindex="0"></canvas>
+
+  <div class="bar">
+    <button id="boot" disabled>起動</button>
+    <label>ディスクイメージ <input type="file" id="file" accept=".img"></label>
+    <button id="save">ログを保存</button>
+  </div>
+  <p id="status">読み込み中…</p>
+
+  <p class="note">
+    <strong>画面をクリックしてからキーを打つ。</strong>入力は8042キーボードコントローラへ
+    <strong>物理キーの位置</strong>として流れ、IRQ1でカーネルに届く。文字への変換はゲストのOSがやるので、
+    <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印キーもそのまま使える。
+  </p>
+  <p class="note">
+    ホイールか右端のスクロールバーで<strong>過去に遡れる</strong> (直近1000行)。キーを打つと最新へ戻る。
+    ドラッグで<strong>選択して <kbd>⌘C</kbd> でコピー</strong>できる。
+  </p>
+  <p class="note">
+    ディスクイメージはリポジトリに含めていない (配布物のため)。
+    <code>fd1440.img</code> を <a href="https://github.com/ghaerr/elks/releases">ELKSのリリース</a>
+    から取得して選ぶか、このページと同じ場所に置くと自動で読み込む。
+  </p>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

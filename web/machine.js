@@ -1,0 +1,108 @@
+// エミュレートされた機械を持って、回す。
+//
+// Rust側の `Machine` (core/src/lib.rs) に対応する層で、**画面もキーも知らない**。
+// 外に見せるのは「今の画面 (VRAMの生バイト)」「カーソル位置」「キーを押された」
+// という素の口だけで、それをどう見せるかは [`Terminal`](./terminal.js) の仕事。
+//
+// ここが持っているのは**時間の刻み方**である。1フレームで何命令進めるか、
+// 画面を何命令ごとに覗くか — 実機なら水晶が決めることを、ブラウザでは
+// ここが決める。
+
+import init, { Emulator } from './pkg/rustx86_wasm.js?v=5';
+
+/** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
+const INSTRUCTIONS_PER_FRAME = 3_000_000;
+
+/**
+ * 何命令ごとに画面を覗くか。
+ *
+ * まとめて進めてから覗くと、その間に何十行もスクロールしていて流れた行を
+ * 追えない。逆に細かすぎると重い。**覗くのは安く、描くのは高い**ので、
+ * 覗くほうだけ細かく回す。
+ */
+const CHUNK = 6_000;
+
+let wasmMemory = null;
+
+/** WASMを読み込む。ページの最初に一度だけ */
+export async function loadWasm() {
+  // glue と .wasm 本体の両方にバージョンを付ける。
+  // 片方だけ新しいと「その関数は無い」と言われる (実際に踏んだ)
+  const wasm = await init({
+    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=5', import.meta.url),
+  });
+  wasmMemory = wasm.memory;
+}
+
+export class Machine {
+  /** @param {Uint8Array} image ディスクイメージ (フロッピー) */
+  constructor(image) {
+    this.emu = Emulator.from_disk(image);
+    this.running = false;
+    /** 直前のカーソル位置。動いたかどうかの判定に使う */
+    this.lastCursor = [-1, -1];
+    /** 画面が変わったときに呼ばれる。(cells, cursorRow, cursorCol, redraw) => void */
+    this.onFrame = null;
+  }
+
+  /** テキストVRAMをそのまま見る (コピーしない) */
+  vram() {
+    return new Uint8Array(
+      wasmMemory.buffer,
+      this.emu.text_vram_ptr(),
+      this.emu.text_vram_len(),
+    );
+  }
+
+  cursor() {
+    return [this.emu.cursor_row(), this.emu.cursor_col()];
+  }
+
+  /** 物理キーの上げ下げを渡す。文字への変換はゲストのOSがやる */
+  key(code, down) {
+    return this.emu.key(code, down);
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this.#schedule();
+  }
+
+  stop() {
+    this.running = false;
+  }
+
+  /**
+   * 次のフレームを予約する。
+   *
+   * requestAnimationFrame はタブが非表示だと発火しない。それだけに頼ると
+   * 裏に回した瞬間にゲストOSの時間が止まる。タイマで回して動き続けさせる。
+   */
+  #schedule() {
+    if (document.hidden) setTimeout(() => this.#frame(), 16);
+    else requestAnimationFrame(() => this.#frame());
+  }
+
+  #frame() {
+    if (!this.running) return;
+    let changed = false;
+    for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
+      this.emu.run_slice(CHUNK);
+      const [row, col] = this.cursor();
+      // **カーソルが動いただけでも描き直す。**
+      // viで矢印を押してもVRAMは変わらないので、文字の変化だけを見ていると
+      // カーソルが画面上で固まったままになる (これでviが使い物にならなかった)。
+      const moved = row !== this.lastCursor[0] || col !== this.lastCursor[1];
+      if (this.emu.take_vram_dirty() || moved) {
+        changed = true;
+        this.lastCursor = [row, col];
+        // 覗くのは細かく (スクロールを取りこぼさないため)
+        this.onFrame?.(this.vram(), row, col, false);
+      }
+    }
+    // 描かせるのは1フレームに1回だけ
+    if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
+    this.#schedule();
+  }
+}
