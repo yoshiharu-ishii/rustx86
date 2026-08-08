@@ -259,7 +259,7 @@ pub fn step(m: &mut Machine) {
         // ES/CS/SS/DS の番号になっている (0x06,0x0E,0x16,0x1E)
         0x06 | 0x0E | 0x16 | 0x1E => { let v = m.cpu.sregs[(op >> 3) as usize & 3]; push16(m, v); }
         // POP CS (0x0F) は8086にしか無く、186以降は2バイト命令の導入符になった。
-        // ここでは実装しない (Tier 4 で 0x0F を二バイト空間として使う)
+        // ここでは実装しない (Tier 3 で 0x0F を二バイト空間として使う)
         0x07 | 0x17 | 0x1F => { let v = pop16(m); m.cpu.sregs[(op >> 3) as usize & 3] = v; }
 
         // --- PUSHA/POPA (186) ---
@@ -395,7 +395,7 @@ pub fn step(m: &mut Machine) {
 
         // --- far転送: CSごと移る ---
         // リアルモードでは「CSに値を代入する」だけだが、プロテクトモードでは
-        // 同じ命令がディスクリプタ引きと特権チェックに化ける (Tier 4)。
+        // 同じ命令がディスクリプタ引きと特権チェックに化ける (Tier 3)。
         0xEA => { let off = fetch16(m); let seg = fetch16(m); m.cpu.sregs[CS] = seg; m.cpu.ip = off; }
         0x9A => {
             let off = fetch16(m);

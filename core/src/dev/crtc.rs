@@ -48,6 +48,13 @@ impl Crtc {
         (self.regs[REG_CURSOR_HI as usize] as u16) << 8 | self.regs[REG_CURSOR_LO as usize] as u16
     }
 
+    /// カーソルを動かす。BIOSの INT 10h AH=02 が呼ぶ。
+    /// **実機と同じくCRTCのレジスタを書く** — 画面側はここだけを見ればよい
+    pub fn set_cursor_offset(&mut self, off: u16) {
+        self.regs[REG_CURSOR_HI as usize] = (off >> 8) as u8;
+        self.regs[REG_CURSOR_LO as usize] = off as u8;
+    }
+
     /// 表示を開始するVRAM上の位置 (文字単位)。
     /// ここを動かすとメモリを触らずにスクロールできる (ハードウェアスクロール)
     pub fn start_offset(&self) -> u16 {

@@ -8,8 +8,9 @@
 // 機械は画面を知らず、端末は機械を知らない。互いを知っているのはここだけなので、
 // 別のOSを載せても、端末を差し替えても、直すのはこのファイルで済む。
 
-import { loadWasm, Machine } from './machine.js';
+import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
+import { MACHINES, byGroup, statusLabel } from './machines.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -253,30 +254,137 @@ consoleBox.addEventListener('drop', async e => {
   boot(new Uint8Array(await f.arrayBuffer()), f.name);
 });
 
-async function bootFromUrl() {
-  setStatus('fd1440.img を取得中…');
+// ---------- マシン選択 ----------
+//
+// **一覧は [`machines.js`](./machines.js) が持つデータで、ここは描画と起動だけ。**
+// 未実装のものも灰色で並べる — この教材は「どこまで行けて、なぜ止まるか」が
+// 見えている方が価値があるので、ロードマップを画面に出しておく。
+
+/** 今選んでいるマシン */
+let current = null;
+
+function renderMachines() {
+  const nav = $('machines');
+  nav.textContent = '';
+  for (const [group, list] of byGroup()) {
+    const h = document.createElement('h2');
+    h.textContent = group;
+    nav.append(h);
+    for (const m of list) {
+      const b = document.createElement('button');
+      b.dataset.id = m.id;
+      b.disabled = m.status === 'todo';
+      b.title = m.note ?? '';
+      b.innerHTML =
+        `<span class="name"><span class="dot ${m.status}"></span>${m.label}</span>` +
+        `<span class="meta">${m.sub ?? ''}${m.sub ? ' · ' : ''}${statusLabel(m.status)}</span>`;
+      b.querySelector('.meta').style.display = 'block';
+      b.addEventListener('click', () => select(m));
+      nav.append(b);
+    }
+  }
+}
+
+function markCurrent(id) {
+  for (const b of $('machines').querySelectorAll('button')) {
+    b.setAttribute('aria-current', String(b.dataset.id === id));
+  }
+}
+
+/** 選ばれたマシンの説明と取得先を出す */
+function showNote(m) {
+  const el = $('machineNote');
+  el.textContent = '';
+  if (!m) return;
+  const note = document.createElement('span');
+  note.textContent = m.note ?? '';
+  el.append(note);
+  if (m.source) {
+    el.append(' 取得先: ');
+    const a = document.createElement('a');
+    a.href = m.source;
+    a.textContent = m.sourceLabel ?? m.source;
+    a.target = '_blank';
+    a.rel = 'noreferrer';
+    el.append(a);
+    if (m.file) el.append(` (${m.file} としてこのページと同じ場所に置く)`);
+  }
+}
+
+async function select(m) {
+  if (m.href) {
+    location.href = m.href;
+    return;
+  }
+  current = m;
+  markCurrent(m.id);
+  showNote(m);
+  await bootFromUrl(m);
+}
+
+async function bootFromUrl(m = current) {
+  if (!m?.image) return;
+  setStatus(`${m.label} を取得中…`);
   try {
-    const r = await fetch('./fd1440.img');
+    const r = await fetch(m.image);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    boot(new Uint8Array(await r.arrayBuffer()), 'fd1440.img');
+    term.reset();
+    boot(new Uint8Array(await r.arrayBuffer()), m.image.replace('./', ''));
   } catch (e) {
     setStatus(
-      `fd1440.img が見つからない (${e.message})。イメージをここにドロップしてください`,
+      `${m.image.replace('./', '')} が見つからない (${e.message})。イメージをここにドロップしてください`,
       true,
     );
   }
 }
 
+/** 置いてあるイメージのうち、最初に見つかったものを選ぶ */
+async function selectFirstAvailable() {
+  for (const m of MACHINES) {
+    if (!m.image) continue;
+    const head = await fetch(m.image, { method: 'HEAD' }).catch(() => null);
+    if (head?.ok) {
+      await select(m);
+      return true;
+    }
+  }
+  return false;
+}
+
 // 読み込みに失敗すると「読み込み中…」のまま黙って止まる。
-// 何が起きたか分からないのが一番困るので、必ず画面に出す
-window.addEventListener('error', e => setStatus(`エラー: ${e.message}`, true));
-window.addEventListener('unhandledrejection', e => setStatus(`エラー: ${e.reason}`, true));
+// 何が起きたか分からないのが一番困るので、必ず画面に出す。
+//
+// ただし**wasmのパニックだけは例外**である。パニックは必ず
+// `RuntimeError: unreachable` として後から飛んでくるが、それは中身の無い包装で、
+// 本当の理由 (`unimplemented opcode 0x66 at ...`) は先にフックが受け取っている。
+// **後から来る包装で上書きしてはいけない。**
+let panicMessage = null;
+
+function reportError(text) {
+  if (panicMessage && /unreachable|wasm/i.test(text)) return;
+  setStatus(`エラー: ${text}`, true);
+}
+window.addEventListener('error', e => reportError(e.message));
+window.addEventListener('unhandledrejection', e => reportError(String(e.reason)));
 
 try {
   await loadWasm();
-  setStatus('ディスクイメージをここにドロップすると起動します');
-  const head = await fetch('./fd1440.img', { method: 'HEAD' }).catch(() => null);
-  if (head?.ok) await bootFromUrl();
+  // 文字の表はwasmが読めてから受け取る。**CLIの確認表示と同じ表**なので、
+  // 「CLIでは出るのにブラウザでは化ける」が起きない
+  term.charset = [...charset()];
+  // **パニックの中身を画面に出す。** 「何が未実装で止まったか」が
+  // このエミュレータで一番役に立つ情報なので、コンソールに埋もれさせない
+  onPanic(msg => {
+    const m = /unimplemented opcode (\S+) at (\S+)/.exec(msg);
+    const detail = m
+      ? `未実装の命令 ${m[1]} で停止 (${m[2]})`
+      : msg.replace(/^panicked at [^:]+:\d+:\d+:\s*/, '');
+    panicMessage = detail;
+    setStatus(`停止: ${detail} — 画面は倒れた瞬間のまま`, true);
+  });
+  renderMachines();
+  setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
+  await selectFirstAvailable();
   syncControls();
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
