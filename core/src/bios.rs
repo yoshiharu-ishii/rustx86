@@ -517,8 +517,8 @@ impl Machine {
             if released {
                 return;
             }
-            let shift = self.read8(BDA_KB_FLAG1) & 0x03 != 0;
-            let ascii = scancode_to_ascii(code, shift).unwrap_or(0);
+            let flags = self.read8(BDA_KB_FLAG1);
+            let ascii = scancode_to_ascii(code, flags & 0x03 != 0, flags & 0x04 != 0).unwrap_or(0);
             self.kbd_enqueue((code as u16) << 8 | ascii as u16);
         }
     }
@@ -567,6 +567,9 @@ impl Machine {
             b'\n' => row += 1,
             0x08 => col = col.saturating_sub(1), // バックスペースは消さずに戻るだけ
             0x07 => {}                           // ベル。音はまだ鳴らさない (箱B3)
+            // タブは**8桁ごとの停留所まで進む**。扱っていなかったので、
+            // タブ文字そのもの (CP437では ○) を画面に書いていた
+            b'\t' => col = (col / 8 + 1) * 8,
             _ => {
                 let addr =
                     bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
@@ -753,7 +756,7 @@ impl Machine {
 /// 装置が返すのはキーの位置で、文字にする対応表はファームウェアが持つ。
 /// 配列を差し替えられるのはこの層があるからで、
 /// [`crate::dev::kbd::scancode_shift`] のちょうど逆向きにあたる。
-fn scancode_to_ascii(sc: u8, shift: bool) -> Option<u8> {
+fn scancode_to_ascii(sc: u8, shift: bool, ctrl: bool) -> Option<u8> {
     const PLAIN: &[(u8, u8)] = &[
         (0x02, b'1'), (0x03, b'2'), (0x04, b'3'), (0x05, b'4'), (0x06, b'5'),
         (0x07, b'6'), (0x08, b'7'), (0x09, b'8'), (0x0A, b'9'), (0x0B, b'0'),
@@ -777,6 +780,39 @@ fn scancode_to_ascii(sc: u8, shift: bool) -> Option<u8> {
         let c = *row.get(i)?;
         Some(if shift { c.to_ascii_uppercase() } else { c })
     };
+    // **Ctrl を押しながらだと制御文字になる。**
+    //
+    // Ctrl+A〜Z が 0x01〜0x1A なのは、ASCIIの英大文字が 0x41〜0x5A に並んでいて、
+    // **上位3ビットを落とすと 1〜26 になる**という配置のおかげである。
+    // 端末が Ctrl+C で止まり Ctrl+D で終わるのは、この引き算の名残でしかない。
+    //
+    // ここを通していなかったので、Ctrl は8042まで届いていたのに
+    // 文字にする段で捨てられ、Ctrl+C がただの `c` になっていた。
+    if ctrl {
+        // 英字は素の文字から機械的に作れる
+        if let Some(c) = [ROW_Q, ROW_A, ROW_Z]
+            .iter()
+            .zip([0x10u8, 0x1E, 0x2C])
+            .find_map(|(row, base)| letter(base, row))
+        {
+            return Some(c.to_ascii_uppercase() & 0x1F);
+        }
+        // 記号はASCIIの並びから外れるので個別に持つ
+        return Some(match sc {
+            0x1A => 0x1B, // Ctrl+[ は Esc と同じ
+            0x2B => 0x1C, // Ctrl+\\
+            0x1B => 0x1D, // Ctrl+]
+            0x07 => 0x1E, // Ctrl+6
+            0x0C => 0x1F, // Ctrl+-
+            0x39 => b' ',
+            0x1C => b'\r',
+            0x0E => 8,
+            0x0F => b'\t',
+            0x01 => 27,
+            _ => 0, // 対応する制御文字が無いキーは文字を持たない
+        });
+    }
+
     if (0x10..0x1A).contains(&sc) {
         return letter(0x10, ROW_Q);
     }

@@ -423,13 +423,19 @@ impl Machine {
         (off / bus::TEXT_COLS, off % bus::TEXT_COLS)
     }
 
-    /// カーソルを (行, 桁) へ動かす
+    /// カーソルを (行, 桁) へ動かす。
+    ///
+    /// **CRTCとBIOSデータエリアの両方に書く。** 実機でもこの2箇所に同じ位置が
+    /// 載っていて、画面はCRTCを見るが、**ソフトはBDAの方を直接読むことがある**。
+    /// BDA側 (0x450、ページ0のカーソル位置) を更新していなかったので、
+    /// 覗いた側からはいつまでも「行0桁0」に見えていた。
     pub fn set_cursor_pos(&mut self, row: usize, col: usize) {
         let row = row.min(bus::TEXT_ROWS - 1);
         let col = col.min(bus::TEXT_COLS - 1);
         self.devices
             .crtc
             .set_cursor_offset((row * bus::TEXT_COLS + col) as u16);
+        self.write16(0x450, (row as u16) << 8 | col as u16);
     }
 
     /// 描画側が読んだ印。次の書き込みまで dirty が下りる

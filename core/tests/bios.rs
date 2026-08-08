@@ -117,6 +117,58 @@ fn int16_blocks_until_a_key_arrives() {
     assert!(got, "キーが来ても取れない");
 }
 
+/// **Ctrl を押しながらだと制御文字になる。**
+///
+/// Ctrl+A〜Z が 0x01〜0x1A なのは、ASCIIの英大文字が 0x41〜0x5A に並んでいて
+/// 上位3ビットを落とすと 1〜26 になるからで、端末が Ctrl+C で止まり
+/// Ctrl+D で終わるのはこの引き算の名残でしかない。
+///
+/// ここを通していなかったので、Ctrlは8042まで届いていたのに文字にする段で
+/// 捨てられ、**Ctrl+C がただの `c`** になっていた。
+#[test]
+fn int16_translates_control_combinations() {
+    for (keys, want) in [
+        ("\u{3}", 0x03u8),  // Ctrl+C
+        ("\u{4}", 0x04),    // Ctrl+D
+        ("\u{1a}", 0x1a),   // Ctrl+Z
+        ("\u{1b}", 0x1b),   // Ctrl+[ は Esc と同じ
+    ] {
+        let mut m = machine();
+        // 8042へは「Ctrlを押す → キーを押す → 離す」の順で流れる
+        let (sc, _) = rustx86_core::dev::kbd::scancode_shift(match want {
+            0x03 => 'c',
+            0x04 => 'd',
+            0x1a => 'z',
+            _ => '[',
+        })
+        .expect("スキャンコードがある");
+        m.devices.keyboard.feed(&[0x1D, sc, sc | 0x80, 0x9D]);
+        for _ in 0..20_000 {
+            m.step();
+        }
+        m.cpu.regs[AX] = 0x0000;
+        call_int(&mut m, 0x16, 100_000);
+        assert_eq!(
+            m.cpu.regs[AX] as u8, want,
+            "{keys:?} が {:#04x} になっていない",
+            m.cpu.regs[AX] as u8
+        );
+    }
+}
+
+/// Ctrlの状態が **BIOSデータエリアに出る** (AH=02 で読める)
+#[test]
+fn int16_reports_ctrl_in_the_shift_state() {
+    let mut m = machine();
+    m.devices.keyboard.feed(&[0x1D]); // Ctrl 押しっぱなし
+    for _ in 0..20_000 {
+        m.step();
+    }
+    m.cpu.regs[AX] = 0x0200;
+    call_int(&mut m, 0x16, 10_000);
+    assert_eq!(m.cpu.regs[AX] as u8 & 0x04, 0x04, "Ctrlのビットが立っていない");
+}
+
 /// AH=01 は取らずに覗く。無ければ ZF=1
 #[test]
 fn int16_peek_does_not_consume() {
@@ -172,6 +224,45 @@ fn int10_clears_a_window_when_lines_is_zero() {
     for row in 0..3 {
         assert_eq!(cell(&m, row, 0), (b' ', 0x1F), "{row}行目が消えていない");
     }
+}
+
+/// **タブは8桁ごとの停留所まで進む。**
+///
+/// 扱っていなかったので、タブ文字そのもの (CP437では ○) を画面に書いていた
+#[test]
+fn int10_teletype_advances_to_the_next_tab_stop() {
+    let mut m = machine();
+    m.set_cursor_pos(0, 3);
+    m.cpu.regs[AX] = 0x0E09; // AH=0E AL=タブ
+    call_int(&mut m, 0x10, 10_000);
+    assert_eq!(m.cursor_pos(), (0, 8), "次の停留所へ行っていない");
+    assert_ne!(cell(&m, 0, 3).0, 0x09, "タブ文字そのものを書いている");
+
+    // ちょうど停留所の上なら、次の停留所まで進む
+    m.set_cursor_pos(0, 8);
+    m.cpu.regs[AX] = 0x0E09;
+    call_int(&mut m, 0x10, 10_000);
+    assert_eq!(m.cursor_pos(), (0, 16));
+}
+
+/// **カーソル位置はBIOSデータエリアにも載る。**
+///
+/// 実機では CRTC と BDA (0x450) の両方に同じ位置がある。画面はCRTCを見るが、
+/// **ソフトはBDAの方を直接読むことがある**。ここを更新していなかったので、
+/// FreeDOSからは常に「行0桁0」に見えていて、キーを打つたびに画面の先頭へ
+/// カーソルが飛んでいた。
+#[test]
+fn cursor_position_is_mirrored_in_the_bios_data_area() {
+    let mut m = machine();
+    m.set_cursor_pos(7, 13);
+    assert_eq!(m.read16(0x450), (7 << 8) | 13, "BDAに載っていない");
+
+    // BIOS越しに動かしても同じ
+    m.cpu.regs[DX] = (3 << 8) | 21;
+    m.cpu.regs[AX] = 0x0200; // AH=02: カーソル移動
+    call_int(&mut m, 0x10, 10_000);
+    assert_eq!(m.read16(0x450), (3 << 8) | 21);
+    assert_eq!(m.cursor_pos(), (3, 21), "CRTC側とずれている");
 }
 
 /// AH=09 はカーソル位置に文字と属性を繰り返し置く

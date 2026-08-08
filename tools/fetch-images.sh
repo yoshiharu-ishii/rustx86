@@ -40,13 +40,18 @@ ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
 
-# 入れるゲーム。**テキストモードのものだけ** — この機械に画面はテキストしか無い。
-# HANGMAN のようにCGAグラフィックス (モード0x04) を要求するものは Tier 6 まで動かない。
-# 形式は「パッケージ名:イメージへ入れるファイル…」
+# 入れるゲーム。形式は「パッケージ名:イメージへ入れるファイル…」
+#
+# **動くのはテキストモードのものだけ** — この機械に画面はテキストしか無い。
+# それでも HANGMAN を入れてあるのは、**動かないものが1つ要る**からである。
+# これはCGAグラフィックス (モード0x04) を要求するので画面が真っ白になるが、
+# 「描いていない」のではなく「描く先が無い」ことが分かるように、
+# 要求されたビデオモードは記録に残る。**Tier 6 が要る理由の実物**として置く。
 GAMES=(
   "eliza:GAMES/ELIZA/ELIZA.EXE:GAMES/ELIZA/RESPONSE.DAT"
   "zmiy:GAMES/ZMIY/ZMIY.EXE"
   "row4:GAMES/ROW4/ROW4T.COM"
+  "hangman:GAMES/HANGMAN/HANGMAN.EXE"
 )
 
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
@@ -104,7 +109,7 @@ build_freedos() {
 
   cp "$IMAGES/fd14boot.img" "$IMAGES/fd14games.img"
   copy_into_image "$IMAGES/fd14games.img" "${files[@]}"
-  say "FreeDOS 完了 (eliza / zmiy / row4t)"
+  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman)"
 }
 
 publish_to_web() {

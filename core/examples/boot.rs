@@ -194,6 +194,17 @@ fn main() {
     }
 
     {
+        // **割り込みを誰が持っているか。** OSが乗っ取ったベクタはBIOSへ来ない。
+        // 「BIOSを直したのに効かない」ときは、たいてい相手が自分で持っている
+        let owner = |v: u32| {
+            let (seg, off) = (m.read16(v * 4 + 2), m.read16(v * 4));
+            let who = if seg == rustx86_core::BIOS_SEG { "BIOS" } else { "ゲスト" };
+            format!("{v:#04x}={seg:04x}:{off:04x}({who})")
+        };
+        println!(
+            "--- 割り込みベクタの持ち主: {} {} {} {} ---",
+            owner(0x08), owner(0x09), owner(0x10), owner(0x16)
+        );
         let (head, tail) = (m.read16(0x41A), m.read16(0x41C));
         println!(
             "--- BIOSキー待ち行列: head={head:#06x} tail={tail:#06x} ({}) / 修飾={:#04x} / 8042残り={} ---",
