@@ -11,7 +11,7 @@
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
-import { Debugger } from './debugger.js?v=15';
+import { Debugger } from './debugger.js?v=16';
 import { mountBench } from './bench.js?v=5';
 
 const $ = id => document.getElementById(id);
@@ -434,6 +434,10 @@ async function select(m) {
     });
     setStatus('実行速度ベンチ。「計測する」で始める');
     syncControls();
+    // デバッガを開いたまま切り替えたなら、覗く相手をすぐ用意する。
+    // **開いている窓に「機械が無い」とだけ出るのは道具として不親切**である。
+    // 閉じているならベンチの機械は作らない — 計測だけしたい人に費用を払わせない
+    if (dbg.open) await bench.ensureDebugMachine();
     // 見ている機械が入れ替わったので、前の残りかすを捨てる
     dbg.reset();
     return;

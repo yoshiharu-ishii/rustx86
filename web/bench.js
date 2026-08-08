@@ -15,7 +15,7 @@
 // 同じ部品を空のページに載せているだけで、中身は同一である。
 
 import { Emulator } from './pkg/rustx86_wasm.js?v=10';
-import { SlicedRunner } from './debugger.js?v=15';
+import { SlicedRunner } from './debugger.js?v=16';
 
 const HTML = `
   <fieldset>

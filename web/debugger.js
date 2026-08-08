@@ -357,6 +357,11 @@ export class Debugger {
     const emu = this.host.emu();
     if (!emu) {
       this.$('rxState').textContent = 'no machine';
+      this.$('rxState').className = 'state stopped';
+      // **残っている値を消す。** 古い機械の値を今の値として見せない
+      this.clearView();
+      this.$('rxHere').textContent = '覗く機械がまだ無い';
+      this.prev = {};
       return;
     }
     const c = JSON.parse(emu.cpu_json());
@@ -429,12 +434,23 @@ export class Debugger {
     this.prev = {};
     this.lastWhy = '';
     if (!this.open) return;
-    this.$('rxWhy').textContent = '';
-    this.$('rxMem').textContent = '';
-    this.$('rxTrace').textContent = '';
+    this.clearView();
     // 新しい機械にも数えさせる。開いている間は命令数が動くべきである
     this.host.emu()?.set_counting(true);
     this.render();
+  }
+
+  /**
+   * 表示を空にする。
+   *
+   * **古い値を残したまま「機械が無い」と言ってはいけない。** レジスタ欄に
+   * 前の機械の値が残っていると、読む側にはそれが今の値に見える。
+   * ベンチへ切り替えたときに実際にそう見えた (ELKSのCS:IPが居座った)。
+   */
+  clearView() {
+    for (const id of ['rxRegs', 'rxHere', 'rxMem', 'rxTrace', 'rxWhy']) {
+      this.$(id).textContent = '';
+    }
   }
 
   /** 親が「止まった」と気づいたときに呼ぶ。理由の文字列はここで預かる */
