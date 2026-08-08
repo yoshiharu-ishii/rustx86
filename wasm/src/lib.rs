@@ -215,7 +215,7 @@ impl Emulator {
         .collect();
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
-               "bytes":"{}","instr":{},"halted":{},"lin":{}}}"#,
+               "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{}}}"#,
             c.regs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
             c.sregs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
             c.ip,
@@ -223,6 +223,7 @@ impl Emulator {
             flags.join(" "),
             bytes.join(" "),
             self.m.dbg.instr,
+            self.m.dbg.executed,
             self.m.halted,
             lin,
         )

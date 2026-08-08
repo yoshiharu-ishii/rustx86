@@ -578,6 +578,9 @@ impl Machine {
                 self.dbg.instr -= 1; // 実行しなかったので数え戻す
                 return;
             }
+            // ここを通ったものだけが**本当に実行される**。HLT中は通らないので、
+            // instr との差がそのまま「暇にしていた時間」になる
+            self.dbg.executed += 1;
             if self.dbg.trace_cap > 0 {
                 let lin = (cs as u32) << 4 | ip as u32;
                 let mut bytes = [0u8; 5];

@@ -76,8 +76,22 @@ pub struct Step {
 pub struct Debug {
     /// 元締め。切っている間はどのフックも真偽値1つの判定で抜ける
     pub on: bool,
-    /// 実行した命令数。**巻き戻しの座標**になるので、機械の寿命で通し番号にする
+    /// [`crate::Machine::step`] を呼んだ回数。**巻き戻しの座標**になるので、
+    /// 機械の寿命で通し番号にする。
+    ///
+    /// **「実行した命令数」ではない。** HLT中も装置を進めるために step は
+    /// 呼ばれ続けるので、何も実行していなくてもこの数は増える。
+    /// 実行した数が要るなら [`executed`](Self::executed) を見る
     pub instr: u64,
+    /// **実際にバイト列を実行した回数。**
+    ///
+    /// これを別に持つのは、`instr` だけを見せると嘘になるからである。
+    /// ベンチのワークロードは hlt で終わるが、その後も `instr` は増え続ける。
+    /// 画面に出ている数字が増えていれば人は「動いている」と読むので、
+    /// **止まっていることが数字で分かる**ようにする。
+    ///
+    /// 2つの差がそのまま「暇にしていた時間」になる
+    pub executed: u64,
     /// 実行ブレークポイント (線形アドレス CS*16+IP)
     pub code: BTreeSet<u32>,
     /// 書き込みを見張るメモリ番地
@@ -162,10 +176,12 @@ impl Debug {
     /// 見張るものを全部外す。**命令数と足跡の設定は残す** —
     /// 「ブレークを消したら時計まで止まった」では驚く
     pub fn clear(&mut self) {
-        let (cap, instr, count) = (self.trace_cap, self.instr, self.count);
+        let (cap, instr, executed, count) =
+            (self.trace_cap, self.instr, self.executed, self.count);
         *self = Self::new();
         self.trace_cap = cap;
         self.instr = instr;
+        self.executed = executed;
         self.count = count;
         self.refresh();
     }

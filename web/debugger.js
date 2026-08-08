@@ -82,8 +82,11 @@ const CSS = `
 
 const HTML = `
   <header>
+    <!-- 状態はタイトル行に置く。ボタンの列に混ぜると、ボタンが増えたときに
+         折り返して**状態が下の行へ落ちる** (Restart を足して実際にそうなった) -->
     <div class="row">
       <h2 style="margin:0">rustx86 debugger</h2>
+      <span class="state" id="rxState">—</span>
       <button class="close" id="rxClose" hidden>Close</button>
     </div>
     <div class="row" style="margin-top:8px">
@@ -91,14 +94,18 @@ const HTML = `
       <button id="rxStep">Step 1</button>
       <button id="rxCont">Continue</button>
       <button id="rxRestart" hidden>Restart</button>
-      <span class="state" id="rxState">—</span>
     </div>
     <p class="why" id="rxWhy"></p>
   </header>
 
   <section>
     <h2>Registers</h2>
-    <p class="note">オレンジは前回から変わったところ。</p>
+    <p class="note">オレンジは前回から変わったところ。
+      <code>executed</code> は<strong>本当に実行した命令数</strong>、
+      <code>steps</code> は機械を進めた回数で、
+      <strong>HLTの間も装置を動かすために進む</strong>。
+      2つの差がそのまま暇にしていた時間で、<code>goto</code> の座標は
+      <code>steps</code> のほう。</p>
     <table id="rxRegs"></table>
   </section>
 
@@ -380,16 +387,18 @@ export class Debugger {
     // **HLT を隠さない。** ワークロードが終わって止まっているだけなのに
     // 「paused」と出ると、レジスタが動かないのがバグに見える。
     // ベンチは hlt で終わるので、必ずここへ来る
-    st.textContent = c.halted
-      ? 'halted — 実行するものが無い'
-      : stopped
-        ? 'stopped'
-        : paused
-          ? 'paused'
-          : 'running';
+    st.textContent = c.halted ? 'halted' : stopped ? 'stopped' : paused ? 'paused' : 'running';
     st.className = 'state ' + (c.halted || stopped || paused ? 'stopped' : 'running');
     this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
     this.$('rxRestart').hidden = !this.host.restart;
+    // 状態語は短く保ち、**理由は下の行に書く**。タイトル行に長い文を入れると
+    // 窓の幅で折り返す
+    if (c.halted && !stopped) {
+      this.$('rxWhy').textContent =
+        'HLT — 実行するものが無い。レジスタが動かないのはこのため (Restart で最初から)';
+    } else if (!stopped) {
+      this.$('rxWhy').textContent = '';
+    }
 
     // レジスタ。**前回と変わったところに色を付ける** — 1命令進めたときに
     // どれが動いたかが目で分かる
@@ -419,7 +428,12 @@ export class Debugger {
     rows.push(
       `<tr>${cell('IP', hex16(c.ip))}${cell('FL', hex16(c.flags))}</tr>`,
       `<tr><td class="k">flags</td><td class="v" colspan="3">${c.flagNames || '—'}</td></tr>`,
-      `<tr><td class="k">instrs</td><td class="v" colspan="3">${fmtInstr(c.instr)}</td></tr>`,
+      `<tr><td class="k">executed</td><td class="v" colspan="3">${fmtInstr(c.executed)}</td></tr>`,
+      `<tr><td class="k">steps</td><td class="v" colspan="3">${fmtInstr(c.instr)}` +
+        (c.instr > c.executed
+          ? `<span class="k" style="margin-left:.6em">うち ${fmtPlain(c.instr - c.executed)} は HLT で空回り</span>`
+          : '') +
+        `</td></tr>`,
     );
     this.$('rxRegs').innerHTML = rows.join('');
 
@@ -528,6 +542,12 @@ export class Debugger {
  * **`goto` で巻き戻すときの座標**であり、`Step 1` では1ずつ動く。
  * 丸めた数を打ち直しても、そこへは戻れない。だから両方出す。
  */
+const fmtPlain = (n) => {
+  if (n < 1e6) return n.toLocaleString();
+  const [v, u] = n >= 1e9 ? [n / 1e9, 'G'] : [n / 1e6, 'M'];
+  return `${v.toFixed(2)} ${u}`;
+};
+
 function fmtInstr(n) {
   if (n < 1e6) return n.toLocaleString();
   const [v, u] = n >= 1e9 ? [n / 1e9, 'G'] : [n / 1e6, 'M'];
