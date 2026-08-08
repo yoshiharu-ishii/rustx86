@@ -61,7 +61,14 @@ export class Terminal {
     this.scrollback = [];
     /** 今の画面 25行 (文字列)。スクロール検出と選択に使う */
     this.screen = [];
-    /** 今の画面の生バイト (文字+属性)。描画に使う */
+    /**
+     * 今の画面の生バイト (文字+属性)。**自前の領域に写しを持つ。**
+     *
+     * wasmのメモリを直接見る参照を持ち続けてはいけない。wasm側で大きな確保が
+     * あるとリニアメモリが伸び、**それまでの参照は無効になる**。
+     * 実際、状態の保存 (数MBを確保する) をした瞬間に画面が真っ黒になった。
+     * 写すのは4000バイトなので、抱えている危険に比べれば安い。
+     */
     this.cells = null;
     /** 前回の生バイト。スクロールの検出に使う */
     this.prevCells = null;
@@ -110,18 +117,19 @@ export class Terminal {
    * だから安い方だけを細かく呼べるように分けてある。
    */
   sample(cells, cursorRow, cursorCol) {
-    this.cells = cells;
     this.cursor.row = cursorRow;
     this.cursor.col = cursorCol;
 
     const rowBytes = this.cols * 2;
     const size = rowBytes * this.rows;
+    if (!this.cells) this.cells = new Uint8Array(size);
+    this.cells.set(cells.subarray(0, size));
     if (!this.prevCells) {
       this.prevCells = new Uint8Array(size);
-      this.prevCells.set(cells.subarray(0, size));
+      this.prevCells.set(this.cells);
       return;
     }
-    const shift = this.#detectScroll(this.prevCells, cells, rowBytes);
+    const shift = this.#detectScroll(this.prevCells, this.cells, rowBytes);
     if (shift > 0) {
       // 流れた行は**スクロール前の画面**から取る。
       // 文字列を作るのはここだけなので、毎回作る必要がない
@@ -130,7 +138,7 @@ export class Terminal {
       while (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift();
       if (this.offset > 0) this.offset = Math.min(this.offset + shift, this.scrollback.length);
     }
-    this.prevCells.set(cells.subarray(0, size));
+    this.prevCells.set(this.cells);
   }
 
   /** 控えた行 + 今の画面 */

@@ -76,9 +76,17 @@ export class Machine {
     return !this.running;
   }
 
-  /** 状態をまるごと書き出す (CPU・装置・メモリ・ディスク) */
+  /**
+   * 状態をまるごと書き出す (CPU・装置・メモリ・ディスク)。
+   *
+   * 数MBを確保するのでwasmのリニアメモリが伸びることがある。伸びると
+   * **それまでにJS側へ渡した参照は無効になる**ので、書き出したあとは
+   * 新しい参照で描き直させる。
+   */
   saveState() {
-    return this.emu.save_state();
+    const bytes = this.emu.save_state();
+    this.onFrame?.(this.vram(), ...this.cursor(), true);
+    return bytes;
   }
 
   /** 書き出した状態へ戻す。時計の基準も入れ直す */
@@ -87,6 +95,7 @@ export class Machine {
     this.lastCursor = [-1, -1];
     this.lastMeasure = performance.now();
     this.executed = 0;
+    this.onFrame?.(this.vram(), ...this.cursor(), true);
   }
 
   start() {
