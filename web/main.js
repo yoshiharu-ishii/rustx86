@@ -211,7 +211,8 @@ $('save').addEventListener('click', () => {
   const blob = new Blob([term.allLines().join('\n')], { type: 'text/plain' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'elks.log';
+  // 箱ではなく**中身**の名前を付ける。載せたOSが何であれ辻褄が合う
+  a.download = `${(lastLabel || 'console').replace(/\.\w+$/, '')}.log`;
   a.click();
   URL.revokeObjectURL(a.href);
 });
