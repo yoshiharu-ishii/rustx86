@@ -64,7 +64,9 @@ const CSS = `
   .rx-dbg .v { color: #79c0ff; }
   .rx-dbg .changed { color: #f0883e; }
   .rx-dbg .hex { color: #7ee787; }
-  .rx-dbg .why { margin: 6px 0 0; color: #f0883e; min-height: 1.4em; }
+  /* **必ず1行。** 折り返すと下の欄が丸ごとずれる */
+  .rx-dbg .why { margin: 6px 0 0; color: #f0883e; height: 1.4em;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rx-dbg .hint { color: #6e7681; margin: 6px 0 0; font-size: 12px; }
   .rx-dbg pre { margin: 0; white-space: pre; overflow-x: auto; }
   .rx-dbg .list { color: #8b949e; margin: 6px 0 0; }
@@ -391,14 +393,7 @@ export class Debugger {
     st.className = 'state ' + (c.halted || stopped || paused ? 'stopped' : 'running');
     this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
     this.$('rxRestart').hidden = !this.host.restart;
-    // 状態語は短く保ち、**理由は下の行に書く**。タイトル行に長い文を入れると
-    // 窓の幅で折り返す
-    if (c.halted && !stopped) {
-      this.$('rxWhy').textContent =
-        'HLT — 実行するものが無い。レジスタが動かないのはこのため (Restart で最初から)';
-    } else if (!stopped) {
-      this.$('rxWhy').textContent = '';
-    }
+    if (!stopped) this.setWhy('');
 
     // レジスタ。**前回と変わったところに色を付ける** — 1命令進めたときに
     // どれが動いたかが目で分かる
@@ -480,16 +475,30 @@ export class Debugger {
    * ベンチへ切り替えたときに実際にそう見えた (ELKSのCS:IPが居座った)。
    */
   clearView() {
-    for (const id of ['rxRegs', 'rxHere', 'rxMem', 'rxTrace', 'rxWhy']) {
+    for (const id of ['rxRegs', 'rxHere', 'rxMem', 'rxTrace']) {
       this.$(id).textContent = '';
     }
+    this.setWhy('');
+  }
+
+  /**
+   * 止まった理由を出す。**ここに出るのは止まった理由だけ**である。
+   *
+   * 状態の説明 (HLTなど) は書かない — 状態語で分かるものを長い文で
+   * 繰り返すと、折り返して下の欄がずれる。実際に2行になって崩れた。
+   * 収まらない場合も切り詰めて1行に保ち、全文は title で読ませる
+   */
+  setWhy(text) {
+    const el = this.$('rxWhy');
+    el.textContent = text;
+    el.title = text;
   }
 
   /** 親が「止まった」と気づいたときに呼ぶ。理由の文字列はここで預かる */
   onStop(why) {
     this.lastWhy = why;
     if (this.open) {
-      this.$('rxWhy').textContent = '-> ' + why;
+      this.setWhy('-> ' + why);
       this.render();
     }
   }
