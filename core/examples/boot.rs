@@ -99,6 +99,33 @@ fn main() {
         println!("--- テキストVRAM ---\n{screen}\n--- (ここまで) ---");
     }
 
+    // **色だけで描かれた絵**は文字を見るだけでは消える。
+    // テトリスのブロックのように「背景色を付けた空白」で描くソフトがあるので、
+    // 背景が黒でないセルは塗りつぶしとして見せる (実際これで一度騙された)
+    {
+        let v = m.text_vram();
+        let painted: String = (0..25)
+            .map(|row| {
+                let line: String = (0..80)
+                    .map(|col| {
+                        let i = (row * 80 + col) * 2;
+                        let (ch, attr) = (v[i], v[i + 1]);
+                        if ch == b' ' && (attr >> 4) & 7 != 0 {
+                            '█' // 色だけのセル
+                        } else {
+                            rustx86_core::cp437::to_char(ch)
+                        }
+                    })
+                    .collect();
+                line.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if painted.trim() != m.text_screen_string().trim() {
+            println!("--- テキストVRAM (色付きセルを塗って表示) ---\n{}\n--- (ここまで) ---", painted.trim_end());
+        }
+    }
+
     // カーソルの居場所は「画面が空に見える」ときの手がかりになる。
     // 書いた先が見ている場所と違う、という取り違えがすぐ分かる
     let (crow, ccol) = m.cursor_pos();
