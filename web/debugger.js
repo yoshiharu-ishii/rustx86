@@ -424,11 +424,9 @@ export class Debugger {
       `<tr>${cell('IP', hex16(c.ip))}${cell('FL', hex16(c.flags))}</tr>`,
       `<tr><td class="k">flags</td><td class="v" colspan="3">${c.flagNames || '—'}</td></tr>`,
       `<tr><td class="k">executed</td><td class="v" colspan="3">${fmtInstr(c.executed)}</td></tr>`,
-      `<tr><td class="k">steps</td><td class="v" colspan="3">${fmtInstr(c.instr)}` +
-        (c.instr > c.executed
-          ? `<span class="k" style="margin-left:.6em">うち ${fmtPlain(c.instr - c.executed)} は HLT で空回り</span>`
-          : '') +
-        `</td></tr>`,
+      // 差 (HLTで空回りした回数) は**書かない**。2行を見比べれば分かる導出値で、
+      // 同じことを3回言うことになるうえ、行が伸びて折り返す
+      `<tr><td class="k">steps</td><td class="v" colspan="3">${fmtInstr(c.instr)}</td></tr>`,
     );
     this.$('rxRegs').innerHTML = rows.join('');
 
@@ -551,12 +549,6 @@ export class Debugger {
  * **`goto` で巻き戻すときの座標**であり、`Step 1` では1ずつ動く。
  * 丸めた数を打ち直しても、そこへは戻れない。だから両方出す。
  */
-const fmtPlain = (n) => {
-  if (n < 1e6) return n.toLocaleString();
-  const [v, u] = n >= 1e9 ? [n / 1e9, 'G'] : [n / 1e6, 'M'];
-  return `${v.toFixed(2)} ${u}`;
-};
-
 function fmtInstr(n) {
   if (n < 1e6) return n.toLocaleString();
   const [v, u] = n >= 1e9 ? [n / 1e9, 'G'] : [n / 1e6, 'M'];
