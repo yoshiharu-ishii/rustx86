@@ -12,6 +12,7 @@
 import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import base64
 from pathlib import Path
 
 
@@ -24,6 +25,35 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, *args):
         pass  # 静かにする
+
+    def do_POST(self):
+        """画面の写しを受け取って `docs/images/` へ置く。
+
+        エミュレータの画面は canvas なので、`toDataURL()` を投げてもらえば
+        **ページの装飾が混ざらない、画素そのままの絵**が手に入る。
+        画面写真を撮り直したくなるたびに手で撮るのは続かないので、
+        開発サーバーに受け口を付けておく。
+
+            POST /shot/elks-tetris   本文は data:image/png;base64,...
+
+        開発用サーバーなので 127.0.0.1 でしか待ち受けていない。
+        """
+        if not self.path.startswith("/shot/"):
+            self.send_error(404)
+            return
+        name = Path(self.path[len("/shot/"):]).name
+        if not name or not all(c.isalnum() or c in "-_" for c in name):
+            self.send_error(400, "名前が不正")
+            return
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        _, _, b64 = body.partition("base64,")
+        out = Path(__file__).resolve().parent.parent / "docs" / "images" / f"{name}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(base64.b64decode(b64))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(f"{out} ({out.stat().st_size} bytes)\n".encode())
 
 
 if __name__ == "__main__":
