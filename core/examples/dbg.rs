@@ -70,7 +70,7 @@ fn main() {
                 }
                 None => println!("usage: w 0x450"),
             },
-            "wi" => match arg1.and_then(|s| addr(s)).map(|a| a as u16) {
+            "wi" => match arg1.and_then(addr).map(|a| a as u16) {
                 Some(p) => {
                     let rw = rest.get(1).copied().unwrap_or("w");
                     m.dbg.watch_io(p, rw.contains('r'), rw.contains('w'));
@@ -101,7 +101,11 @@ fn main() {
                 run(&mut m, n + 1);
             }
             "until" | "u" => {
-                let needle = line.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+                let needle = line
+                    .split_once(char::is_whitespace)
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .trim();
                 if needle.is_empty() {
                     println!("usage: until FreeDOS kernel");
                 } else {
@@ -196,7 +200,9 @@ fn run(m: &mut Machine, cap: u64) {
         Some(s) => println!("{}", why(m, &s)),
         // 何にも当たらずに上限へ来た。**黙って戻らない** — 「止まった」と
         // 見分けがつかなくなる
-        None if n >= cap => println!("-> ran {n} instructions, nothing hit (`c <count>` to run longer)"),
+        None if n >= cap => {
+            println!("-> ran {n} instructions, nothing hit (`c <count>` to run longer)")
+        }
         None => {}
     }
     show_where(m);
@@ -220,7 +226,11 @@ fn until(m: &mut Machine, needle: &str, cap: u64) {
             break;
         }
         if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
-            println!("found {:?} after {} instructions", needle, m.dbg.instr - start);
+            println!(
+                "found {:?} after {} instructions",
+                needle,
+                m.dbg.instr - start
+            );
             break;
         }
         if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
@@ -304,8 +314,15 @@ fn info(m: &Machine) {
 fn flag_names(c: &rustx86_core::cpu::Cpu) -> String {
     use rustx86_core::cpu::*;
     [
-        (CF, "CF"), (PF, "PF"), (AF, "AF"), (ZF, "ZF"),
-        (SF, "SF"), (TF, "TF"), (IF, "IF"), (DF, "DF"), (OF, "OF"),
+        (CF, "CF"),
+        (PF, "PF"),
+        (AF, "AF"),
+        (ZF, "ZF"),
+        (SF, "SF"),
+        (TF, "TF"),
+        (IF, "IF"),
+        (DF, "DF"),
+        (OF, "OF"),
     ]
     .iter()
     .filter(|(f, _)| c.flag(*f))
@@ -322,7 +339,11 @@ fn dump(m: &Machine, addr: u32, len: u32) {
         for i in 0..16 {
             let v = m.read8(a + i);
             hex.push_str(&format!("{v:02x} "));
-            txt.push(if (0x20..0x7f).contains(&v) { v as char } else { '.' });
+            txt.push(if (0x20..0x7f).contains(&v) {
+                v as char
+            } else {
+                '.'
+            });
         }
         println!("{a:07x}  {hex} |{txt}|");
     }
@@ -336,7 +357,13 @@ fn trace(m: &Machine, n: usize) {
     }
     for s in t.iter().skip(t.len().saturating_sub(n)) {
         let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
-        println!("{:>12}: {:04x}:{:04x}  {}", s.instr, s.cs, s.ip, b.join(" "));
+        println!(
+            "{:>12}: {:04x}:{:04x}  {}",
+            s.instr,
+            s.cs,
+            s.ip,
+            b.join(" ")
+        );
     }
 }
 

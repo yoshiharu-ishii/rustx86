@@ -76,7 +76,10 @@ fn rejects_garbage() {
     assert!(m.load_state(b"NOTASNAP--------").is_err(), "印が違う");
 
     let good = boot("asm/hello.bin").expect("asm/hello.bin").save_state();
-    assert!(m.load_state(&good[..good.len() / 2]).is_err(), "途中で切れている");
+    assert!(
+        m.load_state(&good[..good.len() / 2]).is_err(),
+        "途中で切れている"
+    );
     // 版が違うもの
     let mut bad = good.clone();
     bad[8] = 0xFF;

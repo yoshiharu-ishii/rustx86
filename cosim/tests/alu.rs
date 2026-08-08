@@ -90,7 +90,11 @@ fn grp1_and_incdec() {
             fixup: nofix,
             build: |r| {
                 let kind = r.next_u16() as u8 & 7;
-                vec![0x80, 0xC0 | (kind << 3) | (r.next_u16() as u8 & 7), r.interesting_u8()]
+                vec![
+                    0x80,
+                    0xC0 | (kind << 3) | (r.next_u16() as u8 & 7),
+                    r.interesting_u8(),
+                ]
             },
         },
         Template {
@@ -100,7 +104,12 @@ fn grp1_and_incdec() {
             build: |r| {
                 let kind = r.next_u16() as u8 & 7;
                 let v = r.interesting_u16();
-                vec![0x81, 0xC0 | (kind << 3) | (r.next_u16() as u8 & 7), v as u8, (v >> 8) as u8]
+                vec![
+                    0x81,
+                    0xC0 | (kind << 3) | (r.next_u16() as u8 & 7),
+                    v as u8,
+                    (v >> 8) as u8,
+                ]
             },
         },
         Template {
@@ -109,7 +118,11 @@ fn grp1_and_incdec() {
             fixup: nofix,
             build: |r| {
                 let kind = r.next_u16() as u8 & 7;
-                vec![0x83, 0xC0 | (kind << 3) | (r.next_u16() as u8 & 7), r.interesting_u8()]
+                vec![
+                    0x83,
+                    0xC0 | (kind << 3) | (r.next_u16() as u8 & 7),
+                    r.interesting_u8(),
+                ]
             },
         },
         Template {
@@ -128,7 +141,6 @@ fn grp1_and_incdec() {
     check(&templates, 300, 0x5EED_0007);
 }
 
-
 /// GRP2: シフトと回転。AFは常に未定義、OFはカウント1のときだけ定義される
 #[test]
 fn shifts_and_rotates() {
@@ -136,18 +148,42 @@ fn shifts_and_rotates() {
         0xC0 | ((r.next_u16() as u8 & 7) << 3) | (r.next_u16() as u8 & 7)
     }
     let templates = vec![
-        Template { name: "GRP2 r/m8,1", undefined: UD_AF, fixup: nofix,
-            build: |r| vec![0xD0, modrm_byte(r)] },
-        Template { name: "GRP2 r/m16,1", undefined: UD_AF, fixup: nofix,
-            build: |r| vec![0xD1, modrm_byte(r)] },
-        Template { name: "GRP2 r/m8,imm8", undefined: UD_AF | UD_OF, fixup: nofix,
-            build: |r| vec![0xC0, modrm_byte(r), (r.next_u16() as u8) & 0x1F] },
-        Template { name: "GRP2 r/m16,imm8", undefined: UD_AF | UD_OF, fixup: nofix,
-            build: |r| vec![0xC1, modrm_byte(r), (r.next_u16() as u8) & 0x1F] },
-        Template { name: "GRP2 r/m8,CL", undefined: UD_AF | UD_OF, fixup: nofix,
-            build: |r| vec![0xD2, modrm_byte(r)] },
-        Template { name: "GRP2 r/m16,CL", undefined: UD_AF | UD_OF, fixup: nofix,
-            build: |r| vec![0xD3, modrm_byte(r)] },
+        Template {
+            name: "GRP2 r/m8,1",
+            undefined: UD_AF,
+            fixup: nofix,
+            build: |r| vec![0xD0, modrm_byte(r)],
+        },
+        Template {
+            name: "GRP2 r/m16,1",
+            undefined: UD_AF,
+            fixup: nofix,
+            build: |r| vec![0xD1, modrm_byte(r)],
+        },
+        Template {
+            name: "GRP2 r/m8,imm8",
+            undefined: UD_AF | UD_OF,
+            fixup: nofix,
+            build: |r| vec![0xC0, modrm_byte(r), (r.next_u16() as u8) & 0x1F],
+        },
+        Template {
+            name: "GRP2 r/m16,imm8",
+            undefined: UD_AF | UD_OF,
+            fixup: nofix,
+            build: |r| vec![0xC1, modrm_byte(r), (r.next_u16() as u8) & 0x1F],
+        },
+        Template {
+            name: "GRP2 r/m8,CL",
+            undefined: UD_AF | UD_OF,
+            fixup: nofix,
+            build: |r| vec![0xD2, modrm_byte(r)],
+        },
+        Template {
+            name: "GRP2 r/m16,CL",
+            undefined: UD_AF | UD_OF,
+            fixup: nofix,
+            build: |r| vec![0xD3, modrm_byte(r)],
+        },
     ];
     check(&templates, 400, 0x5417_0000);
 }
@@ -159,35 +195,92 @@ fn grp3_mul_div() {
     const UD_MUL: u16 = UD_SF | UD_ZF | UD_AF | UD_PF;
     const UD_DIV: u16 = UD_CF | UD_PF | UD_AF | UD_ZF | UD_SF | UD_OF;
     let templates = vec![
-        Template { name: "TEST r/m8,imm8", undefined: 0, fixup: nofix,
-            build: |r| vec![0xF6, 0xC0 | (r.next_u16() as u8 & 7), r.interesting_u8()] },
-        Template { name: "NOT r/m16", undefined: 0, fixup: nofix,
-            build: |r| vec![0xF7, 0xD0 | (r.next_u16() as u8 & 7)] },
-        Template { name: "NEG r/m8", undefined: 0, fixup: nofix,
-            build: |r| vec![0xF6, 0xD8 | (r.next_u16() as u8 & 7)] },
-        Template { name: "NEG r/m16", undefined: 0, fixup: nofix,
-            build: |r| vec![0xF7, 0xD8 | (r.next_u16() as u8 & 7)] },
-        Template { name: "MUL r/m8", undefined: UD_MUL, fixup: nofix,
-            build: |r| vec![0xF6, 0xE0 | (r.next_u16() as u8 & 7)] },
-        Template { name: "IMUL r/m8", undefined: UD_MUL, fixup: nofix,
-            build: |r| vec![0xF6, 0xE8 | (r.next_u16() as u8 & 7)] },
-        Template { name: "MUL r/m16", undefined: UD_MUL, fixup: nofix,
-            build: |r| vec![0xF7, 0xE0 | (r.next_u16() as u8 & 7)] },
-        Template { name: "IMUL r/m16", undefined: UD_MUL, fixup: nofix,
-            build: |r| vec![0xF7, 0xE8 | (r.next_u16() as u8 & 7)] },
+        Template {
+            name: "TEST r/m8,imm8",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0xF6, 0xC0 | (r.next_u16() as u8 & 7), r.interesting_u8()],
+        },
+        Template {
+            name: "NOT r/m16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0xF7, 0xD0 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "NEG r/m8",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0xF6, 0xD8 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "NEG r/m16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0xF7, 0xD8 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "MUL r/m8",
+            undefined: UD_MUL,
+            fixup: nofix,
+            build: |r| vec![0xF6, 0xE0 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "IMUL r/m8",
+            undefined: UD_MUL,
+            fixup: nofix,
+            build: |r| vec![0xF6, 0xE8 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "MUL r/m16",
+            undefined: UD_MUL,
+            fixup: nofix,
+            build: |r| vec![0xF7, 0xE0 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "IMUL r/m16",
+            undefined: UD_MUL,
+            fixup: nofix,
+            build: |r| vec![0xF7, 0xE8 | (r.next_u16() as u8 & 7)],
+        },
         // DIVは除数CL/CXを非ゼロにし、商が収まる範囲に被除数を絞る
-        Template { name: "DIV r/m8 (CL)", undefined: UD_DIV,
-            fixup: |regs| { regs[0] &= 0x00FF; regs[1] |= 0x0001; },
-            build: |_| vec![0xF6, 0xF1] },
-        Template { name: "IDIV r/m8 (CL)", undefined: UD_DIV,
-            fixup: |regs| { regs[0] &= 0x007F; regs[1] = (regs[1] & 0x007F) | 1; },
-            build: |_| vec![0xF6, 0xF9] },
-        Template { name: "DIV r/m16 (CX)", undefined: UD_DIV,
-            fixup: |regs| { regs[2] = 0; regs[1] |= 0x0001; },
-            build: |_| vec![0xF7, 0xF1] },
-        Template { name: "IDIV r/m16 (CX)", undefined: UD_DIV,
-            fixup: |regs| { regs[2] = 0; regs[0] &= 0x7FFF; regs[1] = (regs[1] & 0x7FFF) | 1; },
-            build: |_| vec![0xF7, 0xF9] },
+        Template {
+            name: "DIV r/m8 (CL)",
+            undefined: UD_DIV,
+            fixup: |regs| {
+                regs[0] &= 0x00FF;
+                regs[1] |= 0x0001;
+            },
+            build: |_| vec![0xF6, 0xF1],
+        },
+        Template {
+            name: "IDIV r/m8 (CL)",
+            undefined: UD_DIV,
+            fixup: |regs| {
+                regs[0] &= 0x007F;
+                regs[1] = (regs[1] & 0x007F) | 1;
+            },
+            build: |_| vec![0xF6, 0xF9],
+        },
+        Template {
+            name: "DIV r/m16 (CX)",
+            undefined: UD_DIV,
+            fixup: |regs| {
+                regs[2] = 0;
+                regs[1] |= 0x0001;
+            },
+            build: |_| vec![0xF7, 0xF1],
+        },
+        Template {
+            name: "IDIV r/m16 (CX)",
+            undefined: UD_DIV,
+            fixup: |regs| {
+                regs[2] = 0;
+                regs[0] &= 0x7FFF;
+                regs[1] = (regs[1] & 0x7FFF) | 1;
+            },
+            build: |_| vec![0xF7, 0xF9],
+        },
     ];
     check(&templates, 300, 0x3D1F_0042);
 }
@@ -199,33 +292,120 @@ fn misc_instructions() {
         0xC0 | ((r.next_u16() as u8 & 7) << 3) | (r.next_u16() as u8 & 7)
     }
     let templates = vec![
-        Template { name: "TEST r/m8,r8", undefined: 0, fixup: nofix,
-            build: |r| vec![0x84, modrm_byte(r)] },
-        Template { name: "TEST r/m16,r16", undefined: 0, fixup: nofix,
-            build: |r| vec![0x85, modrm_byte(r)] },
-        Template { name: "XCHG r/m8,r8", undefined: 0, fixup: nofix,
-            build: |r| vec![0x86, modrm_byte(r)] },
-        Template { name: "XCHG r/m16,r16", undefined: 0, fixup: nofix,
-            build: |r| vec![0x87, modrm_byte(r)] },
-        Template { name: "XCHG AX,r16", undefined: 0, fixup: nofix,
-            build: |r| vec![0x90 | (r.next_u16() as u8 & 7)] },
-        Template { name: "LEA r16,[disp16]", undefined: 0, fixup: nofix,
-            build: |r| { let off = r.interesting_u16();
-                vec![0x8D, 0x06 | ((r.next_u16() as u8 & 7) << 3), off as u8, (off >> 8) as u8] } },
-        Template { name: "CBW", undefined: 0, fixup: nofix, build: |_| vec![0x98] },
-        Template { name: "CWD", undefined: 0, fixup: nofix, build: |_| vec![0x99] },
-        Template { name: "SAHF", undefined: 0, fixup: nofix, build: |_| vec![0x9E] },
-        Template { name: "LAHF", undefined: 0, fixup: nofix, build: |_| vec![0x9F] },
-        Template { name: "PUSHF", undefined: 0, fixup: nofix, build: |_| vec![0x9C] },
-        Template { name: "POPF", undefined: 0, fixup: nofix, build: |_| vec![0x9D] },
-        Template { name: "INC/DEC r/m8 (GRP4)", undefined: 0, fixup: nofix,
-            build: |r| vec![0xFE, 0xC0 | ((r.next_u16() as u8 & 1) << 3) | (r.next_u16() as u8 & 7)] },
-        Template { name: "INC/DEC r/m16 (GRP5)", undefined: 0, fixup: nofix,
-            build: |r| vec![0xFF, 0xC0 | ((r.next_u16() as u8 & 1) << 3) | (r.next_u16() as u8 & 7)] },
-        Template { name: "PUSH r/m16 (GRP5 /6)", undefined: 0, fixup: nofix,
-            build: |r| vec![0xFF, 0xF0 | (r.next_u16() as u8 & 7)] },
-        Template { name: "POP r/m16", undefined: 0, fixup: nofix,
-            build: |r| vec![0x8F, 0xC0 | (r.next_u16() as u8 & 7)] },
+        Template {
+            name: "TEST r/m8,r8",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x84, modrm_byte(r)],
+        },
+        Template {
+            name: "TEST r/m16,r16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x85, modrm_byte(r)],
+        },
+        Template {
+            name: "XCHG r/m8,r8",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x86, modrm_byte(r)],
+        },
+        Template {
+            name: "XCHG r/m16,r16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x87, modrm_byte(r)],
+        },
+        Template {
+            name: "XCHG AX,r16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x90 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "LEA r16,[disp16]",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| {
+                let off = r.interesting_u16();
+                vec![
+                    0x8D,
+                    0x06 | ((r.next_u16() as u8 & 7) << 3),
+                    off as u8,
+                    (off >> 8) as u8,
+                ]
+            },
+        },
+        Template {
+            name: "CBW",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x98],
+        },
+        Template {
+            name: "CWD",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x99],
+        },
+        Template {
+            name: "SAHF",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x9E],
+        },
+        Template {
+            name: "LAHF",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x9F],
+        },
+        Template {
+            name: "PUSHF",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x9C],
+        },
+        Template {
+            name: "POPF",
+            undefined: 0,
+            fixup: nofix,
+            build: |_| vec![0x9D],
+        },
+        Template {
+            name: "INC/DEC r/m8 (GRP4)",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| {
+                vec![
+                    0xFE,
+                    0xC0 | ((r.next_u16() as u8 & 1) << 3) | (r.next_u16() as u8 & 7),
+                ]
+            },
+        },
+        Template {
+            name: "INC/DEC r/m16 (GRP5)",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| {
+                vec![
+                    0xFF,
+                    0xC0 | ((r.next_u16() as u8 & 1) << 3) | (r.next_u16() as u8 & 7),
+                ]
+            },
+        },
+        Template {
+            name: "PUSH r/m16 (GRP5 /6)",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0xFF, 0xF0 | (r.next_u16() as u8 & 7)],
+        },
+        Template {
+            name: "POP r/m16",
+            undefined: 0,
+            fixup: nofix,
+            build: |r| vec![0x8F, 0xC0 | (r.next_u16() as u8 & 7)],
+        },
     ];
     check(&templates, 300, 0x9111_0007);
 }
@@ -242,8 +422,16 @@ fn decimal_adjust() {
     check_cases("AAA", UD_OF | UD_SF | UD_ZF | UD_PF, sweep_al(vec![0x37]));
     check_cases("AAS", UD_OF | UD_SF | UD_ZF | UD_PF, sweep_al(vec![0x3F]));
     for base in [1u8, 8, 10, 16, 100, 255] {
-        check_cases("AAM imm8", UD_OF | UD_AF | UD_CF, sweep_al(vec![0xD4, base]));
-        check_cases("AAD imm8", UD_OF | UD_AF | UD_CF, sweep_al(vec![0xD5, base]));
+        check_cases(
+            "AAM imm8",
+            UD_OF | UD_AF | UD_CF,
+            sweep_al(vec![0xD4, base]),
+        );
+        check_cases(
+            "AAD imm8",
+            UD_OF | UD_AF | UD_CF,
+            sweep_al(vec![0xD5, base]),
+        );
     }
 }
 
@@ -259,17 +447,66 @@ fn string_instructions() {
         regs[7] = DATA_ADDR + (regs[7] % 14); // DI
     }
     let templates = vec![
-        Template { name: "MOVSB", undefined: 0, fixup: in_data_window, build: |_| vec![0xA4] },
-        Template { name: "MOVSW", undefined: 0, fixup: in_data_window, build: |_| vec![0xA5] },
-        Template { name: "CMPSB", undefined: 0, fixup: in_data_window, build: |_| vec![0xA6] },
-        Template { name: "CMPSW", undefined: 0, fixup: in_data_window, build: |_| vec![0xA7] },
-        Template { name: "STOSB", undefined: 0, fixup: in_data_window, build: |_| vec![0xAA] },
-        Template { name: "STOSW", undefined: 0, fixup: in_data_window, build: |_| vec![0xAB] },
-        Template { name: "LODSB", undefined: 0, fixup: in_data_window, build: |_| vec![0xAC] },
-        Template { name: "LODSW", undefined: 0, fixup: in_data_window, build: |_| vec![0xAD] },
-        Template { name: "SCASB", undefined: 0, fixup: in_data_window, build: |_| vec![0xAE] },
-        Template { name: "SCASW", undefined: 0, fixup: in_data_window, build: |_| vec![0xAF] },
+        Template {
+            name: "MOVSB",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xA4],
+        },
+        Template {
+            name: "MOVSW",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xA5],
+        },
+        Template {
+            name: "CMPSB",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xA6],
+        },
+        Template {
+            name: "CMPSW",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xA7],
+        },
+        Template {
+            name: "STOSB",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAA],
+        },
+        Template {
+            name: "STOSW",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAB],
+        },
+        Template {
+            name: "LODSB",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAC],
+        },
+        Template {
+            name: "LODSW",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAD],
+        },
+        Template {
+            name: "SCASB",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAE],
+        },
+        Template {
+            name: "SCASW",
+            undefined: 0,
+            fixup: in_data_window,
+            build: |_| vec![0xAF],
+        },
     ];
     check(&templates, 300, 0x5712_0000);
 }
-

@@ -41,7 +41,12 @@ impl Disk {
             2_949_120 => (80, 2, 36), // 2.88MB 3.5"
             n => return Err(format!("形状の分からないイメージサイズ: {n} バイト")),
         };
-        Ok(Self { data, cylinders, heads, sectors })
+        Ok(Self {
+            data,
+            cylinders,
+            heads,
+            sectors,
+        })
     }
 
     /// CHS を先頭からの通し番号 (LBA) に直す
@@ -60,7 +65,10 @@ impl Disk {
     }
 
     pub fn write_sector(&mut self, lba: usize, data: &[u8]) -> bool {
-        match self.data.get_mut(lba * SECTOR_SIZE..(lba + 1) * SECTOR_SIZE) {
+        match self
+            .data
+            .get_mut(lba * SECTOR_SIZE..(lba + 1) * SECTOR_SIZE)
+        {
             Some(s) => {
                 s.copy_from_slice(data);
                 true

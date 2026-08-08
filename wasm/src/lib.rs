@@ -206,8 +206,15 @@ impl Emulator {
             .map(|i| format!("{:02x}", self.m.read8(lin.wrapping_add(i))))
             .collect();
         let flags: Vec<&str> = [
-            (CF, "CF"), (PF, "PF"), (AF, "AF"), (ZF, "ZF"),
-            (SF, "SF"), (TF, "TF"), (IF, "IF"), (DF, "DF"), (OF, "OF"),
+            (CF, "CF"),
+            (PF, "PF"),
+            (AF, "AF"),
+            (ZF, "ZF"),
+            (SF, "SF"),
+            (TF, "TF"),
+            (IF, "IF"),
+            (DF, "DF"),
+            (OF, "OF"),
         ]
         .iter()
         .filter(|(f, _)| c.flag(*f))
@@ -216,8 +223,16 @@ impl Emulator {
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
                "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{}}}"#,
-            c.regs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
-            c.sregs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            c.regs
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            c.sregs
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
             c.ip,
             c.flags,
             flags.join(" "),
@@ -231,7 +246,9 @@ impl Emulator {
 
     /// メモリを読む。**デバッガ用なので副作用は無い**
     pub fn read_mem(&self, addr: u32, len: u32) -> Vec<u8> {
-        (0..len).map(|i| self.m.read8(addr.wrapping_add(i))).collect()
+        (0..len)
+            .map(|i| self.m.read8(addr.wrapping_add(i)))
+            .collect()
     }
 
     pub fn set_break(&mut self, lin: u32) {
@@ -276,10 +293,16 @@ impl Emulator {
                 at.0, at.1
             ),
             Some(Stop::WriteIo { port, val, at }) => {
-                format!("wrote {val:#04x} to port {port:#06x} by {:04x}:{:04x}", at.0, at.1)
+                format!(
+                    "wrote {val:#04x} to port {port:#06x} by {:04x}:{:04x}",
+                    at.0, at.1
+                )
             }
             Some(Stop::ReadIo { port, val, at }) => {
-                format!("read {val:#04x} from port {port:#06x} by {:04x}:{:04x}", at.0, at.1)
+                format!(
+                    "read {val:#04x} from port {port:#06x} by {:04x}:{:04x}",
+                    at.0, at.1
+                )
             }
             Some(Stop::Count(n)) => format!("reached instruction {n}"),
         }
@@ -295,10 +318,26 @@ impl Emulator {
         let d = &self.m.dbg;
         format!(
             r#"{{"code":[{}],"mem":[{}],"ioR":[{}],"ioW":[{}],"on":{}}}"#,
-            d.code.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
-            d.mem_write.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
-            d.io_read.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
-            d.io_write.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","),
+            d.code
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            d.mem_write
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            d.io_read
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            d.io_write
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
             d.on,
         )
     }
@@ -324,7 +363,10 @@ impl Emulator {
                 let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
                 format!(
                     r#"{{"i":{},"cs":{},"ip":{},"b":"{}"}}"#,
-                    s.instr, s.cs, s.ip, b.join(" ")
+                    s.instr,
+                    s.cs,
+                    s.ip,
+                    b.join(" ")
                 )
             })
             .collect();

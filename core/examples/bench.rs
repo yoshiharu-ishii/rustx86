@@ -21,8 +21,9 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "asm/bench.bin".into());
-    let sector = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("{path} を読めない ({e})。nasm -f bin -o asm/bench.bin asm/bench.asm"));
+    let sector = std::fs::read(&path).unwrap_or_else(|e| {
+        panic!("{path} を読めない ({e})。nasm -f bin -o asm/bench.bin asm/bench.asm")
+    });
 
     let mut m = Machine::new();
     m.load_boot_sector(&sector).expect("load");
