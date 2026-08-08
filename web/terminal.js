@@ -59,6 +59,8 @@ export class Terminal {
 
     /** 画面外へ流れた行 (文字列) */
     this.scrollback = [];
+    /** 同じ行の属性 (色)。**履歴も色付きで読めるように控える** */
+    this.scrollbackAttrs = [];
     /** 今の画面 25行 (文字列)。スクロール検出と選択に使う */
     this.screen = [];
     /**
@@ -115,6 +117,7 @@ export class Terminal {
   /** 端末の中身を空にする */
   reset() {
     this.scrollback.length = 0;
+    this.scrollbackAttrs.length = 0;
     this.screen = [];
     this.prevCells = null;
     this.offset = 0;
@@ -152,8 +155,15 @@ export class Terminal {
       // 流れた行は**スクロール前の画面**から取る。
       // 文字列を作るのはここだけなので、毎回作る必要がない
       const before = this.#rowsFrom(this.prevCells);
-      for (let i = 0; i < shift; i++) this.scrollback.push(before[i]);
-      while (this.scrollback.length > this.scrollbackLimit) this.scrollback.shift();
+      const attrs = this.#attrsFrom(this.prevCells);
+      for (let i = 0; i < shift; i++) {
+        this.scrollback.push(before[i]);
+        this.scrollbackAttrs.push(attrs[i]);
+      }
+      while (this.scrollback.length > this.scrollbackLimit) {
+        this.scrollback.shift();
+        this.scrollbackAttrs.shift();
+      }
       if (this.offset > 0) this.offset = Math.min(this.offset + shift, this.scrollback.length);
     }
     this.prevCells.set(this.cells);
@@ -226,11 +236,16 @@ export class Terminal {
 
   #drawHistory() {
     const { ctx } = this;
-    const lines = this.#visibleLines();
-    ctx.fillStyle = HOMEBREW.dim;
+    const { lines, attrs } = this.#visibleWithAttrs();
     for (let row = 0; row < this.rows; row++) {
       const line = lines[row];
-      if (line) ctx.fillText(line, 0, row * CELL_H);
+      if (!line) continue;
+      const at = attrs[row];
+      for (let col = 0; col < line.length; col++) {
+        // 属性を控えていない行 (今の画面ぶん) は既定色で描く
+        ctx.fillStyle = at ? PALETTE[at[col] & 0x0f] : HOMEBREW.fg;
+        ctx.fillText(line[col], col * CELL_W, row * CELL_H);
+      }
     }
     ctx.fillStyle = HOMEBREW.banner;
     ctx.fillRect(0, 0, this.cols * CELL_W, CELL_H);
@@ -269,6 +284,19 @@ export class Terminal {
   }
 
   // ---------- 内部 ----------
+
+  /** バイト列から属性だけ取り出す (色を保った履歴のため) */
+  #attrsFrom(cells) {
+    const out = [];
+    for (let row = 0; row < this.rows; row++) {
+      const a = new Uint8Array(this.cols);
+      for (let col = 0; col < this.cols; col++) {
+        a[col] = cells[(row * this.cols + col) * 2 + 1];
+      }
+      out.push(a);
+    }
+    return out;
+  }
 
   #rowsFrom(cells) {
     const out = [];
@@ -328,6 +356,17 @@ export class Terminal {
   }
 
   /** 今表示している25行 */
+  /** 今表示している25行を、属性付きで返す */
+  #visibleWithAttrs() {
+    const all = this.allLines();
+    const allAttrs = [...this.scrollbackAttrs, ...new Array(this.screen.length).fill(null)];
+    const start = Math.max(0, all.length - this.rows - this.offset);
+    return {
+      lines: all.slice(start, start + this.rows),
+      attrs: allAttrs.slice(start, start + this.rows),
+    };
+  }
+
   #visibleLines() {
     if (this.offset === 0) return this.screen;
     const all = this.allLines();
@@ -411,7 +450,7 @@ export class Terminal {
     c.addEventListener('keydown', e => {
       // コピーは端末が受け取る (ゲストへは渡さない)
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC' && this.selectedText()) {
-        navigator.clipboard?.writeText(this.selectedText());
+        this.#copy(this.selectedText());
         this.selection = null;
         this.draw();
         e.preventDefault();
@@ -448,6 +487,37 @@ export class Terminal {
     // 文字は押したときだけ送る (離すときの相方は文字を送る側が付ける)
     if (down) this.onChar?.(e.key);
     return true;
+  }
+
+  /**
+   * 文字列をクリップボードへ。
+   *
+   * `navigator.clipboard` は**セキュアな配信元でしか存在しない**。
+   * localhost は該当するが、LAN内のIPアドレスで開くと消える。
+   * 黙って何も起きないのが一番困るので、古いやり方に落とす。
+   */
+  #copy(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => this.#copyFallback(text));
+    } else {
+      this.#copyFallback(text);
+    }
+  }
+
+  #copyFallback(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+    } catch {
+      /* ここまで来たら諦める */
+    }
+    ta.remove();
+    this.canvas.focus();
   }
 
   #scrollbarTo(ev) {

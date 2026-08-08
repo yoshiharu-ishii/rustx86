@@ -119,8 +119,11 @@ function boot(image, label) {
   term.onChar = ch => machine.typeChar(ch);
   term.onPaste = text => machine.paste(text);
 
-  window.__machine = machine; // 動作確認用
-  window.__term = term;
+  // 動作確認用の窓口。手元で開いているときだけ出す
+  if (['localhost', '127.0.0.1'].includes(location.hostname)) {
+    window.__machine = machine;
+    window.__term = term;
+  }
 
   machine.start();
   setStatus(`${label} を起動中… 画面をクリックするとキー入力できます`);
