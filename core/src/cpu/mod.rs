@@ -22,8 +22,8 @@ pub mod string;
 
 use alu::{alu16, alu8, alu_w, condition};
 use operand::{
-    fetch16, fetch8, fetch_w, linear, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
-    read_op_w, write_op16, write_op8, write_op_w, Operand,
+    fetch16, fetch8, fetch_w, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8, read_op_w,
+    write_op16, write_op8, write_op_w, Operand,
 };
 use shift::shift_rot;
 
@@ -61,10 +61,47 @@ pub const TF: u32 = 1 << 8;
 pub struct Cpu {
     /// AX CX DX BX SP BP SI DI (将来の32bit拡張を見据えてu32で保持)
     pub regs: [u32; 8],
-    /// ES CS SS DS
+    /// ES CS SS DS FS GS — **見える部分 (セレクタ)**。
+    /// 保護モードでは番地の材料ではなく、GDTの行番号になる
     pub sregs: [u16; 6],
     pub ip: u16,
     pub flags: u32,
+    /// CR0。bit0 = PE (Protection Enable)。これが立つと sregs の意味が変わる
+    pub cr0: u32,
+    /// GDTR (LGDTで積む)。記述子表の場所と大きさ
+    pub gdtr_base: u32,
+    pub gdtr_limit: u16,
+    /// セグメントの**隠しレジスタ** (実機と同じ構造)。
+    ///
+    /// 実機の386は、セグメントレジスタをロードした瞬間に記述子の中身
+    /// (base/limit/属性) をCPU内に写し取り、以後のアクセスは**この写しだけ**を
+    /// 見る。GDTを後から書き換えても、ロードし直すまで反映されない。
+    /// リアルモードは「写しに常に sel×16 が入っている」特殊ケースにすぎない —
+    /// この統一がプロテクトモードの正体である
+    pub hidden: [SegHidden; 6],
+}
+
+/// セグメントの隠しレジスタ1本分
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegHidden {
+    pub base: u32,
+    pub limit: u32,
+    /// 記述子のaccessバイト (P/DPL/type)
+    pub access: u8,
+    /// Dビット。コードセグメントなら既定オペランド幅が32bitになる
+    pub big: bool,
+}
+
+impl SegHidden {
+    /// リアルモードの写し: base = sel×16、64K、16bit
+    fn real(sel: u16) -> Self {
+        Self {
+            base: (sel as u32) << 4,
+            limit: 0xFFFF,
+            access: 0x93, // present, data, writable相当
+            big: false,
+        }
+    }
 }
 
 impl Default for Cpu {
@@ -80,6 +117,45 @@ impl Cpu {
             sregs: [0; 6],
             ip: 0,
             flags: 0x0002, // bit1は常に1
+            cr0: 0,
+            gdtr_base: 0,
+            gdtr_limit: 0,
+            hidden: [SegHidden::real(0); 6],
+        }
+    }
+
+    /// プロテクトモードか (CR0.PE)
+    pub fn pe(&self) -> bool {
+        self.cr0 & 1 != 0
+    }
+
+    /// セグメントのbase。
+    ///
+    /// リアルモードでは**セレクタから毎回計算する** (sel×16)。写しを読まないのは、
+    /// テストや既存コードが `sregs[i] = x` と直接書いても嘘にならないようにするため。
+    /// 保護モードに入った瞬間に写しへ切り替わる (実機はこの瞬間も写しを見続けて
+    /// いるが、入る側で写しを初期化するので観測できる差は無い)
+    pub fn seg_base(&self, i: usize) -> u32 {
+        if self.pe() {
+            self.hidden[i].base
+        } else {
+            (self.sregs[i] as u32) << 4
+        }
+    }
+
+    /// そのセグメントのDビット (32bitか)。リアルモードでは常に16bit
+    pub fn seg_is32(&self, i: usize) -> bool {
+        self.pe() && self.hidden[i].big
+    }
+
+    /// セグメント適用後のリニアアドレス。
+    /// リアルモードは1MBで折り返す (8086のアドレスバスが20本だったため)
+    pub fn lin(&self, seg: usize, off: u32) -> u32 {
+        let a = self.seg_base(seg).wrapping_add(off);
+        if self.pe() {
+            a
+        } else {
+            a & 0xF_FFFF
         }
     }
 
@@ -179,13 +255,76 @@ pub struct Decoder {
     pub addrsize32: bool,
 }
 
+/// GDTから記述子を読んで、セグメントの隠しレジスタへ写す。
+///
+/// **実機がセグメントロードのたびにやっていることそのもの**である。
+/// ここで写した base/limit/Dビット だけが以後のアクセスに使われ、
+/// GDT本体は次のロードまで見られない。
+///
+/// 特権チェック (DPL/RPL/CPL) はまだ実装しない。リング0だけの世界では
+/// 全部 0=0 で恒真になるためで、リング3を作るときに一緒に入れる。
+/// **黙って通す場合とは違い、チェックすべき材料 (access) は写してある**
+pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) {
+    if !m.cpu.pe() {
+        m.cpu.sregs[idx] = sel;
+        m.cpu.hidden[idx] = SegHidden::real(sel);
+        return;
+    }
+    // ヌルセレクタ: 写しを空にする。**使った瞬間に咎める**のは後の仕事
+    if sel & !0x7 == 0 {
+        m.cpu.sregs[idx] = sel;
+        m.cpu.hidden[idx] = SegHidden {
+            base: 0,
+            limit: 0,
+            access: 0,
+            big: false,
+        };
+        return;
+    }
+    let off = (sel & !0x7) as u32;
+    if off + 7 > m.cpu.gdtr_limit as u32 {
+        panic!(
+            "selector {sel:#06x} is beyond GDT limit {:#06x}",
+            m.cpu.gdtr_limit
+        );
+    }
+    if sel & 0x4 != 0 {
+        panic!("LDT selector {sel:#06x} (LDT is not implemented)");
+    }
+    // 記述子8バイト。baseとlimitが細切れなのは、286の6バイト記述子に
+    // 後方互換の形で32bit分の桁を継ぎ足したため (ここにも地層がある)
+    let a = m.cpu.gdtr_base.wrapping_add(off);
+    let lo = m.read32(a);
+    let hi = m.read32(a.wrapping_add(4));
+    let base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
+    let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
+    let access = ((hi >> 8) & 0xFF) as u8;
+    if hi & 0x0080_0000 != 0 {
+        // Gビット: limitの単位が4Kページになる
+        limit = (limit << 12) | 0xFFF;
+    }
+    if access & 0x80 == 0 {
+        panic!("selector {sel:#06x}: descriptor not present");
+    }
+    m.cpu.sregs[idx] = sel;
+    m.cpu.hidden[idx] = SegHidden {
+        base,
+        limit,
+        access,
+        big: hi & 0x0040_0000 != 0, // Dビット
+    };
+}
+
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
+    // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
+    // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
+    let cs32 = m.cpu.seg_is32(CS);
     let mut d = Decoder {
         seg_override: None,
         rep: None,
-        opsize32: false,
-        addrsize32: false,
+        opsize32: cs32,
+        addrsize32: cs32,
     };
 
     // プレフィクスループ
@@ -196,9 +335,9 @@ pub fn step(m: &mut Machine) {
             0x2E => d.seg_override = Some(CS),
             0x36 => d.seg_override = Some(SS),
             0x3E => d.seg_override = Some(DS),
-            0xF0 => {}                   // LOCK: シングルコアなので無視
-            0x66 => d.opsize32 = true,   // オペランドサイズの反転 (386〜)
-            0x67 => d.addrsize32 = true, // アドレスサイズの反転 (386〜)
+            0xF0 => {}                    // LOCK: シングルコアなので無視
+            0x66 => d.opsize32 = !cs32,   // オペランドサイズの**反転** (386〜)
+            0x67 => d.addrsize32 = !cs32, // アドレスサイズの反転 (386〜)
             0xF2 | 0xF3 => d.rep = Some(b),
             _ => break b,
         }
@@ -337,7 +476,8 @@ pub fn step(m: &mut Machine) {
         0x8E => {
             let (reg, rm) = modrm(m, &d);
             let v = read_op16(m, &rm);
-            m.cpu.sregs[reg & 3] = v;
+            // 保護モードではGDTから隠しレジスタへ写す。リアルモードなら従来どおり
+            load_seg(m, reg & 3, v);
         }
         0xB0..=0xB7 => {
             let v = fetch8(m);
@@ -361,28 +501,28 @@ pub fn step(m: &mut Machine) {
         }
         0xA0 => {
             let off = fetch16(m);
-            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
-            let v = m.read8(linear(seg, off));
+            let seg = d.seg_override.unwrap_or(DS);
+            let v = m.read8(m.cpu.lin(seg, off as u32));
             m.cpu.set_reg8(0, v);
         }
         0xA1 => {
             let off = fetch16(m);
-            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
-            let a = linear(seg, off);
+            let seg = d.seg_override.unwrap_or(DS);
+            let a = m.cpu.lin(seg, off as u32);
             let w = d.opsize32;
             let v = if w { m.read32(a) } else { m.read16(a) as u32 };
             m.cpu.set_reg_w(AX, v, w);
         }
         0xA2 => {
             let off = fetch16(m);
-            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
+            let seg = d.seg_override.unwrap_or(DS);
             let v = m.cpu.reg8(0);
-            m.write8(linear(seg, off), v);
+            m.write8(m.cpu.lin(seg, off as u32), v);
         }
         0xA3 => {
             let off = fetch16(m);
-            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
-            let a = linear(seg, off);
+            let seg = d.seg_override.unwrap_or(DS);
+            let a = m.cpu.lin(seg, off as u32);
             let w = d.opsize32;
             let v = m.cpu.reg_w(AX, w);
             if w {
@@ -516,7 +656,7 @@ pub fn step(m: &mut Machine) {
                 for _ in 1..level {
                     let b = m.cpu.reg16(BP).wrapping_sub(2);
                     m.cpu.set_reg16(BP, b);
-                    let v = m.read16(linear(m.cpu.sregs[SS], b));
+                    let v = m.read16(m.cpu.lin(SS, b as u32));
                     push16(m, v);
                 }
                 push16(m, frame);
@@ -555,9 +695,9 @@ pub fn step(m: &mut Machine) {
         // --- XLAT: AL = [BX + AL] ---
         // 256バイトの変換テーブルを1命令で引く。文字コード変換のための命令
         0xD7 => {
-            let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
+            let seg = d.seg_override.unwrap_or(DS);
             let off = m.cpu.reg16(BX).wrapping_add(m.cpu.reg8(0) as u16);
-            let v = m.read8(linear(seg, off));
+            let v = m.read8(m.cpu.lin(seg, off as u32));
             m.cpu.set_reg8(0, v);
         }
 
@@ -624,10 +764,14 @@ pub fn step(m: &mut Machine) {
         // リアルモードでは「CSに値を代入する」だけだが、プロテクトモードでは
         // 同じ命令がディスクリプタ引きと特権チェックに化ける (Tier 3)。
         0xEA => {
-            let off = fetch16(m);
+            // オフセットの幅はオペランドサイズに従う (16bitコードなら off16)
+            let off = fetch_w(m, d.opsize32);
             let seg = fetch16(m);
-            m.cpu.sregs[CS] = seg;
-            m.cpu.ip = off;
+            // 保護モードではこれが**遷移を完成させる**一撃になる。
+            // PE=1にしただけではまだ16bitのまま走っていて、CSに記述子が
+            // 積まれて初めて32bitコードが始まる
+            load_seg(m, CS, seg);
+            m.cpu.ip = off as u16;
         }
         0x9A => {
             let off = fetch16(m);
@@ -1050,10 +1194,56 @@ pub fn step(m: &mut Machine) {
         // 1バイトの256席が埋まったので、もう1バイト読んで席を増やす方式である。
         0x0F => {
             let op2 = fetch8(m);
-            panic!(
-                "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
-                m.cpu.sregs[CS], start_ip
-            )
+            match op2 {
+                // システム表の操作。ModRMのreg欄が「何をするか」を選ぶ
+                0x01 => {
+                    let (reg, rm) = modrm(m, &d);
+                    match (reg, &rm) {
+                        // LGDT m16&32: limit(2バイト) + base(4バイト)。
+                        // 16bitオペランドのときbaseは24bitしか読まれない —
+                        // 286互換の名残がここにも居る
+                        (2, Operand::Mem { addr, .. }) => {
+                            m.cpu.gdtr_limit = m.read16(*addr);
+                            let base = m.read32(addr.wrapping_add(2));
+                            m.cpu.gdtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
+                        }
+                        _ => panic!(
+                            "unimplemented 0f 01 /{reg} at {:04x}:{:04x}",
+                            m.cpu.sregs[CS], start_ip
+                        ),
+                    }
+                }
+                // MOV r32, CRn / MOV CRn, r32。ModRMだがmodは無視して常にレジスタ形式
+                0x20 | 0x22 => {
+                    let mrm = fetch8(m);
+                    let cr = ((mrm >> 3) & 7) as usize;
+                    let r = (mrm & 7) as usize;
+                    if cr != 0 {
+                        panic!("unimplemented control register CR{cr}");
+                    }
+                    if op2 == 0x20 {
+                        m.cpu.regs[r] = m.cpu.cr0;
+                    } else {
+                        let was_pe = m.cpu.pe();
+                        m.cpu.cr0 = m.cpu.regs[r];
+                        if m.cpu.cr0 & 0x8000_0000 != 0 {
+                            panic!("CR0.PG (paging) is not implemented yet");
+                        }
+                        // PEが立った瞬間、写しを「今のリアルモードの姿」で初期化する。
+                        // 実機ではロード時から写しがあるので何も起きない場面だが、
+                        // こちらはリアルモードで写しを持たない (遅延) ため、境界で作る
+                        if !was_pe && m.cpu.pe() {
+                            for i in 0..6 {
+                                m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
+                            }
+                        }
+                    }
+                }
+                _ => panic!(
+                    "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
+                    m.cpu.sregs[CS], start_ip
+                ),
+            }
         }
 
         _ => panic!(

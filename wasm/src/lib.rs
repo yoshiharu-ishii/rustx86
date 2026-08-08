@@ -220,9 +220,19 @@ impl Emulator {
         .filter(|(f, _)| c.flag(*f))
         .map(|(_, n)| *n)
         .collect();
+        // 保護モードの様子。隠しレジスタは「見張るべき3本」だけ渡す
+        let seg = |i: usize| {
+            let h = &c.hidden[i];
+            format!(
+                r#"{{"sel":{},"base":{},"limit":{},"big":{}}}"#,
+                c.sregs[i], h.base, h.limit, h.big
+            )
+        };
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
-               "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{}}}"#,
+               "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{},
+               "pe":{},"cr0":{},"gdtrBase":{},"gdtrLimit":{},
+               "cs":{},"ds":{},"ss":{}}}"#,
             c.regs
                 .iter()
                 .map(|v| v.to_string())
@@ -241,6 +251,13 @@ impl Emulator {
             self.m.dbg.executed,
             self.m.halted,
             lin,
+            c.pe(),
+            c.cr0,
+            c.gdtr_base,
+            c.gdtr_limit,
+            seg(CS),
+            seg(DS),
+            seg(SS),
         )
     }
 

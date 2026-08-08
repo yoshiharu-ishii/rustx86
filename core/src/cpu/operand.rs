@@ -21,7 +21,7 @@ pub enum Operand {
 }
 
 pub fn fetch8(m: &mut Machine) -> u8 {
-    let v = m.read8(linear(m.cpu.sregs[CS], m.cpu.ip));
+    let v = m.read8(m.cpu.lin(CS, m.cpu.ip as u32));
     m.cpu.ip = m.cpu.ip.wrapping_add(1);
     v
 }
@@ -71,11 +71,11 @@ pub fn modrm(m: &mut Machine, d: &Decoder) -> (usize, Operand) {
         _ => fetch16(m),
     };
     let off = base.wrapping_add(disp);
-    let seg = m.cpu.sregs[d.seg_override.unwrap_or(default_seg)];
+    let seg = d.seg_override.unwrap_or(default_seg);
     (
         reg,
         Operand::Mem {
-            addr: linear(seg, off),
+            addr: m.cpu.lin(seg, off as u32),
             off,
         },
     )
@@ -164,12 +164,12 @@ pub fn fetch32(m: &mut Machine) -> u32 {
 pub fn push32(m: &mut Machine, v: u32) {
     let sp = m.cpu.reg16(SP).wrapping_sub(4);
     m.cpu.set_reg16(SP, sp);
-    m.write32(linear(m.cpu.sregs[SS], sp), v);
+    m.write32(m.cpu.lin(SS, sp as u32), v);
 }
 
 pub fn pop32(m: &mut Machine) -> u32 {
     let sp = m.cpu.reg16(SP);
-    let v = m.read32(linear(m.cpu.sregs[SS], sp));
+    let v = m.read32(m.cpu.lin(SS, sp as u32));
     m.cpu.set_reg16(SP, sp.wrapping_add(4));
     v
 }
@@ -195,13 +195,13 @@ pub fn pop_w(m: &mut Machine, wide: bool) -> u32 {
 pub fn push16(m: &mut Machine, v: u16) {
     let sp = m.cpu.reg16(SP).wrapping_sub(2);
     m.cpu.set_reg16(SP, sp);
-    let addr = linear(m.cpu.sregs[SS], sp);
+    let addr = m.cpu.lin(SS, sp as u32);
     m.write16(addr, v);
 }
 
 pub fn pop16(m: &mut Machine) -> u16 {
     let sp = m.cpu.reg16(SP);
-    let v = m.read16(linear(m.cpu.sregs[SS], sp));
+    let v = m.read16(m.cpu.lin(SS, sp as u32));
     m.cpu.set_reg16(SP, sp.wrapping_add(2));
     v
 }

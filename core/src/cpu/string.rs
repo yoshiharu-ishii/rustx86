@@ -4,7 +4,6 @@
 //! 打ち切る (REPE/REPNE) ため、単純な繰り返しにはできない。
 
 use super::alu::{alu16, alu8};
-use super::operand::linear;
 use super::{Cpu, Decoder, AX, CX, DF, DI, DS, ES, SI, ZF};
 use crate::Machine;
 
@@ -25,19 +24,18 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
         if d.rep.is_some() && m.cpu.reg16(CX) == 0 {
             break;
         }
-        let src_seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)];
+        let src_seg = d.seg_override.unwrap_or(DS);
         let si = m.cpu.reg16(SI);
         let di = m.cpu.reg16(DI);
-        let es = m.cpu.sregs[ES];
         match op {
             0xA4 | 0xA5 => {
                 // MOVS
                 if word {
-                    let v = m.read16(linear(src_seg, si));
-                    m.write16(linear(es, di), v);
+                    let v = m.read16(m.cpu.lin(src_seg, si as u32));
+                    m.write16(m.cpu.lin(ES, di as u32), v);
                 } else {
-                    let v = m.read8(linear(src_seg, si));
-                    m.write8(linear(es, di), v);
+                    let v = m.read8(m.cpu.lin(src_seg, si as u32));
+                    m.write8(m.cpu.lin(ES, di as u32), v);
                 }
                 let dl = str_delta(&m.cpu, size);
                 m.cpu.set_reg16(SI, si.wrapping_add(dl));
@@ -46,12 +44,12 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
             0xA6 | 0xA7 => {
                 // CMPS
                 if word {
-                    let a = m.read16(linear(src_seg, si));
-                    let b = m.read16(linear(es, di));
+                    let a = m.read16(m.cpu.lin(src_seg, si as u32));
+                    let b = m.read16(m.cpu.lin(ES, di as u32));
                     alu16(&mut m.cpu, 7, a, b);
                 } else {
-                    let a = m.read8(linear(src_seg, si));
-                    let b = m.read8(linear(es, di));
+                    let a = m.read8(m.cpu.lin(src_seg, si as u32));
+                    let b = m.read8(m.cpu.lin(ES, di as u32));
                     alu8(&mut m.cpu, 7, a, b);
                 }
                 let dl = str_delta(&m.cpu, size);
@@ -62,10 +60,10 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
                 // STOS
                 if word {
                     let v = m.cpu.reg16(AX);
-                    m.write16(linear(es, di), v);
+                    m.write16(m.cpu.lin(ES, di as u32), v);
                 } else {
                     let v = m.cpu.reg8(0);
-                    m.write8(linear(es, di), v);
+                    m.write8(m.cpu.lin(ES, di as u32), v);
                 }
                 let dl = str_delta(&m.cpu, size);
                 m.cpu.set_reg16(DI, di.wrapping_add(dl));
@@ -73,10 +71,10 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
             0xAC | 0xAD => {
                 // LODS
                 if word {
-                    let v = m.read16(linear(src_seg, si));
+                    let v = m.read16(m.cpu.lin(src_seg, si as u32));
                     m.cpu.set_reg16(AX, v);
                 } else {
-                    let v = m.read8(linear(src_seg, si));
+                    let v = m.read8(m.cpu.lin(src_seg, si as u32));
                     m.cpu.set_reg8(0, v);
                 }
                 let dl = str_delta(&m.cpu, size);
@@ -86,11 +84,11 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
                 // SCAS
                 if word {
                     let a = m.cpu.reg16(AX);
-                    let b = m.read16(linear(es, di));
+                    let b = m.read16(m.cpu.lin(ES, di as u32));
                     alu16(&mut m.cpu, 7, a, b);
                 } else {
                     let a = m.cpu.reg8(0);
-                    let b = m.read8(linear(es, di));
+                    let b = m.read8(m.cpu.lin(ES, di as u32));
                     alu8(&mut m.cpu, 7, a, b);
                 }
                 let dl = str_delta(&m.cpu, size);
