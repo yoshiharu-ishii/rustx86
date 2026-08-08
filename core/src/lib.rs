@@ -2,6 +2,7 @@ pub mod bios;
 pub mod bus;
 pub mod cp437;
 pub mod cpu;
+pub mod debug;
 pub mod dev;
 pub mod snapshot;
 pub mod disk;
@@ -89,6 +90,8 @@ pub struct Machine {
     pub int_first: Vec<(u16, u16)>,
     /// 直近の割り込み (ベクタ, CS, IP)。**panic直前に何が起きたかはここに出る**
     pub int_recent: std::collections::VecDeque<(u8, u16, u16)>,
+    /// 外から覗くための仕掛け。**機械の状態ではない**のでスナップショットには入れない
+    pub dbg: debug::Debug,
     pub halted: bool,
 }
 
@@ -112,6 +115,7 @@ impl Machine {
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],
             int_recent: std::collections::VecDeque::with_capacity(33),
+            dbg: debug::Debug::new(),
             halted: false,
         }
     }
@@ -191,6 +195,16 @@ impl Machine {
     /// 仕掛けなら書き込み側に寄せる**。
     pub fn write8(&mut self, addr: u32, val: u8) {
         let a = (addr as usize) & (MEM_SIZE - 1);
+        // デバッガを切っていれば真偽値1つで抜ける。**最も回数の多い経路**なので
+        // 見張る番地の集合を引く前に元締めで落とす
+        if self.dbg.on && self.dbg.mem_write.contains(&(a as u32)) {
+            self.dbg.stop = Some(debug::Stop::WriteMem {
+                addr: a as u32,
+                old: self.mem[a],
+                new: val,
+                at: self.dbg.at,
+            });
+        }
         self.mem[a] = val;
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             self.vram_dirty = true;
@@ -223,6 +237,20 @@ impl Machine {
     /// プルアップで全ビットが立つためで、OSはこの値を見て「装置が居ない」と
     /// 判断する。ここで panic すると装置探索の段階で止まってしまう
     pub fn io_read8(&mut self, port: u16) -> u8 {
+        let val = self.io_read8_inner(port);
+        // **読んだ値まで残す。** 「装置が何を答えたか」が分からないと、
+        // OSがなぜその判断をしたのかを追えない
+        if self.dbg.on && self.dbg.io_read.contains(&port) {
+            self.dbg.stop = Some(debug::Stop::ReadIo {
+                port,
+                val,
+                at: self.dbg.at,
+            });
+        }
+        val
+    }
+
+    fn io_read8_inner(&mut self, port: u16) -> u8 {
         match bus::decode_io(port) {
             IoTarget::Pic { slave } => {
                 let p = &self.devices.pic[slave as usize];
@@ -260,6 +288,13 @@ impl Machine {
     }
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
+        if self.dbg.on && self.dbg.io_write.contains(&port) {
+            self.dbg.stop = Some(debug::Stop::WriteIo {
+                port,
+                val,
+                at: self.dbg.at,
+            });
+        }
         match bus::decode_io(port) {
             IoTarget::Pic { slave } => {
                 let p = &mut self.devices.pic[slave as usize];
@@ -506,6 +541,12 @@ impl Machine {
     /// 命令の実行中に割り込むと、書き換え途中のレジスタやスタックのまま
     /// ハンドラへ飛ぶことになり、`IRET` で戻っても再開できない。
     pub fn step(&mut self) {
+        // 0. デバッガ。切っていれば真偽値1つで抜ける。
+        //    命令数は**この呼び出しの回数**で数えるので、`boot` の例が出す
+        //    命令数と同じ座標になる (決定的なので巻き戻しの目盛りになる)
+        if self.dbg.on && self.dbg.tick() {
+            return;
+        }
         // 1. 保留中のハードウェア割り込みを受け付ける (IFが立っているときだけ)。
         //    HLTで止まっていてもここで目を覚ます — 割り込み待ちのHLTが
         //    成立するのはこのため
@@ -526,6 +567,32 @@ impl Machine {
 
         if self.halted {
             return;
+        }
+
+        // 2.5 実行の直前。**バイト列を実行する前**に判定するので、止まった
+        //     状態でその命令そのものを見られる。止まっている間は通らない
+        //     (通すと同じ番地で永久に止まる)
+        if self.dbg.on {
+            let (cs, ip) = (self.cpu.sregs[cpu::CS], self.cpu.ip);
+            if self.dbg.before_exec(cs, ip) {
+                self.dbg.instr -= 1; // 実行しなかったので数え戻す
+                return;
+            }
+            // ここを通ったものだけが**本当に実行される**。HLT中は通らないので、
+            // instr との差がそのまま「暇にしていた時間」になる
+            self.dbg.executed += 1;
+            if self.dbg.trace_cap > 0 {
+                let lin = (cs as u32) << 4 | ip as u32;
+                let mut bytes = [0u8; 5];
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    *b = self.read8(lin.wrapping_add(i as u32));
+                }
+                if self.dbg.trace.len() == self.dbg.trace_cap {
+                    self.dbg.trace.pop_front();
+                }
+                let instr = self.dbg.instr;
+                self.dbg.trace.push_back(debug::Step { instr, cs, ip, bytes });
+            }
         }
 
         // 3. BIOS HLE の入口に居るなら、バイト列を実行せずホスト関数で肩代わりする。
@@ -566,6 +633,15 @@ impl Machine {
             }
             self.step();
             n += 1;
+            // デバッガが止めたら抜ける。**見張っていなければ真偽値1つ**なので
+            // 計測経路には効かない。
+            //
+            // ブレークポイントで止まった場合、最後の1回は実行されていない
+            // (step が実行前に判定するため)。正確な命令数が要るなら
+            // `dbg.instr` を見る — こちらは計測用の概数でよい
+            if self.dbg.on && self.dbg.stop.is_some() {
+                break;
+            }
         }
         n
     }
