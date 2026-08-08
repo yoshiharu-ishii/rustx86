@@ -42,12 +42,21 @@ export const MACHINES = [
     label: 'FreeDOS 1.4',
     sub: '8086ビルド',
     image: './fd14boot.img',
-    status: 'partial',
+    status: 'ok',
     note:
-      'カーネルとFreeCOMが起動し、ウェルカム画面のロゴまで出る。' +
-      'その先で止まる — 起動時のユーティリティが 0x66 (32bitオペランドサイズ・プレフィクス) を' +
-      '使って386判定をするため。C:\\> に着くには Tier 3b が要る。' +
-      'ELKSと違って画面もキーもディスクもBIOS経由なので、BIOS層の検証になっている。',
+      'DOSプロンプト (A:\\>) まで自動で進む。ELKSと違って画面もキーもディスクも' +
+      'BIOS経由なので、BIOS層の検証になっている。' +
+      'ELIZA / ZMIY / ROW4T を入れておけば動く (テキストモードのものに限る)。',
+    // **選んだらプロンプトまで自動で進む。**
+    //
+    // このフロッピーは本来インストーラを起動する。素のプロンプトに降りるには
+    // 起動時に F5 で CONFIG.SYS と AUTOEXEC.BAT を飛ばし、聞かれるシェルの場所を
+    // 答える — DOSの定石だが、**知らないと辿り着けない**。
+    // 「押す瞬間を当てて長いパスを打て」は動くとは言えないので、機械にやらせる。
+    script: [
+      { when: 'FreeDOS kernel', send: { scancodes: [0x3f, 0xbf] } }, // F5
+      { when: 'full shell command line', send: '\\FREEDOS\\BIN\\COMMAND.COM\n' },
+    ],
     source: 'https://download.freedos.org/1.4/FD14-FloppyEdition.zip',
     sourceLabel: 'FreeDOS 1.4 Floppy Edition',
     // 配布物の 144m/x86BOOT.img を fd14boot.img として置く

@@ -131,6 +131,11 @@ export class Machine {
     this.#schedule();
   }
 
+  /** 生のスキャンコードを流す (ファンクションキーなど文字を持たないキー) */
+  sendScancodes(codes) {
+    for (const c of codes) this.emu.send_scancode(c);
+  }
+
   stop() {
     this.running = false;
   }

@@ -114,6 +114,7 @@ function boot(image, label) {
   machine.onFrame = (cells, row, col, redraw) => {
     term.sample(cells, row, col);
     if (redraw) term.draw();
+    advanceScript();
   };
   // 物理キーはそのまま、貼り付けはASCIIとして送る
   term.onKey = (code, down) => machine.key(code, down);
@@ -254,6 +255,52 @@ consoleBox.addEventListener('drop', async e => {
   boot(new Uint8Array(await f.arrayBuffer()), f.name);
 });
 
+// ---------- 起動シナリオ ----------
+//
+// **選んだらプロンプトまで自動で進む。**
+//
+// FreeDOSの起動フロッピーは本来インストーラを立ち上げる。素のプロンプトへ降りるには
+// 起動時に F5 を打ち、聞かれるシェルの場所を答える必要がある — DOSの定石だが、
+// 知らなければ辿り着けない。「押す瞬間を当てて長いパスを打て」は動くとは言えない。
+//
+// 画面に出る文字列を合図にして進める。**何命令目で打つかではなく画面を見てから打つ**のは、
+// 起動にかかる時間が環境で変わるためで、人間が画面を見て打つのと同じ手順である。
+
+/** 実行中のシナリオ。`{steps, at, queue}` */
+let script = null;
+
+function startScript(steps) {
+  script = steps?.length ? { steps, at: 0, queue: [] } : null;
+}
+
+function advanceScript() {
+  if (!script || !machine) return;
+  // 打ちかけの文字が残っていれば、**1フレームに1文字だけ**送る。
+  // まとめて送るとBIOSの待ち行列 (16枠) がゲストの読み出しより速く埋まって取りこぼす
+  if (script.queue.length) {
+    machine.typeChar(script.queue.shift());
+    return;
+  }
+  const step = script.steps[script.at];
+  if (!step) {
+    script = null;
+    return;
+  }
+  if (!term.screenText().includes(step.when)) return;
+
+  script.at++;
+  if (typeof step.send === 'string') {
+    script.queue = [...step.send];
+  } else if (step.send?.scancodes) {
+    machine.sendScancodes(step.send.scancodes);
+  }
+  setStatus(
+    script.at < script.steps.length
+      ? `自動で進めています (${script.at}/${script.steps.length})…`
+      : '自動起動が終わりました。画面をクリックすると打てます',
+  );
+}
+
 // ---------- マシン選択 ----------
 //
 // **一覧は [`machines.js`](./machines.js) が持つデータで、ここは描画と起動だけ。**
@@ -320,6 +367,7 @@ async function select(m) {
   markCurrent(m.id);
   showNote(m);
   await bootFromUrl(m);
+  startScript(m.script);
 }
 
 async function bootFromUrl(m = current) {

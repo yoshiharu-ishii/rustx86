@@ -163,6 +163,14 @@ export class Terminal {
       this.prevCells.set(this.cells);
       return;
     }
+    // **画面の文字列はここで更新する。**
+    //
+    // 以前は描画時 (`draw`) にしか更新していなかった。覗くのは細かく (6000命令ごと)
+    // 描くのは1フレームに1回、という分担なので、**判定が最大300万命令ぶん古い画面を
+    // 見ていた**。起動シナリオがF5を打つ合図を取り逃していたのがこれで、
+    // 画面に一瞬しか出ない文字列は掴めなかった。組み立ては80x25の文字を並べるだけで
+    // 安いので、覗くたびにやってよい。
+    this.screen = this.#rowsFrom(this.cells);
     const shift = this.#detectScroll(this.prevCells, this.cells, rowBytes);
     if (shift > 0) {
       // 流れた行は**スクロール前の画面**から取る。
@@ -204,7 +212,6 @@ export class Terminal {
 
   draw() {
     const { ctx } = this;
-    if (this.cells) this.screen = this.#rowsFrom(this.cells);
     ctx.fillStyle = HOMEBREW.bg;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.textBaseline = 'top';
@@ -310,6 +317,11 @@ export class Terminal {
       out.push(a);
     }
     return out;
+  }
+
+  /** 今の画面を1本の文字列にする (起動シナリオの合図判定に使う) */
+  screenText() {
+    return this.screen.join('\n');
   }
 
   #rowsFrom(cells) {
