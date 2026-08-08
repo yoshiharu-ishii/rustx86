@@ -1,10 +1,15 @@
 # PRと、mainへのマージで回すCI。
 #
-# ジョブは「CI」1本に統合し、各ステージの結果は本文つきの Check run
-# (「〜 結果」) として発行する。ジョブ標準のCheckは選択してもログページへの
-# リンクにしかならないため。各ステージは continue-on-error で最後まで走らせ、
-# 全レポートを発行してからまとめて合否判定する (テストが落ちても
-# wasmビルドの結果は見たい)。fuurai-dungeon で確立した型。
+# ## Checksタブに出すものは2つだけ
+#
+# - 「CI」 — GitHub Actions のジョブそのもの。選んでもログへのリンクにしか
+#   ならないが、これは消せない
+# - 「CI 結果」 — **本文つきの Check run**。先頭に各ステージの合否表、
+#   下に全ステージのレポートが並ぶ。読むのはこちら
+#
+# 以前はステージごとに Check run を発行していたが、左リストが4項目に
+# 膨らんで**リンク集と見分けがつかなくなった**。読む価値のあるものを
+# 1項目に濃縮する。(fuurai-dungeon の型の改良版)
 #
 # ## ステージの選び方 — 手元で回していないものを本命にする
 #
@@ -14,16 +19,13 @@
 # - **wasmビルドが本命。** ネイティブのテストが全部通るのにブラウザでだけ
 #   壊れる事故がある (`std::time::Instant` は wasm32 に存在しない、など。
 #   docs/build.md 参照)。これを止められるのはこのステージだけ
-# - **web整合** は「糊だけ新しい」事故 (`emu.key is not a function`) の検査。
-#   tools/build-web.sh --check がそのまま走る
+# - **JSとwasmの版ずれ** — キャッシュ破りの `?v=` が揃っていないと、新旧の
+#   コードが混ざって `emu.key is not a function` になる (実際に踏んだ)
+# - **整形 / lint** — ゲートにする前に全件掃除してから入れた。
+#   「緑だが指摘あり」という読めない Check は作らない
 #
-# ## 入れていないもの (理由つき)
-#
-# - **cosim** — 別ワークフロー (cosim.yml)。co-simが捕まえられるのはCPUの
-#   意味論の変化だけなので、core/src か cosim を触ったPRでだけ回す
-# - **clippy / fmt** — まだ一度も走らせておらず、今ゲートにすると赤いまま
-#   始まる。警告のみのCheckは「緑だが指摘あり」という読めない状態を作るので
-#   置かない。掃除コミットと同時にゲートとして足す (次のPRで)
+# cosim (Unicornとの突き合わせ) は別ワークフロー (cosim.yml)。
+# CPUの意味論を触ったPRでだけ回る。
 name: CI
 
 on:
@@ -45,30 +47,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: rustup target add wasm32-unknown-unknown
+      - run: |
+          rustup target add wasm32-unknown-unknown
+          rustup component add clippy rustfmt
 
+      # 各ステージは continue-on-error で最後まで走らせ、自分の節を
+      # report-*.md に書く。テストが落ちてもビルドの結果は見たい
       - name: テスト
         id: test
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            echo '## テスト (cargo test)'
+            echo '## テスト — `cargo test`'
             echo ''
-            echo '`default-members = ["core"]` なので core だけが走る。'
-            echo 'cosim (Unicorn) は別ワークフローで、CPUを触ったPRでだけ回る。'
+            echo 'core の94件。cosim (Unicornとの突き合わせ) は別ワークフローで、'
+            echo 'CPUを触ったPRでだけ回る。'
             echo ''
             echo '```'
             cargo test 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' || RC=$?
             echo '```'
             exit ${RC:-0}
-          } > test-report.md
-      - uses: ./.github/actions/publish-check
-        with:
-          name: テスト 結果
-          title: ${{ steps.test.outcome == 'success' && '全テスト合格' || 'テスト失敗あり' }}
-          outcome: ${{ steps.test.outcome }}
-          report-file: test-report.md
+          } > report-test.md
 
       - name: wasmビルド
         id: wasm
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -o pipefail
           {
-            echo '## wasmビルド (cargo build --target wasm32-unknown-unknown)'
+            echo '## ブラウザ版のビルド — `cargo build --target wasm32-unknown-unknown`'
             echo ''
             echo 'ネイティブのテストが全部通っても、wasm32 でだけ壊れることがある'
             echo '(`std::time::Instant` が無い、など)。それを止めるのがこのステージ。'
@@ -92,42 +92,103 @@ jobs:
               echo "| rustx86_wasm.wasm (wasm-opt前) | $(( SIZE / 1024 )) KB |"
             fi
             exit ${RC:-0}
-          } > wasm-report.md
-      - uses: ./.github/actions/publish-check
-        with:
-          name: wasmビルド 結果
-          title: ${{ steps.wasm.outcome == 'success' && 'ビルド成功' || 'ビルド失敗' }}
-          outcome: ${{ steps.wasm.outcome }}
-          report-file: wasm-report.md
+          } > report-wasm.md
 
-      - name: web整合
+      - name: 版ずれ
         id: web
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            echo '## web整合 (tools/build-web.sh --check)'
+            echo '## JSとwasmの版ずれ — `tools/build-web.sh --check`'
             echo ''
-            echo 'キャッシュ破りの `?v=` が web/ 全体で1つの番号に揃っているかを見る。'
-            echo '片方だけ新しいと `emu.key is not a function` になる (実際に踏んだ)。'
+            echo 'ブラウザのキャッシュを破るため、web/ の JS と wasm には `?v=番号` を'
+            echo '付けている。この番号がファイル間でずれると、**新しい半分と古い半分が'
+            echo '混ざって** `emu.key is not a function` になる (実際に踏んだ)。'
+            echo '番号が全ファイルで1つに揃っているかを見る。'
             echo ''
             echo '```'
             tools/build-web.sh --check 2>&1 | tee /dev/stderr || RC=$?
             echo '```'
             exit ${RC:-0}
-          } > web-report.md
+          } > report-web.md
+
+      - name: 整形
+        id: fmt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## 整形 — `cargo fmt --check`'
+            echo ''
+            echo '```'
+            cargo fmt --all --check 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            if [ "${RC:-0}" != "0" ]; then
+              echo ''
+              echo '手元で `cargo fmt --all` を打てば直る。'
+            fi
+            exit ${RC:-0}
+          } > report-fmt.md
+
+      - name: lint
+        id: lint
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## lint — `cargo clippy` (警告もエラー扱い)'
+            echo ''
+            echo '```'
+            cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings 2>&1 | tee /dev/stderr | grep -vE '^(    Checking|   Compiling|    Finished)' || RC=$?
+            echo '```'
+            if [ "${RC:-0}" = "0" ]; then echo '指摘なし。'; fi
+            exit ${RC:-0}
+          } > report-lint.md
+
+      # 全ステージの結果を1つのレポートに束ねて発行する
+      - name: レポート発行
+        if: always()
+        id: report
+        run: |
+          ok=0; total=0
+          {
+            echo '| ステージ | 何を見るか | 結果 |'
+            echo '|---|---|---|'
+            for row in \
+              "test:テスト:core の94件" \
+              "wasm:wasmビルド:ブラウザでだけ壊れる事故を止める" \
+              "web:版ずれ:JSとwasmの ?v= が揃っているか" \
+              "fmt:整形:cargo fmt --check" \
+              "lint:lint:clippy、警告もエラー扱い"; do
+              id=${row%%:*}; rest=${row#*:}; name=${rest%%:*}; desc=${rest#*:}
+              case $id in
+                test) outcome='${{ steps.test.outcome }}' ;;
+                wasm) outcome='${{ steps.wasm.outcome }}' ;;
+                web)  outcome='${{ steps.web.outcome }}' ;;
+                fmt)  outcome='${{ steps.fmt.outcome }}' ;;
+                lint) outcome='${{ steps.lint.outcome }}' ;;
+              esac
+              total=$((total+1))
+              [ "$outcome" = success ] && { mark='✅'; ok=$((ok+1)); } || mark='❌'
+              echo "| $name | $desc | $mark |"
+            done
+            echo ''
+            cat report-test.md report-wasm.md report-web.md report-fmt.md report-lint.md 2>/dev/null
+          } > report.md
+          echo "title=$ok/$total 合格" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/publish-check
+        if: always()
         with:
-          name: web整合 結果
-          title: ${{ steps.web.outcome == 'success' && '?v= は揃っている' || '?v= が揃っていない' }}
-          outcome: ${{ steps.web.outcome }}
-          report-file: web-report.md
+          name: CI 結果
+          title: ${{ steps.report.outputs.title }}
+          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.web.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
+          report-file: report.md
 
       - name: 合否判定
         run: |
-          echo "test: ${{ steps.test.outcome }}"
-          echo "wasm: ${{ steps.wasm.outcome }}"
-          echo "web:  ${{ steps.web.outcome }}"
           test "${{ steps.test.outcome }}" = "success" \
             && test "${{ steps.wasm.outcome }}" = "success" \
-            && test "${{ steps.web.outcome }}" = "success"
+            && test "${{ steps.web.outcome }}" = "success" \
+            && test "${{ steps.fmt.outcome }}" = "success" \
+            && test "${{ steps.lint.outcome }}" = "success"

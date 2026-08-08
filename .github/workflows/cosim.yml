@@ -1,4 +1,6 @@
-# Unicorn Engine との突き合わせ (co-sim)。
+# CPU照合 — 同じ命令列を Unicorn Engine でも実行して答え合わせする。
+#
+# (内輪では co-sim と呼んでいるもの。Checkに出る名前は意味の分かる言葉にする)
 #
 # ## いつ回すか — CPUを触ったときだけ
 #
@@ -16,7 +18,7 @@
 # こちらは重い検査で、回る条件も違う。混ぜると ci.yml の paths 設計が
 # 汚れるので、ワークフローごと分けた。Check の見た目 (本文つき Check run)
 # は publish-check を共有しているので揃う。
-name: cosim
+name: CPU照合
 
 on:
   pull_request:
@@ -42,7 +44,7 @@ env:
 
 jobs:
   cosim:
-    name: cosim
+    name: CPU照合
     runs-on: ubuntu-latest
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
     timeout-minutes: 30
@@ -69,7 +71,7 @@ jobs:
           } > cosim-report.md
       - uses: ./.github/actions/publish-check
         with:
-          name: cosim 結果
+          name: CPU照合 結果
           title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
           outcome: ${{ steps.cosim.outcome }}
           report-file: cosim-report.md
