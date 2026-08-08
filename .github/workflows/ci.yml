@@ -41,7 +41,8 @@ jobs:
           {
             echo '## テスト — `cargo test`'
             echo '```'
-            cargo test 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' || RC=$?
+            cargo test > raw.log 2>&1 || RC=$?
+            grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' raw.log | tee /dev/stderr || true
             echo '```'
             exit ${RC:-0}
           } > report-test.md
@@ -85,7 +86,10 @@ jobs:
           {
             echo '## lint — `cargo clippy -- -D warnings`'
             echo '```'
-            cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings 2>&1 | tee /dev/stderr | grep -vE '^(    Checking|   Compiling|    Finished)' || RC=$?
+            cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings > raw.log 2>&1 || RC=$?
+            # 指摘ゼロだとノイズ除去の grep が「一致なし= exit 1」になり、
+            # pipefail が拾って**綺麗なのに落ちる**。先にファイルへ落として分離する
+            grep -vE '^(    Checking|   Compiling|    Finished)' raw.log | tee /dev/stderr || true
             echo '```'
             exit ${RC:-0}
           } > report-lint.md

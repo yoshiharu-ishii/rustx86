@@ -60,7 +60,8 @@ jobs:
           {
             echo '## CPU照合 — `cargo test -p rustx86-cosim` (Unicornと毎命令比較)'
             echo '```'
-            cargo test -p rustx86-cosim 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running)' || RC=$?
+            cargo test -p rustx86-cosim > raw.log 2>&1 || RC=$?
+            grep -vE '^(   Compiling|    Finished|     Running)' raw.log | tee /dev/stderr || true
             echo '```'
             exit ${RC:-0}
           } > cosim-report.md
