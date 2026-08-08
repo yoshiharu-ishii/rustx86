@@ -94,7 +94,7 @@ impl Machine {
     ///
     /// なお 0x08 はプロテクトモードではCPUの例外番号 (#DF) と衝突する。
     /// Linuxが起動時にわざわざ 0x20 へ付け替えるのはこのためで、
-    /// この衝突は Tier 4 でもう一度顔を出す。
+    /// この衝突は Tier 3 でもう一度顔を出す。
     fn install_pic_defaults(&mut self) {
         for (i, base, icw3) in [(0usize, 0x08u8, 0x04u8), (1, 0x70, 0x02)] {
             let p = &mut self.devices.pic[i];
