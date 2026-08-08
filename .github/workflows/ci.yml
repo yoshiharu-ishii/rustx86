@@ -19,8 +19,8 @@
 #
 # ## 入れていないもの (理由つき)
 #
-# - **cosim** — Unicorn Engine のビルドに数分かかる。毎PRの値段に合わない。
-#   命令の実装を変えたときに手で回す (`cargo test -p rustx86-cosim`)
+# - **cosim** — 別ワークフロー (cosim.yml)。co-simが捕まえられるのはCPUの
+#   意味論の変化だけなので、core/src か cosim を触ったPRでだけ回す
 # - **clippy / fmt** — まだ一度も走らせておらず、今ゲートにすると赤いまま
 #   始まる。警告のみのCheckは「緑だが指摘あり」という読めない状態を作るので
 #   置かない。掃除コミットと同時にゲートとして足す (次のPRで)
@@ -56,7 +56,7 @@ jobs:
             echo '## テスト (cargo test)'
             echo ''
             echo '`default-members = ["core"]` なので core だけが走る。'
-            echo 'cosim (Unicorn) はビルドが数分かかるため毎PRでは回さない。'
+            echo 'cosim (Unicorn) は別ワークフローで、CPUを触ったPRでだけ回る。'
             echo ''
             echo '```'
             cargo test 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' || RC=$?

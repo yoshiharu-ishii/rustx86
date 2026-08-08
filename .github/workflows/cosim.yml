@@ -1,0 +1,78 @@
+# Unicorn Engine との突き合わせ (co-sim)。
+#
+# ## いつ回すか — CPUを触ったときだけ
+#
+# co-simが捕まえられるのは**CPUの意味論の変化だけ**である。docs や web の
+# PRで回しても何も検査していないし、Unicorn のCコンパイルに初回数分かかる。
+# paths で絞ると、検査できるものが変わったときだけ走り、それ以外のPRには
+# 項目ごと現れない (「スキップ」という読めないCheckも出ない)。
+#
+# Tier 3a (プロテクトモード) 中はほぼ全PRがCPUを触るので実質毎回になるが、
+# それはCPUを毎回変えているからで、正しい。
+#
+# ## なぜ ci.yml に混ぜないか
+#
+# ci.yml は毎PR・毎マージで回る土台で、速さが価値である。
+# こちらは重い検査で、回る条件も違う。混ぜると ci.yml の paths 設計が
+# 汚れるので、ワークフローごと分けた。Check の見た目 (本文つき Check run)
+# は publish-check を共有しているので揃う。
+name: cosim
+
+on:
+  pull_request:
+    paths:
+      - 'core/src/**'
+      - 'cosim/**'
+      - 'Cargo.toml'
+      - '.github/workflows/cosim.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'core/src/**'
+      - 'cosim/**'
+      - 'Cargo.toml'
+      - '.github/workflows/cosim.yml'
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  cosim:
+    name: cosim
+    runs-on: ubuntu-latest
+    # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unicornとの突き合わせ
+        id: cosim
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## Unicornとの突き合わせ (cargo test -p rustx86-cosim)'
+            echo ''
+            echo '同じ命令列を rustx86 と Unicorn Engine の両方で実行し、'
+            echo 'レジスタとフラグを毎命令比較する。境界値混じりの乱数は決定的'
+            echo '(xorshift) なので、落ちたケースは手元で再現できる。'
+            echo ''
+            echo '```'
+            cargo test -p rustx86-cosim 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running)' || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > cosim-report.md
+      - uses: ./.github/actions/publish-check
+        with:
+          name: cosim 結果
+          title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
+          outcome: ${{ steps.cosim.outcome }}
+          report-file: cosim-report.md
+
+      - name: 合否判定
+        run: test "${{ steps.cosim.outcome }}" = "success"
