@@ -41,6 +41,10 @@ export class Machine {
     this.running = false;
     /** 直前のカーソル位置。動いたかどうかの判定に使う */
     this.lastCursor = [-1, -1];
+    /** 直近の実行速度 (MIPS)。教材として「今どれくらい出ているか」を見せる */
+    this.mips = 0;
+    this.executed = 0;
+    this.lastMeasure = performance.now();
     /** 画面が変わったときに呼ばれる。(cells, cursorRow, cursorCol, redraw) => void */
     this.onFrame = null;
   }
@@ -61,6 +65,15 @@ export class Machine {
   /** 物理キーの上げ下げを渡す。文字への変換はゲストのOSがやる */
   key(code, down) {
     return this.emu.key(code, down);
+  }
+
+  /** 文字列を打ち込む (貼り付け用)。物理キーに直せないのでASCIIで送る */
+  paste(text) {
+    this.emu.type_text(text.replace(/\r\n?/g, '\n'));
+  }
+
+  get paused() {
+    return !this.running;
   }
 
   start() {
@@ -87,6 +100,13 @@ export class Machine {
   #frame() {
     if (!this.running) return;
     let changed = false;
+    this.executed += INSTRUCTIONS_PER_FRAME;
+    const now = performance.now();
+    if (now - this.lastMeasure >= 500) {
+      this.mips = this.executed / (now - this.lastMeasure) / 1000;
+      this.executed = 0;
+      this.lastMeasure = now;
+    }
     for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
       this.emu.run_slice(CHUNK);
       const [row, col] = this.cursor();

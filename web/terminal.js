@@ -73,6 +73,8 @@ export class Terminal {
 
     /** キーが押された/離されたときに呼ばれる。(code, down) => boolean */
     this.onKey = null;
+    /** 貼り付けられたときに呼ばれる。(text) => void */
+    this.onPaste = null;
 
     canvas.width = this.cols * CELL_W + SCROLLBAR_W;
     canvas.height = this.rows * CELL_H;
@@ -366,6 +368,18 @@ export class Terminal {
     });
     window.addEventListener('mouseup', () => {
       dragging = null;
+    });
+
+    // 貼り付け。canvas は編集可能な要素ではないので paste は document に来る。
+    // **文字列は物理キーに直せない**ので、こちらはASCIIとして送る
+    // (Shiftの上げ下げはゲスト側の都合に合わせてRustが組み立てる)
+    document.addEventListener('paste', e => {
+      if (document.activeElement !== c) return;
+      const text = e.clipboardData?.getData('text');
+      if (text) {
+        this.onPaste?.(text);
+        e.preventDefault();
+      }
     });
 
     c.addEventListener('keydown', e => {

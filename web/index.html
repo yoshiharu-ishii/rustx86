@@ -10,24 +10,34 @@
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
     max-width: 40rem; margin: 0 auto; padding: 3rem 1.25rem; line-height: 1.8;
   }
-  h1 { font-size: 1.5rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .3rem; }
+  .sub { opacity: .7; margin-top: 0; }
   ul { padding-left: 1.2rem; }
-  li { margin: .5rem 0; }
-  .note { opacity: .75; font-size: .9rem; }
+  li { margin: .7rem 0; }
+  .note { opacity: .7; font-size: .9rem; }
+  a { color: inherit; }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
 </style>
 </head>
 <body>
   <h1>rustx86</h1>
-  <p>Rust製のx86エミュレータ。リアルモード8086から歴史の地層を順に登る教材。</p>
+  <p class="sub">Rust製のx86エミュレータ。リアルモード8086から歴史の地層を順に登る教材。</p>
 
   <ul>
-    <li><a href="./elks.html">16bit UNIX (ELKS) を動かす</a> — ブートから login、シェルまで</li>
-    <li><a href="./bench.html">実行速度ベンチ</a> — 任意のブートセクタを流して命令毎秒を測る</li>
+    <li><a href="./elks.html">16bit UNIX (ELKS) を動かす</a><br>
+      <span class="note">ブートから login、シェル、vi まで。キーもコピー&amp;ペーストも効く</span></li>
+    <li><a href="./bench.html">実行速度ベンチ</a><br>
+      <span class="note">任意のブートセクタを流して命令毎秒を測る</span></li>
   </ul>
 
   <p class="note">
     ディスクイメージはリポジトリに含めていない (配布物のため)。
-    ELKSのリリースから <code>fd1440.img</code> を取得して選ぶ。
+    <a href="https://github.com/ghaerr/elks/releases">ELKSのリリース</a> から
+    <code>fd1440.img</code> を取得して画面にドロップする。
+  </p>
+  <p class="note">
+    開発時は <code>python3 web/serve.py</code> で起動する
+    (キャッシュを無効にする。古いJS/wasmを掴んで何度も遠回りしたため)。
   </p>
 </body>
 </html>

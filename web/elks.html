@@ -5,59 +5,92 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rustx86 — ブラウザで動く16bit UNIX (ELKS)</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --line: rgba(128,128,128,.35);
+  }
+  * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
-    max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; line-height: 1.7;
+    max-width: 60rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; line-height: 1.7;
   }
-  h1 { font-size: 1.35rem; margin-bottom: .25rem; }
-  .sub { opacity: .7; font-size: .9rem; margin-top: 0; }
-  #screen {
-    display: block; width: 100%; max-width: 738px; margin: 1rem 0;
-    background: #000; border-radius: .3rem; cursor: text;
+  h1 { font-size: 1.3rem; margin: 0 0 .2rem; }
+  .sub { opacity: .7; font-size: .9rem; margin: 0 0 1.25rem; }
+
+  /* 端末を主役にする */
+  .console {
+    border: 1px solid var(--line); border-radius: .5rem; overflow: hidden;
+    background: #000;
   }
-  #screen:focus { outline: 2px solid #00aa00; outline-offset: 2px; }
-  .bar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin: 1rem 0 0; }
-  button {
-    font: inherit; padding: .45rem 1.1rem; border-radius: .4rem;
-    border: 1px solid currentColor; background: transparent; cursor: pointer;
+  .console.drop { outline: 2px dashed #00aa00; outline-offset: -6px; }
+  #screen { display: block; width: 100%; cursor: text; }
+  #screen:focus { outline: none; }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+    padding: .5rem .6rem; border-bottom: 1px solid var(--line);
+    background: rgba(128,128,128,.08);
   }
-  button:disabled { opacity: .45; cursor: default; }
-  input[type=file] { font-size: .85rem; }
-  #status { font-size: .9rem; opacity: .8; min-height: 1.6em; margin: .6rem 0 0; }
-  .note { font-size: .875rem; opacity: .75; }
+  .toolbar button {
+    font: inherit; font-size: .85rem; padding: .25rem .8rem; border-radius: .35rem;
+    border: 1px solid var(--line); background: transparent; cursor: pointer;
+  }
+  .toolbar button:disabled { opacity: .4; cursor: default; }
+  .spacer { flex: 1 }
+  .gauge {
+    font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
+    opacity: .75; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  #status {
+    padding: .45rem .7rem; font-size: .85rem; opacity: .8; min-height: 2.1em;
+    border-top: 1px solid var(--line);
+  }
+  #status.warn { color: #b45309; opacity: 1; }
+  @media (prefers-color-scheme: dark) { #status.warn { color: #fbbf24; } }
+
+  .help { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem;
+          margin: 1.25rem 0 0; font-size: .875rem; }
+  .help dt { font-weight: 600; white-space: nowrap; }
+  .help dd { margin: 0; opacity: .8; }
+  .note { font-size: .85rem; opacity: .7; margin-top: 1.25rem; }
   code, kbd { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
-  kbd { border: 1px solid rgba(128,128,128,.5); border-radius: .25rem; padding: 0 .3em; }
-  .warn { color: #b45309; }
-  @media (prefers-color-scheme: dark) { .warn { color: #fbbf24; } }
+  kbd { border: 1px solid var(--line); border-radius: .25rem; padding: 0 .3em; }
+  a { color: inherit; }
 </style>
 </head>
 <body>
   <h1>rustx86 — ブラウザで動く16bit UNIX</h1>
-  <p class="sub">Rustで書いた8086エミュレータの上で <a href="https://github.com/ghaerr/elks">ELKS</a> を起動する。画面はテキストVRAM (0xB8000) を直接描いている。</p>
+  <p class="sub">Rustで書いた8086エミュレータの上で <a href="https://github.com/ghaerr/elks">ELKS</a> が動く。画面はテキストVRAM (0xB8000) を直接描いている。</p>
 
-  <canvas id="screen" tabindex="0"></canvas>
-
-  <div class="bar">
-    <button id="boot" disabled>起動</button>
-    <label>ディスクイメージ <input type="file" id="file" accept=".img"></label>
-    <button id="save">ログを保存</button>
+  <div class="console" id="console">
+    <div class="toolbar">
+      <button id="boot" disabled>再起動</button>
+      <button id="pause" disabled>一時停止</button>
+      <button id="save">ログを保存</button>
+      <span class="spacer"></span>
+      <span class="gauge" id="gauge"></span>
+    </div>
+    <canvas id="screen" tabindex="0"></canvas>
+    <p id="status">読み込み中…</p>
   </div>
-  <p id="status">読み込み中…</p>
 
-  <p class="note">
-    <strong>画面をクリックしてからキーを打つ。</strong>入力は8042キーボードコントローラへ
-    <strong>物理キーの位置</strong>として流れ、IRQ1でカーネルに届く。文字への変換はゲストのOSがやるので、
-    <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印キーもそのまま使える。
-  </p>
-  <p class="note">
-    ホイールか右端のスクロールバーで<strong>過去に遡れる</strong> (直近1000行)。キーを打つと最新へ戻る。
-    ドラッグで<strong>選択して <kbd>⌘C</kbd> でコピー</strong>できる。
-  </p>
+  <dl class="help">
+    <dt>キー入力</dt>
+    <dd>画面をクリックしてから打つ。<strong>物理キーの位置</strong>が8042へ届くので
+        <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印もそのまま使える</dd>
+    <dt>過去を見る</dt>
+    <dd>ホイール、または右端のスクロールバー (直近1000行)。キーを打つと最新へ戻る</dd>
+    <dt>コピー / 貼り付け</dt>
+    <dd>ドラッグで選択して <kbd>⌘C</kbd>。<kbd>⌘V</kbd> で貼り付け</dd>
+    <dt>ディスク</dt>
+    <dd>イメージをこの画面に<strong>ドラッグ&amp;ドロップ</strong>すると、そのOSが起動する</dd>
+  </dl>
+
   <p class="note">
     ディスクイメージはリポジトリに含めていない (配布物のため)。
     <code>fd1440.img</code> を <a href="https://github.com/ghaerr/elks/releases">ELKSのリリース</a>
-    から取得して選ぶか、このページと同じ場所に置くと自動で読み込む。
+    から取得してドロップするか、このページと同じ場所に置くと自動で読み込む。
+    ログイン名は <code>root</code>。
   </p>
 
   <script type="module" src="./main.js"></script>
