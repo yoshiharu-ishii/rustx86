@@ -86,14 +86,21 @@ fn main() {
     // boot images/fd14boot.img 400000000 "Select from Menu" '\n' 'C:\>' 'dir\n'
     // ```
     fn unescape(s: &str) -> String {
-        s.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+        s.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\t", "\t")
     }
     let args: Vec<String> = std::env::args().skip(3).collect();
     let script: Vec<(String, String)> = if args.is_empty() {
         vec![("login:".into(), "root\n".into())]
     } else {
         args.chunks(2)
-            .map(|c| (c[0].clone(), unescape(c.get(1).map(String::as_str).unwrap_or(""))))
+            .map(|c| {
+                (
+                    c[0].clone(),
+                    unescape(c.get(1).map(String::as_str).unwrap_or("")),
+                )
+            })
             .collect()
     };
 
@@ -203,7 +210,10 @@ fn main() {
             .collect::<Vec<_>>()
             .join("\n");
         if painted.trim() != m.text_screen_string().trim() {
-            println!("--- テキストVRAM (色付きセルを塗って表示) ---\n{}\n--- (ここまで) ---", painted.trim_end());
+            println!(
+                "--- テキストVRAM (色付きセルを塗って表示) ---\n{}\n--- (ここまで) ---",
+                painted.trim_end()
+            );
         }
     }
 
@@ -230,7 +240,10 @@ fn main() {
 
     if !m.prefixed_ops.is_empty() {
         let list: Vec<String> = m.prefixed_ops.iter().map(|o| format!("{o:#04x}")).collect();
-        println!("--- 0x66 を付けて実行されたオペコード ---\n  {}", list.join(" "));
+        println!(
+            "--- 0x66 を付けて実行されたオペコード ---\n  {}",
+            list.join(" ")
+        );
     }
 
     {
@@ -238,12 +251,19 @@ fn main() {
         // 「BIOSを直したのに効かない」ときは、たいてい相手が自分で持っている
         let owner = |v: u32| {
             let (seg, off) = (m.read16(v * 4 + 2), m.read16(v * 4));
-            let who = if seg == rustx86_core::BIOS_SEG { "BIOS" } else { "ゲスト" };
+            let who = if seg == rustx86_core::BIOS_SEG {
+                "BIOS"
+            } else {
+                "ゲスト"
+            };
             format!("{v:#04x}={seg:04x}:{off:04x}({who})")
         };
         println!(
             "--- 割り込みベクタの持ち主: {} {} {} {} ---",
-            owner(0x08), owner(0x09), owner(0x10), owner(0x16)
+            owner(0x08),
+            owner(0x09),
+            owner(0x10),
+            owner(0x16)
         );
         let (head, tail) = (m.read16(0x41A), m.read16(0x41C));
         println!(
@@ -300,8 +320,10 @@ fn main() {
         if m.int_counts[v as usize] > 0 {
             let (cs, ip) = m.int_first[v as usize];
             let a = rustx86_core::cpu::operand::linear(cs, ip);
-            let before: Vec<String> =
-                (1..=6).rev().map(|i| format!("{:02x}", m.read8(a - i))).collect();
+            let before: Vec<String> = (1..=6)
+                .rev()
+                .map(|i| format!("{:02x}", m.read8(a - i)))
+                .collect();
             let b: Vec<String> = (0..8).map(|i| format!("{:02x}", m.read8(a + i))).collect();
             println!(
                 "INT {v:#04x} 初出 {cs:04x}:{ip:04x}  直前[{}]  IP以降[{}]",

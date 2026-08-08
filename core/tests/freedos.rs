@@ -90,8 +90,14 @@ fn freedos_kernel_reaches_the_language_menu() {
     // カーネルの版表示はメニューが出る前に流れているので、**画面ではなく履歴**を見る。
     // `console` は INT 10h のテレタイプ出力を全部積んだもの
     let log = m.console_string();
-    assert!(log.contains("FreeDOS kernel"), "カーネルの版表示が無い:\n{log}");
-    assert!(log.contains("InitDisk"), "ディスクの初期化まで進んでいない:\n{log}");
+    assert!(
+        log.contains("FreeDOS kernel"),
+        "カーネルの版表示が無い:\n{log}"
+    );
+    assert!(
+        log.contains("InitDisk"),
+        "ディスクの初期化まで進んでいない:\n{log}"
+    );
 }
 
 /// メニューでEnterを打つと COMMAND.COM (FreeCOM) が起動する。
@@ -104,7 +110,10 @@ fn pressing_enter_starts_freecom() {
         eprintln!("images/fd14boot.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "Select from Menu", 200_000_000), "メニューに到達せず");
+    assert!(
+        run_until(&mut m, "Select from Menu", 200_000_000),
+        "メニューに到達せず"
+    );
     m.devices.keyboard.type_ascii("\n");
     assert!(
         run_until(&mut m, "FreeCom version", 200_000_000),
@@ -123,7 +132,10 @@ fn reaches_the_installer_through_32bit_instructions() {
         eprintln!("images/fd14boot.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "Select from Menu", 200_000_000), "メニューに到達せず");
+    assert!(
+        run_until(&mut m, "Select from Menu", 200_000_000),
+        "メニューに到達せず"
+    );
     m.devices.keyboard.type_ascii("\n");
     // **入力待ちのプロンプトまで**待つ。最初の行が出た時点で判定すると、
     // まだ描き終わっていないところを掴んでしまう
@@ -156,7 +168,10 @@ fn reaches_the_dos_prompt_and_runs_a_command() {
         eprintln!("images/fd14boot.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000), "カーネルが起動せず");
+    assert!(
+        run_until(&mut m, "FreeDOS kernel", 200_000_000),
+        "カーネルが起動せず"
+    );
     m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5
 
     assert!(
@@ -178,7 +193,10 @@ fn reaches_the_dos_prompt_and_runs_a_command() {
         m.text_screen_string()
     );
     let screen = m.text_screen_string();
-    assert!(screen.contains("KERNEL"), "ディレクトリの中身が出ていない:\n{screen}");
+    assert!(
+        screen.contains("KERNEL"),
+        "ディレクトリの中身が出ていない:\n{screen}"
+    );
 }
 
 /// ウェルカム画面のロゴが**ブロック文字で描かれている**こと。
@@ -192,7 +210,10 @@ fn welcome_logo_is_drawn_with_block_characters() {
         eprintln!("images/fd14boot.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "Select from Menu", 200_000_000), "メニューに到達せず");
+    assert!(
+        run_until(&mut m, "Select from Menu", 200_000_000),
+        "メニューに到達せず"
+    );
     m.devices.keyboard.type_ascii("\n");
     assert!(
         run_until(&mut m, "█", 300_000_000),

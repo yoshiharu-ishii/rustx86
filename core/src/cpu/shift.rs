@@ -1,7 +1,7 @@
 //! シフトと回転 (GRP2)。8bit/16bit共通の実装。
 
-use super::{Cpu, CF, OF};
 use super::alu::{set_szp16, set_szp8};
+use super::{Cpu, CF, OF};
 
 // --- シフト/回転 (GRP2) ---
 // 8086はカウントをマスクしないが、186以降 (およびUnicorn) は5bitでマスクする。
@@ -53,17 +53,29 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
         }
         4 | 6 => {
             // SHL / SAL
-            cf = if count <= w { (val >> (w - count)) & 1 } else { 0 };
+            cf = if count <= w {
+                (val >> (w - count)) & 1
+            } else {
+                0
+            };
             r = if count >= w { 0 } else { (val << count) & mask };
         }
         5 => {
             // SHR
-            cf = if count <= w { (val >> (count - 1)) & 1 } else { 0 };
+            cf = if count <= w {
+                (val >> (count - 1)) & 1
+            } else {
+                0
+            };
             r = if count >= w { 0 } else { val >> count };
         }
         _ => {
             // SAR (符号を保つ)
-            let sval = if w == 8 { val as u8 as i8 as i32 } else { val as u16 as i16 as i32 };
+            let sval = if w == 8 {
+                val as u8 as i8 as i32
+            } else {
+                val as u16 as i16 as i32
+            };
             let n = count.min(w - 1);
             cf = ((sval >> (count - 1).min(w - 1)) & 1) as u32;
             r = (sval >> n) as u32 & mask;
@@ -74,10 +86,10 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
     if count == 1 {
         let msb = (r >> (w - 1)) & 1;
         let of = match kind {
-            0 | 2 | 4 | 6 => msb ^ cf,               // 左回転・左シフト
-            1 | 3 => msb ^ ((r >> (w - 2)) & 1),      // 右回転
-            5 => (val >> (w - 1)) & 1,                // SHR: 元のMSB
-            _ => 0,                                   // SAR
+            0 | 2 | 4 | 6 => msb ^ cf,           // 左回転・左シフト
+            1 | 3 => msb ^ ((r >> (w - 2)) & 1), // 右回転
+            5 => (val >> (w - 1)) & 1,           // SHR: 元のMSB
+            _ => 0,                              // SAR
         };
         c.set_flag(OF, of != 0);
     }
@@ -91,4 +103,3 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
     }
     r
 }
-

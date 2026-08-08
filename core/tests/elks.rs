@@ -47,9 +47,15 @@ fn elks_boots_to_login_prompt() {
         eprintln!("images/fd1440.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "login:", 100_000_000), "loginプロンプトに到達せず");
+    assert!(
+        run_until(&mut m, "login:", 100_000_000),
+        "loginプロンプトに到達せず"
+    );
     let screen = m.text_screen_string();
-    assert!(screen.contains("ELKS 0.9.1"), "バージョン表示が無い:\n{screen}");
+    assert!(
+        screen.contains("ELKS 0.9.1"),
+        "バージョン表示が無い:\n{screen}"
+    );
     assert!(
         screen.contains("Mounted root device"),
         "ルートがマウントされていない:\n{screen}"
@@ -63,7 +69,10 @@ fn elks_accepts_keyboard_login() {
         eprintln!("images/fd1440.img が無いのでスキップ");
         return;
     };
-    assert!(run_until(&mut m, "login:", 100_000_000), "loginプロンプトに到達せず");
+    assert!(
+        run_until(&mut m, "login:", 100_000_000),
+        "loginプロンプトに到達せず"
+    );
 
     m.devices.keyboard.type_ascii("root\n");
     // シェルのプロンプト (#) が出るまで待つ
@@ -72,8 +81,14 @@ fn elks_accepts_keyboard_login() {
         s.lines().last().map(|l| l.trim() == "#").unwrap_or(false)
     };
     let screen = m.text_screen_string();
-    assert!(screen.contains("login: root"), "入力が届いていない:\n{screen}");
+    assert!(
+        screen.contains("login: root"),
+        "入力が届いていない:\n{screen}"
+    );
     assert!(ok, "シェルのプロンプトが出ない:\n{screen}");
-    assert!(m.int_counts[0x09] > 0, "キーボード割り込み (IRQ1) が起きていない");
+    assert!(
+        m.int_counts[0x09] > 0,
+        "キーボード割り込み (IRQ1) が起きていない"
+    );
     assert!(m.int_counts[0x80] > 0, "システムコールが呼ばれていない");
 }

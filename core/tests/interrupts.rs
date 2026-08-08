@@ -112,7 +112,10 @@ fn trap_flag_fires_after_the_instruction() {
 
     m.step();
     assert_eq!(m.cpu.ip, 0x9000, "命令の後にINT 1へ飛ぶ");
-    assert!(!m.cpu.flag(TF), "ハンドラ内ではTFが落ちている (無限再帰を防ぐ)");
+    assert!(
+        !m.cpu.flag(TF),
+        "ハンドラ内ではTFが落ちている (無限再帰を防ぐ)"
+    );
 }
 
 /// ゼロ除算はマシンを止めず #DE (INT 0) を上げる。

@@ -4,16 +4,15 @@ pub mod cp437;
 pub mod cpu;
 pub mod debug;
 pub mod dev;
-pub mod snapshot;
 pub mod disk;
+pub mod snapshot;
 
-pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
 pub use bios::BIOS_SEG;
+pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
 pub use cpu::Cpu;
 pub use disk::Disk;
 
 pub const MEM_SIZE: usize = 1 << 20; // リアルモード 1MB
-
 
 /// 何命令ごとに装置を進めるか。
 ///
@@ -123,7 +122,10 @@ impl Machine {
     /// ブートセクタ (512バイト) を0x7C00に配置し、CS:IP=0000:7C00から実行開始
     pub fn load_boot_sector(&mut self, sector: &[u8]) -> Result<(), String> {
         if sector.len() != 512 {
-            return Err(format!("boot sector must be 512 bytes, got {}", sector.len()));
+            return Err(format!(
+                "boot sector must be 512 bytes, got {}",
+                sector.len()
+            ));
         }
         if sector[510] != 0x55 || sector[511] != 0xAA {
             return Err("missing boot signature 0x55AA".into());
@@ -134,9 +136,6 @@ impl Machine {
         self.cpu.regs[cpu::DX] = 0x0080; // DL = ブートドライブ番号
         Ok(())
     }
-
-
-
 
     /// ハードウェア割り込みベクタを直接立てる (PICを介さない経路。テスト用)
     pub fn raise_irq(&mut self, vector: u8) {
@@ -254,11 +253,19 @@ impl Machine {
         match bus::decode_io(port) {
             IoTarget::Pic { slave } => {
                 let p = &self.devices.pic[slave as usize];
-                if port & 1 == 0 { p.read_command() } else { p.read_data() }
+                if port & 1 == 0 {
+                    p.read_command()
+                } else {
+                    p.read_data()
+                }
             }
             IoTarget::Pit => {
                 let idx = (port & 3) as usize;
-                if idx == 3 { 0xFF } else { self.devices.pit.read_counter(idx) }
+                if idx == 3 {
+                    0xFF
+                } else {
+                    self.devices.pit.read_counter(idx)
+                }
             }
             IoTarget::Keyboard => {
                 if port == 0x64 {
@@ -269,10 +276,18 @@ impl Machine {
             }
             IoTarget::Uart => self.devices.uart.read(port & 7),
             IoTarget::Cmos => {
-                if port == 0x71 { self.devices.cmos.read_data() } else { 0xFF }
+                if port == 0x71 {
+                    self.devices.cmos.read_data()
+                } else {
+                    0xFF
+                }
             }
             IoTarget::Crtc => {
-                if port == 0x3D5 { self.devices.crtc.read_data() } else { 0xFF }
+                if port == 0x3D5 {
+                    self.devices.crtc.read_data()
+                } else {
+                    0xFF
+                }
             }
             IoTarget::SystemControl => {
                 // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
@@ -298,7 +313,11 @@ impl Machine {
         match bus::decode_io(port) {
             IoTarget::Pic { slave } => {
                 let p = &mut self.devices.pic[slave as usize];
-                if port & 1 == 0 { p.write_command(val) } else { p.write_data(val) }
+                if port & 1 == 0 {
+                    p.write_command(val)
+                } else {
+                    p.write_data(val)
+                }
             }
             IoTarget::Pit => {
                 let idx = (port & 3) as usize;
@@ -448,7 +467,10 @@ impl Machine {
 
         let mem = r.rle()?;
         if mem.len() != MEM_SIZE {
-            return Err(format!("メモリの大きさが合わない ({} != {MEM_SIZE})", mem.len()));
+            return Err(format!(
+                "メモリの大きさが合わない ({} != {MEM_SIZE})",
+                mem.len()
+            ));
         }
         m.mem = mem;
         m.disk = if r.bool()? {
@@ -531,10 +553,6 @@ impl Machine {
         self.io_write8(port.wrapping_add(1), (val >> 8) as u8);
     }
 
-
-
-
-
     /// 1サイクル進める。
     ///
     /// 順序に意味がある。**割り込みの受付は命令の途中ではなく境界で行う**。
@@ -591,7 +609,12 @@ impl Machine {
                     self.dbg.trace.pop_front();
                 }
                 let instr = self.dbg.instr;
-                self.dbg.trace.push_back(debug::Step { instr, cs, ip, bytes });
+                self.dbg.trace.push_back(debug::Step {
+                    instr,
+                    cs,
+                    ip,
+                    bytes,
+                });
             }
         }
 

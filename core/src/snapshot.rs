@@ -82,8 +82,14 @@ impl<'a> Reader<'a> {
         Self { data, pos: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-        let end = self.pos.checked_add(n).ok_or("スナップショットが壊れている")?;
-        let s = self.data.get(self.pos..end).ok_or("スナップショットが途中で終わっている")?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or("スナップショットが壊れている")?;
+        let s = self
+            .data
+            .get(self.pos..end)
+            .ok_or("スナップショットが途中で終わっている")?;
         self.pos = end;
         Ok(s)
     }
@@ -145,7 +151,10 @@ fn rle_decode(packed: &[u8], expect: usize) -> Result<Vec<u8>, String> {
         out.extend(std::iter::repeat(pair[0]).take(pair[1] as usize));
     }
     if out.len() != expect {
-        return Err(format!("展開後の大きさが合わない ({} != {expect})", out.len()));
+        return Err(format!(
+            "展開後の大きさが合わない ({} != {expect})",
+            out.len()
+        ));
     }
     Ok(out)
 }

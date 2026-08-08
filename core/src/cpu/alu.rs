@@ -11,21 +11,41 @@ pub fn alu8(c: &mut Cpu, op: u8, a: u8, b: u8) -> u8 {
     let (r, cf, of, af) = match op {
         0 => {
             let r = a as u16 + b as u16;
-            (r, r > 0xFF, ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) + (b & 0xF) > 0xF)
+            (
+                r,
+                r > 0xFF,
+                ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0,
+                (a & 0xF) + (b & 0xF) > 0xF,
+            )
         }
         1 => ((a | b) as u16, false, false, false),
         2 => {
             let r = a as u16 + b as u16 + carry;
-            (r, r > 0xFF, ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) + (b & 0xF) + carry as u8 > 0xF)
+            (
+                r,
+                r > 0xFF,
+                ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0,
+                (a & 0xF) + (b & 0xF) + carry as u8 > 0xF,
+            )
         }
         3 => {
             let r = (a as u16).wrapping_sub(b as u16).wrapping_sub(carry);
-            (r, (a as u16) < b as u16 + carry, ((a ^ b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) < (b & 0xF) + carry as u8)
+            (
+                r,
+                (a as u16) < b as u16 + carry,
+                ((a ^ b) & (a ^ r as u8)) & 0x80 != 0,
+                (a & 0xF) < (b & 0xF) + carry as u8,
+            )
         }
         4 => ((a & b) as u16, false, false, false),
         5 | 7 => {
             let r = (a as u16).wrapping_sub(b as u16);
-            (r, (a as u16) < b as u16, ((a ^ b) & (a ^ r as u8)) & 0x80 != 0, (a & 0xF) < (b & 0xF))
+            (
+                r,
+                (a as u16) < b as u16,
+                ((a ^ b) & (a ^ r as u8)) & 0x80 != 0,
+                (a & 0xF) < (b & 0xF),
+            )
         }
         _ => ((a ^ b) as u16, false, false, false), // 6 = XOR
     };
@@ -34,7 +54,11 @@ pub fn alu8(c: &mut Cpu, op: u8, a: u8, b: u8) -> u8 {
     c.set_flag(OF, of);
     c.set_flag(AF, af);
     set_szp8(c, r8);
-    if op == 7 { a } else { r8 } // CMPは結果を書き戻さない
+    if op == 7 {
+        a
+    } else {
+        r8
+    } // CMPは結果を書き戻さない
 }
 
 pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
@@ -42,21 +66,41 @@ pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
     let (r, cf, of, af) = match op {
         0 => {
             let r = a as u32 + b as u32;
-            (r, r > 0xFFFF, ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) + (b & 0xF) > 0xF)
+            (
+                r,
+                r > 0xFFFF,
+                ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0,
+                (a & 0xF) + (b & 0xF) > 0xF,
+            )
         }
         1 => ((a | b) as u32, false, false, false),
         2 => {
             let r = a as u32 + b as u32 + carry;
-            (r, r > 0xFFFF, ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) + (b & 0xF) + carry as u16 > 0xF)
+            (
+                r,
+                r > 0xFFFF,
+                ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0,
+                (a & 0xF) + (b & 0xF) + carry as u16 > 0xF,
+            )
         }
         3 => {
             let r = (a as u32).wrapping_sub(b as u32).wrapping_sub(carry);
-            (r, (a as u32) < b as u32 + carry, ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) < (b & 0xF) + carry as u16)
+            (
+                r,
+                (a as u32) < b as u32 + carry,
+                ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0,
+                (a & 0xF) < (b & 0xF) + carry as u16,
+            )
         }
         4 => ((a & b) as u32, false, false, false),
         5 | 7 => {
             let r = (a as u32).wrapping_sub(b as u32);
-            (r, (a as u32) < b as u32, ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0, (a & 0xF) < (b & 0xF))
+            (
+                r,
+                (a as u32) < b as u32,
+                ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0,
+                (a & 0xF) < (b & 0xF),
+            )
         }
         _ => ((a ^ b) as u32, false, false, false),
     };
@@ -65,7 +109,11 @@ pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
     c.set_flag(OF, of);
     c.set_flag(AF, af);
     set_szp16(c, r16);
-    if op == 7 { a } else { r16 }
+    if op == 7 {
+        a
+    } else {
+        r16
+    }
 }
 
 /// 32bit版。`0x66` プレフィクスが付いたときの演算。
@@ -78,21 +126,41 @@ pub fn alu32(c: &mut Cpu, op: u8, a: u32, b: u32) -> u32 {
     let (r, cf, of, af) = match op {
         0 => {
             let r = a as u64 + b as u64;
-            (r, r > 0xFFFF_FFFF, ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) + (b & 0xF) > 0xF)
+            (
+                r,
+                r > 0xFFFF_FFFF,
+                ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0,
+                (a & 0xF) + (b & 0xF) > 0xF,
+            )
         }
         1 => ((a | b) as u64, false, false, false),
         2 => {
             let r = a as u64 + b as u64 + carry;
-            (r, r > 0xFFFF_FFFF, ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) + (b & 0xF) + carry as u32 > 0xF)
+            (
+                r,
+                r > 0xFFFF_FFFF,
+                ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0,
+                (a & 0xF) + (b & 0xF) + carry as u32 > 0xF,
+            )
         }
         3 => {
             let r = (a as u64).wrapping_sub(b as u64).wrapping_sub(carry);
-            (r, (a as u64) < b as u64 + carry, ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) < (b & 0xF) + carry as u32)
+            (
+                r,
+                (a as u64) < b as u64 + carry,
+                ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0,
+                (a & 0xF) < (b & 0xF) + carry as u32,
+            )
         }
         4 => ((a & b) as u64, false, false, false),
         5 | 7 => {
             let r = (a as u64).wrapping_sub(b as u64);
-            (r, (a as u64) < b as u64, ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) < (b & 0xF))
+            (
+                r,
+                (a as u64) < b as u64,
+                ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0,
+                (a & 0xF) < (b & 0xF),
+            )
         }
         _ => ((a ^ b) as u64, false, false, false),
     };
@@ -101,7 +169,11 @@ pub fn alu32(c: &mut Cpu, op: u8, a: u32, b: u32) -> u32 {
     c.set_flag(OF, of);
     c.set_flag(AF, af);
     set_szp32(c, r32);
-    if op == 7 { a } else { r32 }
+    if op == 7 {
+        a
+    } else {
+        r32
+    }
 }
 
 /// 幅を実行時に選ぶALU。`0x66` の有無で16bitと32bitを切り替える。
@@ -134,10 +206,13 @@ pub fn set_szp32(c: &mut Cpu, v: u32) {
     c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは幅によらず下位8bitのみ
 }
 
-
 /// 幅を実行時に選ぶ SF/ZF/PF の更新
 pub fn set_szp_w(c: &mut Cpu, v: u32, wide: bool) {
-    if wide { set_szp32(c, v) } else { set_szp16(c, v as u16) }
+    if wide {
+        set_szp32(c, v)
+    } else {
+        set_szp16(c, v as u16)
+    }
 }
 
 pub fn condition(c: &Cpu, cc: u8) -> bool {
@@ -151,5 +226,9 @@ pub fn condition(c: &Cpu, cc: u8) -> bool {
         6 => c.flag(SF) != c.flag(OF),
         _ => c.flag(ZF) || (c.flag(SF) != c.flag(OF)),
     };
-    if cc & 1 != 0 { !r } else { r }
+    if cc & 1 != 0 {
+        !r
+    } else {
+        r
+    }
 }

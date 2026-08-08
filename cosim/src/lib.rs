@@ -69,7 +69,11 @@ pub fn flag_names(f: u16) -> String {
             s.push(name);
         }
     }
-    if s.is_empty() { "-".into() } else { s.join("|") }
+    if s.is_empty() {
+        "-".into()
+    } else {
+        s.join("|")
+    }
 }
 
 /// 自作CPUで1命令実行する
@@ -208,7 +212,9 @@ impl Rng {
     }
 
     pub fn interesting_u16(&mut self) -> u16 {
-        const EDGE: [u16; 8] = [0x0000, 0x0001, 0x000F, 0x0010, 0x7FFF, 0x8000, 0xFFFE, 0xFFFF];
+        const EDGE: [u16; 8] = [
+            0x0000, 0x0001, 0x000F, 0x0010, 0x7FFF, 0x8000, 0xFFFE, 0xFFFF,
+        ];
         let r = self.next_u64();
         if r % 2 == 0 {
             EDGE[(r >> 8) as usize % EDGE.len()]
@@ -227,9 +233,12 @@ use unicorn_engine::{RegisterX86, Unicorn};
 pub fn run_oracle(tc: &TestCase) -> State {
     let mut uc = Unicorn::new(Arch::X86, Mode::MODE_16).expect("unicorn init");
     uc.mem_map(0, 0x100000, Prot::ALL).expect("map");
-    uc.mem_write(CODE_ADDR as u64, &tc.code).expect("write code");
-    uc.mem_write(DATA_ADDR as u64, &tc.data).expect("write data");
-    uc.mem_write(STACK_BASE as u64, &tc.stack).expect("write stack");
+    uc.mem_write(CODE_ADDR as u64, &tc.code)
+        .expect("write code");
+    uc.mem_write(DATA_ADDR as u64, &tc.data)
+        .expect("write data");
+    uc.mem_write(STACK_BASE as u64, &tc.stack)
+        .expect("write stack");
 
     let regs = [
         RegisterX86::AX,
@@ -273,7 +282,8 @@ pub fn run_oracle(tc: &TestCase) -> State {
     let mut data = [0u8; 16];
     uc.mem_read(DATA_ADDR as u64, &mut data).expect("read data");
     let mut stack = [0u8; STACK_WINDOW];
-    uc.mem_read(STACK_BASE as u64, &mut stack).expect("read stack");
+    uc.mem_read(STACK_BASE as u64, &mut stack)
+        .expect("read stack");
 
     State {
         regs: out_regs,
@@ -284,7 +294,6 @@ pub fn run_oracle(tc: &TestCase) -> State {
         stack,
     }
 }
-
 
 /// 明示的に構築したケース列を検証する (状態空間が小さい命令の総当たり用)
 pub fn check_cases(name: &str, undefined: u16, cases: Vec<TestCase>) {
@@ -313,7 +322,16 @@ pub fn sweep_al(code: Vec<u8>) -> Vec<TestCase> {
             for f in [0u16, 0x0001, 0x0010, 0x0011] {
                 out.push(TestCase {
                     code: code.clone(),
-                    regs: [(ah << 8) | al, 0x1234, 0x5678, 0x9ABC, 0x0100, 0x0200, 0x0300, 0x0400],
+                    regs: [
+                        (ah << 8) | al,
+                        0x1234,
+                        0x5678,
+                        0x9ABC,
+                        0x0100,
+                        0x0200,
+                        0x0300,
+                        0x0400,
+                    ],
                     sregs: [0; 4],
                     flags: f,
                     data: [0; 16],
@@ -429,4 +447,3 @@ pub fn check(templates: &[Template], cases_per_template: usize, seed: u64) {
         failures.join("\n")
     );
 }
-

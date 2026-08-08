@@ -79,7 +79,7 @@ impl Machine {
     fn install_bios_data_area(&mut self) {
         self.write16(0x400, 0x3F8); // COM1 のポート番号
         self.write16(0x408, 0x378); // LPT1
-        // 装置構成: フロッピー1台 + 80x25カラー + シリアル1本
+                                    // 装置構成: フロッピー1台 + 80x25カラー + シリアル1本
         self.write16(0x410, 0x0021 | (1 << 9));
         self.write16(0x413, 640); // コンベンショナルメモリ (KB)
         self.write8(0x449, 0x03); // ビデオモード 3 = 80x25 カラーテキスト
@@ -92,9 +92,9 @@ impl Machine {
         self.write16(0x460, 0x0607); // カーソルの形
         self.write8(0x462, 0); // 表示中のページ番号
         self.write16(0x463, 0x3D4); // CRTC のポート番号 (カラー)
-        // キーボードの待ち行列。**空の状態は head == tail** で表す。
-        // 位置を 0x480/0x482 にも書くのは、ここを見て別の場所に付け替える
-        // プログラムがあるためである (常駐ソフトが行列を広げる手口)
+                                    // キーボードの待ち行列。**空の状態は head == tail** で表す。
+                                    // 位置を 0x480/0x482 にも書くのは、ここを見て別の場所に付け替える
+                                    // プログラムがあるためである (常駐ソフトが行列を広げる手口)
         self.write16(BDA_KB_HEAD, KB_BUF_START);
         self.write16(BDA_KB_TAIL, KB_BUF_START);
         self.write16(0x480, KB_BUF_START);
@@ -141,12 +141,12 @@ impl Machine {
             p.write_data(base); // ICW2: ベクタのベース
             p.write_data(icw3); // ICW3: カスケードの結線
             p.write_data(0x01); // ICW4: 8086モード
-            // **タイマ(0)・キーボード(1)・スレーブ連結(2)は開けておく。**
-            //
-            // 全部閉じたままにしていたところ、BIOSデータエリアの待ち行列に
-            // キーが一度も積まれなかった。INT 09h が呼ばれないためである。
-            // 実BIOSもここは開けて渡す — キーが押されたことを知る手段が
-            // 割り込みしか無いのだから、閉じたまま渡す意味が無い
+                                // **タイマ(0)・キーボード(1)・スレーブ連結(2)は開けておく。**
+                                //
+                                // 全部閉じたままにしていたところ、BIOSデータエリアの待ち行列に
+                                // キーが一度も積まれなかった。INT 09h が呼ばれないためである。
+                                // 実BIOSもここは開けて渡す — キーが押されたことを知る手段が
+                                // 割り込みしか無いのだから、閉じたまま渡す意味が無い
             p.write_data(if i == 0 { 0xF8 } else { 0xFF });
         }
     }
@@ -180,195 +180,201 @@ impl Machine {
         match n {
             // --- INT 10h: ビデオ ---
             0x10 => {
-              if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
-                eprintln!("INT10 AH={ah:#04x} AL={:#04x} BX={:#06x}", self.cpu.regs[cpu::AX] as u8, self.cpu.regs[cpu::BX]);
-              }
-              match ah {
-                // AH=00: ビデオモード設定。**テキスト以外は実現できない**。
-                //
-                // 落とさずに受けるのは、モードを試して戻すプログラムがあるためだが、
-                // 黙って無視すると「描いた先が存在しない」ことに誰も気づけない。
-                // 要求されたモードを控えて、後から言えるようにしておく
-                0x00 => {
-                    self.video_modes.insert(self.cpu.regs[cpu::AX] as u8 & 0x7F);
+                if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+                    eprintln!(
+                        "INT10 AH={ah:#04x} AL={:#04x} BX={:#06x}",
+                        self.cpu.regs[cpu::AX] as u8,
+                        self.cpu.regs[cpu::BX]
+                    );
                 }
-                0x01 => {} // カーソルの形 (描画側が決めているので覚えない)
-                // AH=02: カーソルを動かす (DH=行 DL=桁)。
-                // **DOSの画面はカーソル移動と書き込みの組で作られる。**
-                // ELKSはVRAMを直接叩くのでここが空でも動いていた
-                0x02 => {
-                    let dx = self.cpu.regs[cpu::DX] as u16;
-                    self.set_cursor_pos((dx >> 8) as usize, (dx & 0xFF) as usize);
-                }
-                // AH=03: カーソルの位置と形を返す
-                0x03 => {
-                    let (row, col) = self.cursor_pos();
-                    self.cpu.regs[cpu::DX] = (row as u32) << 8 | col as u32;
-                    self.cpu.regs[cpu::CX] = 0x0607; // カーソルの形 (BDAと同じ)
-                }
-                // AH=0E: テレタイプ出力。
-                //
-                // **実BIOSと同じくテキストVRAMへ書く。** 以前はデバッグ用の
-                // 文字列へ積むだけだったので、BIOS越しに描くOS (DOS) の画面が
-                // ブラウザに出なかった。ELKSがVRAMを直接叩くOSだったため、
-                // この穴は今まで表に出ていなかった
-                0x0E => self.teletype(self.cpu.regs[cpu::AX] as u8),
-                // AH=05: 表示ページの切り替え (1ページしか無いので何もしない)
-                0x05 => {}
-                // AH=10: パレットレジスタの操作 (EGA/VGA)。
-                //
-                // **受けるが何も起きない。** 色は描画側 (ブラウザ) が固定の
-                // 16色で持っていて、ゲストが色番号の対応を差し替える先が無い。
-                // 落とさないのは、起動時に一度触るだけのプログラムが多いためである
-                0x10 => {}
-                // AH=12: 追加機能の選択 (EGA/VGA)。**対応していないと答える**
-                0x12 => {}
-                // AH=EF: Herculesグラフィックカードの探索。
-                // 標準のBIOSには無く、当時のライブラリが勝手に使った番号である。
-                // **載っていないので、そう答える**
-                0xEF => self.cpu.regs[cpu::DX] = 0xFFFF,
-                // AH=1A: 表示装置の種別を尋ねる (VGA BIOSから) /
-                // AH=1B: 機能と状態の一覧を尋ねる (VGA BIOSから)
-                //
-                // **どちらも「対応していない」と答える。** このマシンは
-                // MC6845のCRTCと 0xB8000 のテキストVRAMを持つ CGA 相当であって、
-                // VGAではない。呼び出し側は AL が合図の値になっているかで
-                // 対応の有無を判断するので、そのままにしておけば伝わる。
-                //
-                // `INT 13h AH=41` (LBA拡張) と同じで、**無いものを在ると
-                // 答えないこと**が肝心である。嘘をつくと、次にVGA前提の
-                // 手順で話しかけられて詰む
-                0x1A | 0x1B => {
-                    if std::env::var("RUSTX86_TRACE_VIDEO").is_ok() {
-                        // INTで積まれた戻り先を覗く: SS:SP に IP、+2 に CS
-                        let sp = self.cpu.regs[cpu::SP] as u16;
-                        let ss = self.cpu.sregs[cpu::SS];
-                        let (rip, rcs) = (
-                            self.read16(cpu::operand::linear(ss, sp)),
-                            self.read16(cpu::operand::linear(ss, sp.wrapping_add(2))),
-                        );
-                        let base = cpu::operand::linear(rcs, rip);
-                        let bytes: Vec<String> =
-                            (0..24).map(|i| format!("{:02x}", self.read8(base + i))).collect();
-                        // 中継表 (INT n; RET) の1つ上 = 本当の呼び出し元。
-                        // 近距離callなので戻り番地は2バイトで SS:SP+6 に積まれている
-                        let up = self.read16(cpu::operand::linear(ss, sp.wrapping_add(6)));
-                        let ubase = cpu::operand::linear(rcs, up);
-                        let ub: Vec<String> =
-                            (0..32).map(|i| format!("{:02x}", self.read8(ubase + i))).collect();
-                        eprintln!(
+                match ah {
+                    // AH=00: ビデオモード設定。**テキスト以外は実現できない**。
+                    //
+                    // 落とさずに受けるのは、モードを試して戻すプログラムがあるためだが、
+                    // 黙って無視すると「描いた先が存在しない」ことに誰も気づけない。
+                    // 要求されたモードを控えて、後から言えるようにしておく
+                    0x00 => {
+                        self.video_modes.insert(self.cpu.regs[cpu::AX] as u8 & 0x7F);
+                    }
+                    0x01 => {} // カーソルの形 (描画側が決めているので覚えない)
+                    // AH=02: カーソルを動かす (DH=行 DL=桁)。
+                    // **DOSの画面はカーソル移動と書き込みの組で作られる。**
+                    // ELKSはVRAMを直接叩くのでここが空でも動いていた
+                    0x02 => {
+                        let dx = self.cpu.regs[cpu::DX] as u16;
+                        self.set_cursor_pos((dx >> 8) as usize, (dx & 0xFF) as usize);
+                    }
+                    // AH=03: カーソルの位置と形を返す
+                    0x03 => {
+                        let (row, col) = self.cursor_pos();
+                        self.cpu.regs[cpu::DX] = (row as u32) << 8 | col as u32;
+                        self.cpu.regs[cpu::CX] = 0x0607; // カーソルの形 (BDAと同じ)
+                    }
+                    // AH=0E: テレタイプ出力。
+                    //
+                    // **実BIOSと同じくテキストVRAMへ書く。** 以前はデバッグ用の
+                    // 文字列へ積むだけだったので、BIOS越しに描くOS (DOS) の画面が
+                    // ブラウザに出なかった。ELKSがVRAMを直接叩くOSだったため、
+                    // この穴は今まで表に出ていなかった
+                    0x0E => self.teletype(self.cpu.regs[cpu::AX] as u8),
+                    // AH=05: 表示ページの切り替え (1ページしか無いので何もしない)
+                    0x05 => {}
+                    // AH=10: パレットレジスタの操作 (EGA/VGA)。
+                    //
+                    // **受けるが何も起きない。** 色は描画側 (ブラウザ) が固定の
+                    // 16色で持っていて、ゲストが色番号の対応を差し替える先が無い。
+                    // 落とさないのは、起動時に一度触るだけのプログラムが多いためである
+                    0x10 => {}
+                    // AH=12: 追加機能の選択 (EGA/VGA)。**対応していないと答える**
+                    0x12 => {}
+                    // AH=EF: Herculesグラフィックカードの探索。
+                    // 標準のBIOSには無く、当時のライブラリが勝手に使った番号である。
+                    // **載っていないので、そう答える**
+                    0xEF => self.cpu.regs[cpu::DX] = 0xFFFF,
+                    // AH=1A: 表示装置の種別を尋ねる (VGA BIOSから) /
+                    // AH=1B: 機能と状態の一覧を尋ねる (VGA BIOSから)
+                    //
+                    // **どちらも「対応していない」と答える。** このマシンは
+                    // MC6845のCRTCと 0xB8000 のテキストVRAMを持つ CGA 相当であって、
+                    // VGAではない。呼び出し側は AL が合図の値になっているかで
+                    // 対応の有無を判断するので、そのままにしておけば伝わる。
+                    //
+                    // `INT 13h AH=41` (LBA拡張) と同じで、**無いものを在ると
+                    // 答えないこと**が肝心である。嘘をつくと、次にVGA前提の
+                    // 手順で話しかけられて詰む
+                    0x1A | 0x1B => {
+                        if std::env::var("RUSTX86_TRACE_VIDEO").is_ok() {
+                            // INTで積まれた戻り先を覗く: SS:SP に IP、+2 に CS
+                            let sp = self.cpu.regs[cpu::SP] as u16;
+                            let ss = self.cpu.sregs[cpu::SS];
+                            let (rip, rcs) = (
+                                self.read16(cpu::operand::linear(ss, sp)),
+                                self.read16(cpu::operand::linear(ss, sp.wrapping_add(2))),
+                            );
+                            let base = cpu::operand::linear(rcs, rip);
+                            let bytes: Vec<String> = (0..24)
+                                .map(|i| format!("{:02x}", self.read8(base + i)))
+                                .collect();
+                            // 中継表 (INT n; RET) の1つ上 = 本当の呼び出し元。
+                            // 近距離callなので戻り番地は2バイトで SS:SP+6 に積まれている
+                            let up = self.read16(cpu::operand::linear(ss, sp.wrapping_add(6)));
+                            let ubase = cpu::operand::linear(rcs, up);
+                            let ub: Vec<String> = (0..32)
+                                .map(|i| format!("{:02x}", self.read8(ubase + i)))
+                                .collect();
+                            eprintln!(
                             "AH={ah:#04x} 中継 {rcs:04x}:{rip:04x} [{}]\n  本当の呼び出し元 {rcs:04x}:{up:04x} 戻った直後: {}",
                             bytes[..6].join(" "), ub.join(" ")
                         );
+                        }
+                        self.cpu.regs[cpu::AX] &= 0xFF00; // AL≠0x1A = 「その機能は無い」
+                                                          // **BXも埋める。**
+                                                          //
+                                                          // 作法どおりならALを見て「非対応」と分かるので BX は触らなくてよい。
+                                                          // だが BL (装置の種別) だけを見るプログラムがあり、そういう相手には
+                                                          // **前の呼び出しの残りかす**がそのまま種別として見えてしまう。
+                                                          // 実際 zmiy がこれで「VGAだ」と判断し、80x50 で描いて画面から
+                                                          // はみ出していた。BL=0x02 = カラーCGA、BH=0x00 = 副画面なし。
+                        self.cpu.regs[cpu::BX] = 0x0002;
                     }
-                    self.cpu.regs[cpu::AX] &= 0xFF00; // AL≠0x1A = 「その機能は無い」
-                    // **BXも埋める。**
+                    // AH=11: 文字ジェネレータ (フォント)。
                     //
-                    // 作法どおりならALを見て「非対応」と分かるので BX は触らなくてよい。
-                    // だが BL (装置の種別) だけを見るプログラムがあり、そういう相手には
-                    // **前の呼び出しの残りかす**がそのまま種別として見えてしまう。
-                    // 実際 zmiy がこれで「VGAだ」と判断し、80x50 で描いて画面から
-                    // はみ出していた。BL=0x02 = カラーCGA、BH=0x00 = 副画面なし。
-                    self.cpu.regs[cpu::BX] = 0x0002;
-                }
-                // AH=11: 文字ジェネレータ (フォント)。
-                //
-                // **このエミュレータはフォントを持っていない。**文字の絵はブラウザ側の
-                // フォントで描いているので、ゲストがフォントを載せ替えても効かない。
-                // AL=30 の「情報を教えろ」にだけ答え、載せ替えは黙って受ける。
-                // DOSはここから**画面の行数**を知るので、返さないと画面計算が壊れる
-                0x11 => {
-                    if self.cpu.regs[cpu::AX] as u8 == 0x30 {
-                        self.cpu.regs[cpu::CX] = 16; // 1文字あたりの走査線数
-                        self.cpu.regs[cpu::DX] =
-                            (self.cpu.regs[cpu::DX] & 0xFF00) | (bus::TEXT_ROWS as u32 - 1);
-                        self.cpu.regs[cpu::BP] = 0; // ES:BP = フォントの在り処。持っていない
-                        self.cpu.sregs[cpu::ES] = 0;
-                    }
-                }
-                // AH=06/07: 画面の一部を上/下へずらす。
-                // **DOSの画面はこれで動く** — COMMAND.COMの改行もクリアもここを通る
-                0x06 | 0x07 => {
-                    let lines = self.cpu.regs[cpu::AX] as u8;
-                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
-                    let cx = self.cpu.regs[cpu::CX] as u16;
-                    let dx = self.cpu.regs[cpu::DX] as u16;
-                    let (top, left) = ((cx >> 8) as usize, (cx & 0xFF) as usize);
-                    let (bottom, right) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
-                    self.scroll_window(top, left, bottom, right, lines, attr, ah == 0x06);
-                }
-                // AH=08: カーソル位置の文字と属性を読む
-                0x08 => {
-                    let (row, col) = self.cursor_pos();
-                    let a = bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
-                    let ch = self.read8(a) as u32;
-                    let at = self.read8(a + 1) as u32;
-                    self.cpu.regs[cpu::AX] = at << 8 | ch;
-                }
-                // AH=09/0A: カーソル位置に文字を書く (CX回繰り返す)。
-                // 0x09 は属性も置き、0x0A は文字だけ置く
-                0x09 | 0x0A => {
-                    let ch = self.cpu.regs[cpu::AX] as u8;
-                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
-                    let count = (self.cpu.regs[cpu::CX] as u16).max(1) as usize;
-                    let (row, col) = self.cursor_pos();
-                    for i in 0..count {
-                        let idx = row * bus::TEXT_COLS + col + i;
-                        if idx >= bus::TEXT_COLS * bus::TEXT_ROWS {
-                            break;
-                        }
-                        let a = bus::VRAM_TEXT_BASE + (idx * 2) as u32;
-                        self.write8(a, ch);
-                        if ah == 0x09 {
-                            self.write8(a + 1, attr);
+                    // **このエミュレータはフォントを持っていない。**文字の絵はブラウザ側の
+                    // フォントで描いているので、ゲストがフォントを載せ替えても効かない。
+                    // AL=30 の「情報を教えろ」にだけ答え、載せ替えは黙って受ける。
+                    // DOSはここから**画面の行数**を知るので、返さないと画面計算が壊れる
+                    0x11 => {
+                        if self.cpu.regs[cpu::AX] as u8 == 0x30 {
+                            self.cpu.regs[cpu::CX] = 16; // 1文字あたりの走査線数
+                            self.cpu.regs[cpu::DX] =
+                                (self.cpu.regs[cpu::DX] & 0xFF00) | (bus::TEXT_ROWS as u32 - 1);
+                            self.cpu.regs[cpu::BP] = 0; // ES:BP = フォントの在り処。持っていない
+                            self.cpu.sregs[cpu::ES] = 0;
                         }
                     }
-                }
-                0x0F => {
-                    // 現在のビデオモードを返す: AL=モード AH=桁数 BH=ページ
-                    self.cpu.regs[cpu::AX] = 80 << 8 | 0x03;
-                    self.cpu.regs[cpu::BX] &= 0x00FF;
-                }
-                // AH=13: 文字列をまとめて書く
-                0x13 => {
-                    let count = self.cpu.regs[cpu::CX] as u16 as usize;
-                    let mode = self.cpu.regs[cpu::AX] as u8;
-                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
-                    let src = cpu::operand::linear(
-                        self.cpu.sregs[cpu::ES],
-                        self.cpu.regs[cpu::BP] as u16,
-                    );
-                    let dx = self.cpu.regs[cpu::DX] as u16;
-                    let (mut row, mut col) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
-                    for i in 0..count {
-                        // mode の bit1 が立っていると、文字のあとに属性が続く
-                        let step = if mode & 2 != 0 { 2 } else { 1 };
-                        let ch = self.read8(src + (i * step) as u32);
-                        let at = if mode & 2 != 0 {
-                            self.read8(src + (i * step) as u32 + 1)
-                        } else {
-                            attr
-                        };
-                        if ch == b'\n' {
-                            row += 1;
-                            col = 0;
-                            continue;
-                        }
-                        if ch == b'\r' {
-                            col = 0;
-                            continue;
-                        }
-                        if row < bus::TEXT_ROWS && col < bus::TEXT_COLS {
-                            let a = bus::VRAM_TEXT_BASE
-                                + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                    // AH=06/07: 画面の一部を上/下へずらす。
+                    // **DOSの画面はこれで動く** — COMMAND.COMの改行もクリアもここを通る
+                    0x06 | 0x07 => {
+                        let lines = self.cpu.regs[cpu::AX] as u8;
+                        let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                        let cx = self.cpu.regs[cpu::CX] as u16;
+                        let dx = self.cpu.regs[cpu::DX] as u16;
+                        let (top, left) = ((cx >> 8) as usize, (cx & 0xFF) as usize);
+                        let (bottom, right) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
+                        self.scroll_window(top, left, bottom, right, lines, attr, ah == 0x06);
+                    }
+                    // AH=08: カーソル位置の文字と属性を読む
+                    0x08 => {
+                        let (row, col) = self.cursor_pos();
+                        let a = bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                        let ch = self.read8(a) as u32;
+                        let at = self.read8(a + 1) as u32;
+                        self.cpu.regs[cpu::AX] = at << 8 | ch;
+                    }
+                    // AH=09/0A: カーソル位置に文字を書く (CX回繰り返す)。
+                    // 0x09 は属性も置き、0x0A は文字だけ置く
+                    0x09 | 0x0A => {
+                        let ch = self.cpu.regs[cpu::AX] as u8;
+                        let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                        let count = (self.cpu.regs[cpu::CX] as u16).max(1) as usize;
+                        let (row, col) = self.cursor_pos();
+                        for i in 0..count {
+                            let idx = row * bus::TEXT_COLS + col + i;
+                            if idx >= bus::TEXT_COLS * bus::TEXT_ROWS {
+                                break;
+                            }
+                            let a = bus::VRAM_TEXT_BASE + (idx * 2) as u32;
                             self.write8(a, ch);
-                            self.write8(a + 1, at);
+                            if ah == 0x09 {
+                                self.write8(a + 1, attr);
+                            }
                         }
-                        col += 1;
                     }
+                    0x0F => {
+                        // 現在のビデオモードを返す: AL=モード AH=桁数 BH=ページ
+                        self.cpu.regs[cpu::AX] = 80 << 8 | 0x03;
+                        self.cpu.regs[cpu::BX] &= 0x00FF;
+                    }
+                    // AH=13: 文字列をまとめて書く
+                    0x13 => {
+                        let count = self.cpu.regs[cpu::CX] as u16 as usize;
+                        let mode = self.cpu.regs[cpu::AX] as u8;
+                        let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                        let src = cpu::operand::linear(
+                            self.cpu.sregs[cpu::ES],
+                            self.cpu.regs[cpu::BP] as u16,
+                        );
+                        let dx = self.cpu.regs[cpu::DX] as u16;
+                        let (mut row, mut col) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
+                        for i in 0..count {
+                            // mode の bit1 が立っていると、文字のあとに属性が続く
+                            let step = if mode & 2 != 0 { 2 } else { 1 };
+                            let ch = self.read8(src + (i * step) as u32);
+                            let at = if mode & 2 != 0 {
+                                self.read8(src + (i * step) as u32 + 1)
+                            } else {
+                                attr
+                            };
+                            if ch == b'\n' {
+                                row += 1;
+                                col = 0;
+                                continue;
+                            }
+                            if ch == b'\r' {
+                                col = 0;
+                                continue;
+                            }
+                            if row < bus::TEXT_ROWS && col < bus::TEXT_COLS {
+                                let a =
+                                    bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                                self.write8(a, ch);
+                                self.write8(a + 1, at);
+                            }
+                            col += 1;
+                        }
+                    }
+                    _ => panic!("INT 10h AH={ah:#04x} 未実装"),
                 }
-                _ => panic!("INT 10h AH={ah:#04x} 未実装"),
-              }
             }
 
             // --- INT 08h: タイマ割り込み (IRQ0) ---
@@ -513,15 +519,20 @@ impl Machine {
                 0x03 => {
                     let cx = self.cpu.regs[cpu::CX];
                     let dx = self.cpu.regs[cpu::DX];
-                    self.devices.cmos.set_time_bcd((cx >> 8) as u8, cx as u8, (dx >> 8) as u8);
+                    self.devices
+                        .cmos
+                        .set_time_bcd((cx >> 8) as u8, cx as u8, (dx >> 8) as u8);
                 }
                 // AH=05: RTCの日付を設定する (DOSの `DATE`)
                 0x05 => {
                     let cx = self.cpu.regs[cpu::CX];
                     let dx = self.cpu.regs[cpu::DX];
-                    self.devices
-                        .cmos
-                        .set_date_bcd((cx >> 8) as u8, cx as u8, (dx >> 8) as u8, dx as u8);
+                    self.devices.cmos.set_date_bcd(
+                        (cx >> 8) as u8,
+                        cx as u8,
+                        (dx >> 8) as u8,
+                        dx as u8,
+                    );
                 }
                 _ => panic!("INT 1Ah AH={ah:#04x} 未実装"),
             },
@@ -566,7 +577,11 @@ impl Machine {
             };
             if let Some(b) = bit {
                 let mut f = self.read8(BDA_KB_FLAG1);
-                if released { f &= !b } else { f |= b }
+                if released {
+                    f &= !b
+                } else {
+                    f |= b
+                }
                 self.write8(BDA_KB_FLAG1, f);
                 return;
             }
@@ -582,7 +597,11 @@ impl Machine {
     /// 待ち行列へ1つ積む。**いっぱいなら捨てる** (実機も同じで、そのとき鳴る)
     fn kbd_enqueue(&mut self, entry: u16) {
         let tail = self.read16(BDA_KB_TAIL);
-        let next = if tail + 2 >= KB_BUF_END { KB_BUF_START } else { tail + 2 };
+        let next = if tail + 2 >= KB_BUF_END {
+            KB_BUF_START
+        } else {
+            tail + 2
+        };
         if next == self.read16(BDA_KB_HEAD) {
             return; // 満杯
         }
@@ -597,7 +616,11 @@ impl Machine {
             return None;
         }
         let v = self.read16(BDA_SEG + head as u32);
-        let next = if head + 2 >= KB_BUF_END { KB_BUF_START } else { head + 2 };
+        let next = if head + 2 >= KB_BUF_END {
+            KB_BUF_START
+        } else {
+            head + 2
+        };
         self.write16(BDA_KB_HEAD, next);
         Some(v)
     }
@@ -627,8 +650,7 @@ impl Machine {
             // タブ文字そのもの (CP437では ○) を画面に書いていた
             b'\t' => col = (col / 8 + 1) * 8,
             _ => {
-                let addr =
-                    bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                let addr = bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
                 self.write8(addr, c);
                 // 属性はページ0の既定 (BLで指定されるのはグラフィックモードだけ)
                 if self.read8(addr + 1) == 0 {
@@ -665,7 +687,11 @@ impl Machine {
             return;
         }
         let cell = |r: usize, c: usize| bus::VRAM_TEXT_BASE + ((r * bus::TEXT_COLS + c) * 2) as u32;
-        let n = if lines == 0 { bottom - top + 1 } else { lines as usize };
+        let n = if lines == 0 {
+            bottom - top + 1
+        } else {
+            lines as usize
+        };
 
         for _ in 0..n.min(bottom - top + 1) {
             if lines != 0 {
@@ -814,17 +840,49 @@ impl Machine {
 /// [`crate::dev::kbd::scancode_shift`] のちょうど逆向きにあたる。
 fn scancode_to_ascii(sc: u8, shift: bool, ctrl: bool) -> Option<u8> {
     const PLAIN: &[(u8, u8)] = &[
-        (0x02, b'1'), (0x03, b'2'), (0x04, b'3'), (0x05, b'4'), (0x06, b'5'),
-        (0x07, b'6'), (0x08, b'7'), (0x09, b'8'), (0x0A, b'9'), (0x0B, b'0'),
-        (0x0C, b'-'), (0x0D, b'='), (0x1A, b'['), (0x1B, b']'), (0x27, b';'),
-        (0x28, b'\''), (0x29, b'`'), (0x2B, b'\\'), (0x33, b','), (0x34, b'.'),
+        (0x02, b'1'),
+        (0x03, b'2'),
+        (0x04, b'3'),
+        (0x05, b'4'),
+        (0x06, b'5'),
+        (0x07, b'6'),
+        (0x08, b'7'),
+        (0x09, b'8'),
+        (0x0A, b'9'),
+        (0x0B, b'0'),
+        (0x0C, b'-'),
+        (0x0D, b'='),
+        (0x1A, b'['),
+        (0x1B, b']'),
+        (0x27, b';'),
+        (0x28, b'\''),
+        (0x29, b'`'),
+        (0x2B, b'\\'),
+        (0x33, b','),
+        (0x34, b'.'),
         (0x35, b'/'),
     ];
     const SHIFTED: &[(u8, u8)] = &[
-        (0x02, b'!'), (0x03, b'@'), (0x04, b'#'), (0x05, b'$'), (0x06, b'%'),
-        (0x07, b'^'), (0x08, b'&'), (0x09, b'*'), (0x0A, b'('), (0x0B, b')'),
-        (0x0C, b'_'), (0x0D, b'+'), (0x1A, b'{'), (0x1B, b'}'), (0x27, b':'),
-        (0x28, b'"'), (0x29, b'~'), (0x2B, b'|'), (0x33, b'<'), (0x34, b'>'),
+        (0x02, b'!'),
+        (0x03, b'@'),
+        (0x04, b'#'),
+        (0x05, b'$'),
+        (0x06, b'%'),
+        (0x07, b'^'),
+        (0x08, b'&'),
+        (0x09, b'*'),
+        (0x0A, b'('),
+        (0x0B, b')'),
+        (0x0C, b'_'),
+        (0x0D, b'+'),
+        (0x1A, b'{'),
+        (0x1B, b'}'),
+        (0x27, b':'),
+        (0x28, b'"'),
+        (0x29, b'~'),
+        (0x2B, b'|'),
+        (0x33, b'<'),
+        (0x34, b'>'),
         (0x35, b'?'),
     ];
     const ROW_Q: &[u8] = b"qwertyuiop";

@@ -16,7 +16,9 @@ use rustx86_core::{cpu, Machine};
 use std::time::Instant;
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "asm/bench.bin".into());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "asm/bench.bin".into());
     let sector = std::fs::read(&path).expect("bench.bin");
 
     let mut m = Machine::new();

@@ -29,7 +29,15 @@
 pub const FLOPPY_1440K: u8 = 4;
 
 /// 起動時の日時 (固定)。**ホストの時計は読まない** — 上記の理由による
-const EPOCH: Time = Time { year: 2026, month: 1, day: 1, weekday: 5, hour: 0, min: 0, sec: 0 };
+const EPOCH: Time = Time {
+    year: 2026,
+    month: 1,
+    day: 1,
+    weekday: 5,
+    hour: 0,
+    min: 0,
+    sec: 0,
+};
 
 /// 2進で持つ日時。CMOSのレジスタとして読まれるときにBCDへ直す
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +58,11 @@ fn days_in_month(year: u16, month: u8) -> u8 {
         4 | 6 | 9 | 11 => 30,
         _ => {
             let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-            if leap { 29 } else { 28 }
+            if leap {
+                29
+            } else {
+                28
+            }
         }
     }
 }
@@ -59,20 +71,30 @@ impl Time {
     /// 1秒進める。桁上がりを素直に書き下す
     fn advance_second(&mut self) {
         self.sec += 1;
-        if self.sec < 60 { return; }
+        if self.sec < 60 {
+            return;
+        }
         self.sec = 0;
         self.min += 1;
-        if self.min < 60 { return; }
+        if self.min < 60 {
+            return;
+        }
         self.min = 0;
         self.hour += 1;
-        if self.hour < 24 { return; }
+        if self.hour < 24 {
+            return;
+        }
         self.hour = 0;
         self.weekday = self.weekday % 7 + 1;
         self.day += 1;
-        if self.day <= days_in_month(self.year, self.month) { return; }
+        if self.day <= days_in_month(self.year, self.month) {
+            return;
+        }
         self.day = 1;
         self.month += 1;
-        if self.month <= 12 { return; }
+        if self.month <= 12 {
+            return;
+        }
         self.month = 1;
         self.year += 1;
     }
@@ -110,12 +132,17 @@ impl Cmos {
         regs[0x0A] = 0x26; // ステータスA: 分周設定 (更新中フラグは立てない)
         regs[0x0B] = 0x02; // ステータスB: 24時間表記、BCD
         regs[0x0D] = 0x80; // ステータスD: 電池は生きている
-        // 1台目を1.44MB、2台目は無し
+                           // 1台目を1.44MB、2台目は無し
         regs[0x10] = FLOPPY_1440K << 4;
         regs[0x14] = 0x21; // 装置構成
         regs[0x15] = 640u16 as u8; // ベースメモリ (KB)
         regs[0x16] = (640u16 >> 8) as u8;
-        Self { index: 0, regs, now: EPOCH, sub_second: 0 }
+        Self {
+            index: 0,
+            regs,
+            now: EPOCH,
+            sub_second: 0,
+        }
     }
 
     /// 0x70 への書き込み: レジスタ番号の指定 (最上位ビットはNMIマスク)
@@ -156,7 +183,11 @@ impl Cmos {
 
     /// 現在時刻 (時, 分, 秒)。BIOSの INT 1Ah AH=02 が使う
     pub fn time_bcd(&self) -> (u8, u8, u8) {
-        (to_bcd(self.now.hour), to_bcd(self.now.min), to_bcd(self.now.sec))
+        (
+            to_bcd(self.now.hour),
+            to_bcd(self.now.min),
+            to_bcd(self.now.sec),
+        )
     }
 
     /// 現在の日付 (世紀, 年, 月, 日)。BIOSの INT 1Ah AH=04 が使う
@@ -239,7 +270,15 @@ mod tests {
     /// 大晦日の23:59:59を1秒進めると年が変わる
     #[test]
     fn new_year_rolls_over_every_field() {
-        let mut t = Time { year: 2026, month: 12, day: 31, weekday: 5, hour: 23, min: 59, sec: 59 };
+        let mut t = Time {
+            year: 2026,
+            month: 12,
+            day: 31,
+            weekday: 5,
+            hour: 23,
+            min: 59,
+            sec: 59,
+        };
         t.advance_second();
         assert_eq!(
             (t.year, t.month, t.day, t.hour, t.min, t.sec),

@@ -169,7 +169,9 @@ impl Kbd8042 {
     pub fn type_ascii(&mut self, s: &str) {
         const LSHIFT: u8 = 0x2A;
         for ch in s.chars() {
-            let Some((code, shifted)) = scancode_shift(ch) else { continue };
+            let Some((code, shifted)) = scancode_shift(ch) else {
+                continue;
+            };
             // Shiftは独立したキーとして届く。文字コードを渡す装置ではないので、
             // 実機と同じ手順を踏む
             if shifted {

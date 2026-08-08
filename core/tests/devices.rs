@@ -131,7 +131,11 @@ fn pit_latch_freezes_the_value_across_two_reads() {
     let lo = p.read_counter(0);
     p.tick(0x500); // 読んでいる間にカウンタは進む
     let hi = p.read_counter(0);
-    assert_eq!(u16::from(hi) << 8 | u16::from(lo), 0x1000, "ラッチした瞬間の値");
+    assert_eq!(
+        u16::from(hi) << 8 | u16::from(lo),
+        0x1000,
+        "ラッチした瞬間の値"
+    );
 }
 
 // ---------- UART 16550 ----------
@@ -277,5 +281,9 @@ fn shifted_characters_are_wrapped_with_shift() {
     while k.has_data() {
         got.push(k.read_data());
     }
-    assert_eq!(got, vec![0x2A, 0x03, 0x83, 0xAA], "Shift押下, 2押下, 2離す, Shift離す");
+    assert_eq!(
+        got,
+        vec![0x2A, 0x03, 0x83, 0xAA],
+        "Shift押下, 2押下, 2離す, Shift離す"
+    );
 }
