@@ -11,7 +11,8 @@
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
-import { Debugger } from './debugger.js?v=13';
+import { Debugger } from './debugger.js?v=15';
+import { mountBench } from './bench.js?v=5';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -90,11 +91,20 @@ function setStatus(text, warn = false) {
 /** ツールバーの表示を実際の状態に合わせる */
 function syncControls() {
   const on = !!machine;
+  // ベンチには端末が無いので、端末向けの操作は伏せる。
+  // デバッガだけは**どちらでも使える**
+  for (const id of ['boot', 'pause', 'snap', 'restore', 'snapfile', 'save']) {
+    $(id).hidden = !!bench;
+  }
+  // 配列の選択と MIPS の表示も端末のもの
+  $('layout').closest('.sel').hidden = !!bench;
+  $('gauge').hidden = !!bench;
+  $('debug').disabled = !on && !bench;
+  if (bench) return;
   $('pause').disabled = !on;
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
-  $('debug').disabled = !on;
   $('snapfile').disabled = !on;
   $('restore').disabled = !on || !localStorage.getItem(SNAP_KEY);
 }
@@ -173,10 +183,19 @@ layoutSel.addEventListener('change', () => {
 //
 // Emulator は再起動のたびに作り直されるので、**参照を握らせず毎回聞かせる**。
 // 握らせると再起動後に古い機械を覗き続けることになる
+/** ベンチを選んでいるときの取っ手 (選んでいなければ null) */
+let bench = null;
+
+// **いま動いている機械**を見せる。OSとベンチで持ち主が違うので、
+// 参照を握らず毎回聞く
 const dbg = new Debugger({
-  emu: () => machine?.emu ?? null,
-  isPaused: () => machine?.paused ?? true,
+  emu: () => (bench ? bench.emu : machine?.emu) ?? null,
+  isPaused: () => (bench ? bench.paused : machine?.paused) ?? true,
   setPaused: (v) => {
+    if (bench) {
+      bench.setPaused(v);
+      return;
+    }
     if (!machine) return;
     if (v) machine.stop();
     else machine.start();
@@ -184,7 +203,12 @@ const dbg = new Debugger({
   },
 });
 
-$('debug').addEventListener('click', () => dbg.show());
+$('debug').addEventListener('click', async () => {
+  // ベンチのデバッグ機械は求められて初めて作る (計測だけしたい人に costs を払わせない)
+  if (bench) await bench.ensureDebugMachine();
+  dbg.show();
+  dbg.reset();
+});
 
 $('pause').addEventListener('click', () => {
   if (!machine) return;
@@ -384,15 +408,40 @@ function showNote(m) {
 }
 
 async function select(m) {
-  if (m.href) {
-    location.href = m.href;
-    return;
-  }
+  // **切り替えたら前の機械は捨てる。**
+  //
+  // OSもベンチも同じCPUを回している。片方を残したまま次を始めると、
+  // 裏で走り続けて画面にも出ず、計測を汚し、デバッガは古い機械を覗く。
+  // 「選び直したらまっさらから」を守る
+  machine?.stop();
+  bench?.destroy();
+  bench = null;
+  $('benchPane').hidden = true;
+  $('screen').hidden = false;
+
   current = m;
   markCurrent(m.id);
   showNote(m);
+
+  if (m.kind === 'bench') {
+    machine = null;
+    lastImage = null;
+    term.reset();
+    $('screen').hidden = true;
+    $('benchPane').hidden = false;
+    bench = mountBench($('benchPane'), {
+      onStop: (why) => dbg.onStop(why),
+    });
+    setStatus('実行速度ベンチ。「計測する」で始める');
+    syncControls();
+    // 見ている機械が入れ替わったので、前の残りかすを捨てる
+    dbg.reset();
+    return;
+  }
+
   await bootFromUrl(m);
   startScript(m.script);
+  dbg.reset();
 }
 
 async function bootFromUrl(m = current) {

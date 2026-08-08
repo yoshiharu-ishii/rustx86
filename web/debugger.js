@@ -415,6 +415,28 @@ export class Debugger {
     if (this.$('rxLive').checked) this.dump();
   }
 
+  /**
+   * 見ている機械が入れ替わったときに呼ぶ。
+   *
+   * **前の機械の残りかすを持ち越さない。** レジスタの「変わった」判定は
+   * 前回の値との比較なので、持ち越すと切り替えた直後に全部オレンジになる。
+   * 止まった理由も、もう存在しない機械の話になる。
+   *
+   * 見張り (ブレークポイント) は**新しい機械には付いていない** — Emulator ごと
+   * 作り直されるため。画面の一覧もそれに合わせて空になる。
+   */
+  reset() {
+    this.prev = {};
+    this.lastWhy = '';
+    if (!this.open) return;
+    this.$('rxWhy').textContent = '';
+    this.$('rxMem').textContent = '';
+    this.$('rxTrace').textContent = '';
+    // 新しい機械にも数えさせる。開いている間は命令数が動くべきである
+    this.host.emu()?.set_counting(true);
+    this.render();
+  }
+
   /** 親が「止まった」と気づいたときに呼ぶ。理由の文字列はここで預かる */
   onStop(why) {
     this.lastWhy = why;
