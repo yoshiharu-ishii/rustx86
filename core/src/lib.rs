@@ -61,6 +61,12 @@ pub struct Machine {
     /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
     /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
     pub prefixed_ops: std::collections::BTreeSet<u8>,
+    /// ゲストが設定しようとしたビデオモード。
+    ///
+    /// **テキスト以外は黙って無視している**ので、グラフィックスを要求された
+    /// ことに気づけない。画面が真っ白なのが「何も描いていない」のか
+    /// 「描いた先が無い」のかを区別するために控えておく
+    pub video_modes: std::collections::BTreeSet<u8>,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -96,6 +102,7 @@ impl Machine {
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
+            video_modes: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,

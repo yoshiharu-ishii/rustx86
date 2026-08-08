@@ -171,6 +171,23 @@ fn main() {
     // 書いた先が見ている場所と違う、という取り違えがすぐ分かる
     let (crow, ccol) = m.cursor_pos();
     println!("--- カーソル: 行{crow} 桁{ccol} ---");
+    {
+        // 3 = 80x25 カラーテキスト。それ以外を要求されていたら、
+        // 画面が白いのは「描いていない」のではなく「描く先が無い」
+        let other: Vec<String> = m
+            .video_modes
+            .iter()
+            .filter(|v| **v != 0x03 && **v != 0x02 && **v != 0x07)
+            .map(|v| format!("{v:#04x}"))
+            .collect();
+        if !other.is_empty() {
+            println!(
+                "--- テキスト以外のビデオモードを要求された: {} (グラフィックスは未実装 → Tier 6) ---",
+                other.join(" ")
+            );
+        }
+    }
+
     if !m.prefixed_ops.is_empty() {
         let list: Vec<String> = m.prefixed_ops.iter().map(|o| format!("{o:#04x}")).collect();
         println!("--- 0x66 を付けて実行されたオペコード ---\n  {}", list.join(" "));
