@@ -25,6 +25,23 @@
     background: #000; color: #d8d8d8;
   }
   .console.drop { outline: 2px dashed #00aa00; outline-offset: -6px; }
+  /* ベンチ。端末と同じ枠の中に出るので、地の色に合わせる */
+  #benchPane { padding: 1rem 1.1rem; color: #c9d1d9; }
+  #benchPane fieldset { border: 1px solid #30363d; border-radius: 6px;
+                        margin: 0 0 .9rem; padding: .7rem .9rem; }
+  #benchPane legend { color: #8b949e; font-size: .85rem; padding: 0 .3rem; }
+  #benchPane .row { display: flex; flex-wrap: wrap; gap: .9rem; align-items: center; }
+  #benchPane .note { color: #8b949e; font-size: .85rem; }
+  #benchPane .note.warn { color: #f0883e; }
+  #benchPane table { border-collapse: collapse; width: 100%; margin-top: .8rem; }
+  #benchPane th, #benchPane td { padding: .25rem .6rem; border-bottom: 1px solid #21262d;
+                                 text-align: left; }
+  #benchPane .num { text-align: right; font-variant-numeric: tabular-nums; }
+  #benchPane #bench-status { color: #c9d1d9; }
+  #benchPane tr.warmup { opacity: .55; }
+  #benchPane input, #benchPane select { background: #0d1117; color: #c9d1d9;
+                                        border: 1px solid #30363d; border-radius: 4px;
+                                        padding: .2rem .4rem; }
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
      アスペクト比を固定してあるので、縮んでも文字が潰れない。
@@ -36,6 +53,10 @@
     max-width: calc((100vh - 15rem) * 730 / 400);
   }
   #screen:focus { outline: none; }
+  /* **hidden 属性を効かせる。** 上の #screen が display を指定しているので、
+     UAスタイルの [hidden]{display:none} が負ける。ベンチに切り替えたときに
+     端末が残り続けて実際に踏んだ */
+  [hidden] { display: none !important; }
 
   .toolbar {
     display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
@@ -120,6 +141,7 @@
       <button id="restore" disabled>状態を復元</button>
       <button id="snapfile" disabled>状態をJSONで書き出す</button>
       <button id="save">ログを保存</button>
+      <button id="debug" disabled>デバッガ</button>
       <label class="sel">配列
         <select id="layout">
           <option value="jp">JIS</option>
@@ -130,6 +152,8 @@
       <span class="gauge" id="gauge"></span>
     </div>
     <canvas id="screen" tabindex="0"></canvas>
+    <!-- ベンチもここに出る。**OSと同じ扱い**にするため、画面と同じ場所を使う -->
+    <div id="benchPane" hidden></div>
     <p id="status">読み込み中…</p>
   </div>
   <p id="machineNote"></p>

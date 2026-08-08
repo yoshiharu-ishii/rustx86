@@ -8,7 +8,7 @@
 // 画面を何命令ごとに覗くか — 実機なら水晶が決めることを、ブラウザでは
 // ここが決める。
 
-import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js?v=7';
+import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js?v=11';
 
 /** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
 const INSTRUCTIONS_PER_FRAME = 3_000_000;
@@ -32,7 +32,7 @@ export async function loadWasm() {
   // glue と .wasm 本体の両方にバージョンを付ける。
   // 片方だけ新しいと「その関数は無い」と言われる (実際に踏んだ)
   const wasm = await init({
-    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=7', import.meta.url),
+    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=11', import.meta.url),
   });
   wasmMemory = wasm.memory;
   // **パニックの中身を拾えるようにする。** これが無いとJS側には
@@ -164,6 +164,14 @@ export class Machine {
     for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
       try {
         this.emu.run_slice(CHUNK);
+        // デバッガが止めたら、そこで走るのをやめる。**画面は描き直す** —
+        // 止まった瞬間の絵を見たいので (パニックのときと違い、続きがある)
+        if (this.emu.is_stopped()) {
+          this.running = false;
+          this.onFrame?.(this.vram(), ...this.cursor(), true);
+          this.onDebugStop?.(this.emu.take_stop());
+          return;
+        }
       } catch (e) {
         // wasmがパニックした。**ここで止めて、描き直さずに抜ける。**
         //
