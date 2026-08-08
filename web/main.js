@@ -11,8 +11,8 @@
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
-import { Debugger } from './debugger.js?v=16';
-import { mountBench } from './bench.js?v=5';
+import { Debugger } from './debugger.js?v=17';
+import { mountBench } from './bench.js?v=6';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -200,6 +200,16 @@ const dbg = new Debugger({
     if (v) machine.stop();
     else machine.start();
     syncControls();
+  },
+  // 最初から流し直す。ベンチは hlt で終わるので、これが無いと死体を眺めるだけになる
+  restart: async () => {
+    if (bench) {
+      await bench.restartDebugMachine();
+      return;
+    }
+    if (!current) return;
+    await bootFromUrl(current);
+    startScript(current.script);
   },
 });
 

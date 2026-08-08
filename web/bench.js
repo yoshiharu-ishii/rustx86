@@ -15,7 +15,7 @@
 // 同じ部品を空のページに載せているだけで、中身は同一である。
 
 import { Emulator } from './pkg/rustx86_wasm.js?v=10';
-import { SlicedRunner } from './debugger.js?v=16';
+import { SlicedRunner } from './debugger.js?v=17';
 
 const HTML = `
   <fieldset>
@@ -318,8 +318,17 @@ $run.addEventListener('click', runBench);
     $('debug').addEventListener('click', () => opts.onDebug());
   }
 
+  /** デバッグ機械を作り直す。ワークロードは hlt で終わるので、見直すには要る */
+  async function restartDebugMachine() {
+    runner?.stop();
+    runner = null;
+    dbgEmu = null;
+    return ensureDebugMachine();
+  }
+
   return {
     ensureDebugMachine,
+    restartDebugMachine,
     get emu() {
       return dbgEmu;
     },

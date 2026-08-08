@@ -90,6 +90,7 @@ const HTML = `
       <button id="rxPause">Pause</button>
       <button id="rxStep">Step 1</button>
       <button id="rxCont">Continue</button>
+      <button id="rxRestart" hidden>Restart</button>
       <span class="state" id="rxState">—</span>
     </div>
     <p class="why" id="rxWhy"></p>
@@ -326,6 +327,13 @@ export class Debugger {
       this.render();
     };
 
+    // **終わった機械を作り直す。** ベンチのワークロードは hlt で終わるので、
+    // 一度流し切ると死体を眺めることになる。作り直す道が要る
+    this.$('rxRestart').onclick = async () => {
+      await this.host.restart?.();
+      this.reset();
+    };
+
     const add = (id, field, fn) => {
       this.$(id).onclick = () => {
         const a = parseAddr(this.$(field).value);
@@ -369,9 +377,19 @@ export class Debugger {
     const paused = this.host.isPaused();
 
     const st = this.$('rxState');
-    st.textContent = stopped ? 'stopped' : paused ? 'paused' : 'running';
-    st.className = 'state ' + (stopped || paused ? 'stopped' : 'running');
+    // **HLT を隠さない。** ワークロードが終わって止まっているだけなのに
+    // 「paused」と出ると、レジスタが動かないのがバグに見える。
+    // ベンチは hlt で終わるので、必ずここへ来る
+    st.textContent = c.halted
+      ? 'halted — 実行するものが無い'
+      : stopped
+        ? 'stopped'
+        : paused
+          ? 'paused'
+          : 'running';
+    st.className = 'state ' + (c.halted || stopped || paused ? 'stopped' : 'running');
     this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
+    this.$('rxRestart').hidden = !this.host.restart;
 
     // レジスタ。**前回と変わったところに色を付ける** — 1命令進めたときに
     // どれが動いたかが目で分かる
