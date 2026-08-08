@@ -54,3 +54,20 @@ impl Cmos {
         self.regs[(self.index & 0x7F) as usize] = val;
     }
 }
+
+impl Cmos {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u8(self.index);
+        w.bytes(&self.regs);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.index = r.u8()?;
+        let regs = r.bytes()?;
+        if regs.len() != self.regs.len() {
+            return Err("CMOSのレジスタ数が合わない".into());
+        }
+        self.regs.copy_from_slice(&regs);
+        Ok(())
+    }
+}

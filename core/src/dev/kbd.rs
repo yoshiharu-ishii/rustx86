@@ -169,10 +169,9 @@ impl Kbd8042 {
     pub fn type_ascii(&mut self, s: &str) {
         const LSHIFT: u8 = 0x2A;
         for ch in s.chars() {
-            let Some(code) = scancode(ch) else { continue };
-            // 大文字は「Shiftを押しながら同じキーを叩く」として送る。
-            // 文字コードを渡す装置ではないので、実機と同じ手順を踏む
-            let shifted = ch.is_ascii_uppercase();
+            let Some((code, shifted)) = scancode_shift(ch) else { continue };
+            // Shiftは独立したキーとして届く。文字コードを渡す装置ではないので、
+            // 実機と同じ手順を踏む
             if shifted {
                 self.keys.push_back(LSHIFT);
             }
@@ -185,37 +184,71 @@ impl Kbd8042 {
     }
 }
 
-/// ASCII文字 → スキャンコード セット1。
+/// ASCII文字 → (スキャンコード, Shiftが要るか)。**US配列**での対応。
 ///
-/// 並びがアルファベット順でないのは、**キーボード上の物理的な位置に振られた
-/// 番号**だからである。左上から数えると Q=0x10、W=0x11 と続く —
-/// QWERTY配列そのものが番号の並びになっている。
-pub fn scancode(ch: char) -> Option<u8> {
+/// ゲスト (ELKS) はUS配列の対応表しか持たないので、こちらもUS配列で組み立てる。
+/// JIS配列の実機から使うときは、ブラウザが解釈した文字をここへ渡せば
+/// 見たままの文字が入る — 位置ではなく文字で辻褄を合わせるということである。
+///
+/// 数字段の記号 (`!` から `)`) が数字のShiftになっているのはタイプライタからの
+/// 引き継ぎで、キーの位置に意味があるわけではない。
+pub fn scancode_shift(ch: char) -> Option<(u8, bool)> {
+    // 上段・中段・下段。左上から数えた位置がそのまま番号になっている
     const ROW_Q: &str = "qwertyuiop";
     const ROW_A: &str = "asdfghjkl";
     const ROW_Z: &str = "zxcvbnm";
-    let c = ch.to_ascii_lowercase();
-    if let Some(i) = ROW_Q.find(c) {
-        return Some(0x10 + i as u8);
+    // (スキャンコード, Shift無しの文字, Shift有りの文字)
+    const SYMBOLS: [(u8, char, char); 21] = [
+        (0x02, '1', '!'),
+        (0x03, '2', '@'),
+        (0x04, '3', '#'),
+        (0x05, '4', '$'),
+        (0x06, '5', '%'),
+        (0x07, '6', '^'),
+        (0x08, '7', '&'),
+        (0x09, '8', '*'),
+        (0x0A, '9', '('),
+        (0x0B, '0', ')'),
+        (0x0C, '-', '_'),
+        (0x0D, '=', '+'),
+        (0x1A, '[', '{'),
+        (0x1B, ']', '}'),
+        (0x27, ';', ':'),
+        (0x28, '\'', '"'),
+        (0x29, '`', '~'),
+        (0x2B, '\\', '|'),
+        (0x33, ',', '<'),
+        (0x34, '.', '>'),
+        (0x35, '/', '?'),
+    ];
+
+    if ch.is_ascii_alphabetic() {
+        let lower = ch.to_ascii_lowercase();
+        let shifted = ch.is_ascii_uppercase();
+        if let Some(i) = ROW_Q.find(lower) {
+            return Some((0x10 + i as u8, shifted));
+        }
+        if let Some(i) = ROW_A.find(lower) {
+            return Some((0x1E + i as u8, shifted));
+        }
+        if let Some(i) = ROW_Z.find(lower) {
+            return Some((0x2C + i as u8, shifted));
+        }
     }
-    if let Some(i) = ROW_A.find(c) {
-        return Some(0x1E + i as u8);
+    for (code, plain, shift) in SYMBOLS {
+        if ch == plain {
+            return Some((code, false));
+        }
+        if ch == shift {
+            return Some((code, true));
+        }
     }
-    if let Some(i) = ROW_Z.find(c) {
-        return Some(0x2C + i as u8);
-    }
-    Some(match c {
-        '1'..='9' => 0x02 + (c as u8 - b'1'),
-        '0' => 0x0B,
-        '\n' | '\r' => 0x1C,
-        ' ' => 0x39,
-        '\x08' => 0x0E,
-        '-' => 0x0C,
-        '=' => 0x0D,
-        '.' => 0x34,
-        ',' => 0x33,
-        '/' => 0x35,
-        ';' => 0x27,
+    Some(match ch {
+        '\n' | '\r' => (0x1C, false),
+        ' ' => (0x39, false),
+        '\t' => (0x0F, false),
+        '\x08' | '\x7f' => (0x0E, false),
+        '\x1b' => (0x01, false),
         _ => return None,
     })
 }
@@ -331,5 +364,27 @@ impl Kbd8042 {
         }
         self.keys.push_back(if down { sc } else { sc | 0x80 });
         true
+    }
+}
+
+impl Kbd8042 {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u8(self.output_buf);
+        w.bool(self.has_output);
+        w.opt_u8(self.pending);
+        w.u8(self.output_port);
+        w.bool(self.irq_asserted);
+        let keys: Vec<u8> = self.keys.iter().copied().collect();
+        w.bytes(&keys);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.output_buf = r.u8()?;
+        self.has_output = r.bool()?;
+        self.pending = r.opt_u8()?;
+        self.output_port = r.u8()?;
+        self.irq_asserted = r.bool()?;
+        self.keys = r.bytes()?.into();
+        Ok(())
     }
 }

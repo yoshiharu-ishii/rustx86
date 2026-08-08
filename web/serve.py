@@ -30,5 +30,5 @@ if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8001
     root = Path(__file__).parent
     handler = partial(NoCacheHandler, directory=str(root))
-    print(f"http://localhost:{port}/elks.html  (Ctrl-C で停止)")
+    print(f"http://localhost:{port}/  (Ctrl-C で停止)")
     ThreadingHTTPServer(("127.0.0.1", port), handler).serve_forever()

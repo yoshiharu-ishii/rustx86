@@ -21,6 +21,7 @@ pub const CLOCK_HZ: u32 = 1_193_182;
 /// 値0の「ラッチ」はアクセス方法ではなく一度きりのコマンドなので、
 /// ここではなく [`Counter::latched`] で表す
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 enum Access {
     LoOnly,
     HiOnly,
@@ -182,5 +183,56 @@ impl Counter {
         self.count = self.reload;
         self.running = true;
         self.latched = None;
+    }
+}
+
+impl Counter {
+    fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u16(self.reload);
+        w.u16(self.count);
+        w.u8(self.mode);
+        w.u8(self.access as u8);
+        w.bool(self.writing_hi);
+        w.bool(self.reading_hi);
+        match self.latched {
+            Some(v) => {
+                w.bool(true);
+                w.u16(v);
+            }
+            None => w.bool(false),
+        }
+        w.bool(self.running);
+    }
+
+    fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.reload = r.u16()?;
+        self.count = r.u16()?;
+        self.mode = r.u8()?;
+        self.access = match r.u8()? {
+            0 => Access::LoOnly,
+            1 => Access::HiOnly,
+            2 => Access::LoHi,
+            n => return Err(format!("PITのアクセス方法が不正: {n}")),
+        };
+        self.writing_hi = r.bool()?;
+        self.reading_hi = r.bool()?;
+        self.latched = if r.bool()? { Some(r.u16()?) } else { None };
+        self.running = r.bool()?;
+        Ok(())
+    }
+}
+
+impl Pit8254 {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        for c in &self.counters {
+            c.save(w);
+        }
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        for c in &mut self.counters {
+            c.load(r)?;
+        }
+        Ok(())
     }
 }

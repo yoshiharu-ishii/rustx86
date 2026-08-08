@@ -23,6 +23,7 @@
 
 /// 初期化コマンドの受け取り状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 enum InitState {
     /// 通常運転。0x21 への書き込みは割り込みマスク
     #[default]
@@ -148,5 +149,34 @@ impl Pic8259 {
         self.irr &= !(1 << irq);
         self.isr |= 1 << irq;
         Some(self.vector_base.wrapping_add(irq))
+    }
+}
+
+impl Pic8259 {
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u8(self.irr);
+        w.u8(self.isr);
+        w.u8(self.imr);
+        w.u8(self.vector_base);
+        w.bool(self.expect_icw4);
+        w.u8(self.init as u8);
+        w.bool(self.read_isr);
+    }
+
+    pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.irr = r.u8()?;
+        self.isr = r.u8()?;
+        self.imr = r.u8()?;
+        self.vector_base = r.u8()?;
+        self.expect_icw4 = r.bool()?;
+        self.init = match r.u8()? {
+            0 => InitState::Ready,
+            1 => InitState::ExpectIcw2,
+            2 => InitState::ExpectIcw3,
+            3 => InitState::ExpectIcw4,
+            n => return Err(format!("PICの初期化状態が不正: {n}")),
+        };
+        self.read_isr = r.bool()?;
+        Ok(())
     }
 }
