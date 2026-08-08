@@ -1,3 +1,8 @@
+//! 割り込みベクタ表の検証。
+//!
+//! `0 * 4` や `1 * 4` は**ベクタ番号 × 表の1要素4バイト**という意味の式で、
+//! 畳んで `4` と書くと何の番地か読めなくなる。clippy には冗長に見えるが意図的
+#![allow(clippy::identity_op, clippy::erasing_op)]
 //! 割り込み機構 (Tier 1d) のテスト。
 //!
 //! co-simは1命令単位の比較なので、**割り込みは守備範囲の外**にある。
@@ -131,7 +136,7 @@ fn divide_by_zero_pushes_the_faulting_address() {
         m.write8(CODE + i as u32, *b);
     }
     m.write16(0 * 4, 0x9000); // INT 0 のハンドラ
-    m.write16(0 * 4 + 2, 0x0000);
+    m.write16(2, 0x0000);
     m.cpu.set_cs_ip(0, CODE as u16);
     m.cpu.regs[AX] = 100;
     m.cpu.regs[4] = 0x7C00; // SP
@@ -142,7 +147,7 @@ fn divide_by_zero_pushes_the_faulting_address() {
     assert!(!m.halted, "マシンは止まらない");
     assert_eq!(m.cpu.ip, 0x9000, "ハンドラへ飛んでいる");
     // スタック: [SP]=IP [SP+2]=CS [SP+4]=FLAGS
-    let sp = m.cpu.regs[4] as u32;
+    let sp = m.cpu.regs[4];
     assert_eq!(
         m.read16(sp),
         CODE as u16 + 2,

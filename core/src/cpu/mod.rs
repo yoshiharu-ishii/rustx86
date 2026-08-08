@@ -67,6 +67,12 @@ pub struct Cpu {
     pub flags: u32,
 }
 
+impl Default for Cpu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Cpu {
     pub fn new() -> Self {
         Self {
@@ -865,7 +871,7 @@ pub fn step(m: &mut Machine) {
                         return divide_error(m, start_ip);
                     }
                     let q = ax / b;
-                    if q > 127 || q < -128 {
+                    if !(-128..=127).contains(&q) {
                         return divide_error(m, start_ip);
                     }
                     m.cpu.set_reg8(0, q as u8);
@@ -922,7 +928,7 @@ pub fn step(m: &mut Machine) {
                         return divide_error(m, start_ip);
                     }
                     let q = n / b;
-                    if q > 32767 || q < -32768 {
+                    if !(-32768..=32767).contains(&q) {
                         return divide_error(m, start_ip);
                     }
                     m.cpu.set_reg16(AX, q as u16);

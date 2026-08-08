@@ -346,7 +346,7 @@ fn int10_writes_a_string() {
         m.write8(SRC + i as u32, *c);
     }
     m.cpu.sregs[0] = 0; // ES
-    m.cpu.regs[5] = SRC as u32; // BP
+    m.cpu.regs[5] = SRC; // BP
     m.cpu.regs[AX] = 0x1300;
     m.cpu.regs[BX] = 0x0A00; // 明るい緑
     m.cpu.regs[CX] = 2;

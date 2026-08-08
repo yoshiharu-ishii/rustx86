@@ -76,10 +76,6 @@ pub struct Machine {
     pub console: Vec<u8>,
     /// ブートしたディスク。INT 13h のHLEが読む
     pub disk: Option<Disk>,
-    /// BIOS が覚えているShiftの状態 (INT 16h の変換に使う)
-    pub(crate) kbd_shift: bool,
-    /// INT 16h AH=01 で覗いたが、まだ取られていないキー
-    pub(crate) kbd_peeked: Option<u16>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
     pub first_fault: Option<(u8, u16, u16)>,
@@ -92,6 +88,12 @@ pub struct Machine {
     /// 外から覗くための仕掛け。**機械の状態ではない**のでスナップショットには入れない
     pub dbg: debug::Debug,
     pub halted: bool,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Machine {
@@ -108,8 +110,6 @@ impl Machine {
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
-            kbd_shift: false,
-            kbd_peeked: None,
             first_fault: None,
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],

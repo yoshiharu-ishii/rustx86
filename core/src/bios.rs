@@ -671,6 +671,9 @@ impl Machine {
         self.set_cursor_pos(row, col);
     }
 
+    // 引数8個は INT 10h AH=06/07 のレジスタ割り当て (CH/CL/DH/DL/AL/BH/方向)
+    // がそのまま並んだもの。束ねる構造体を作ると対応が読めなくなる
+    #[allow(clippy::too_many_arguments)]
     fn scroll_window(
         &mut self,
         top: usize,

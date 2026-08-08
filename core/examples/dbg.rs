@@ -70,7 +70,7 @@ fn main() {
                 }
                 None => println!("usage: w 0x450"),
             },
-            "wi" => match arg1.and_then(|s| addr(s)).map(|a| a as u16) {
+            "wi" => match arg1.and_then(addr).map(|a| a as u16) {
                 Some(p) => {
                     let rw = rest.get(1).copied().unwrap_or("w");
                     m.dbg.watch_io(p, rw.contains('r'), rw.contains('w'));
@@ -101,9 +101,7 @@ fn main() {
                 run(&mut m, n + 1);
             }
             "until" | "u" => {
-                let needle = line
-                    .splitn(2, char::is_whitespace)
-                    .nth(1)
+                let needle = line.split_once(char::is_whitespace).map(|x| x.1)
                     .unwrap_or("")
                     .trim();
                 if needle.is_empty() {

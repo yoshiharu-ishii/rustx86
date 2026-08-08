@@ -191,19 +191,19 @@ pub fn alu_w(c: &mut Cpu, op: u8, a: u32, b: u32, wide: bool) -> u32 {
 pub fn set_szp8(c: &mut Cpu, v: u8) {
     c.set_flag(ZF, v == 0);
     c.set_flag(SF, v & 0x80 != 0);
-    c.set_flag(PF, v.count_ones() % 2 == 0);
+    c.set_flag(PF, v.count_ones().is_multiple_of(2));
 }
 
 pub fn set_szp16(c: &mut Cpu, v: u16) {
     c.set_flag(ZF, v == 0);
     c.set_flag(SF, v & 0x8000 != 0);
-    c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは下位8bitのみ
+    c.set_flag(PF, (v as u8).count_ones().is_multiple_of(2)); // PFは下位8bitのみ
 }
 
 pub fn set_szp32(c: &mut Cpu, v: u32) {
     c.set_flag(ZF, v == 0);
     c.set_flag(SF, v & 0x8000_0000 != 0);
-    c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは幅によらず下位8bitのみ
+    c.set_flag(PF, (v as u8).count_ones().is_multiple_of(2)); // PFは幅によらず下位8bitのみ
 }
 
 /// 幅を実行時に選ぶ SF/ZF/PF の更新

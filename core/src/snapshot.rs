@@ -143,12 +143,12 @@ fn rle_encode(data: &[u8]) -> Vec<u8> {
 }
 
 fn rle_decode(packed: &[u8], expect: usize) -> Result<Vec<u8>, String> {
-    if packed.len() % 2 != 0 {
+    if !packed.len().is_multiple_of(2) {
         return Err("圧縮データの長さが奇数".into());
     }
     let mut out = Vec::with_capacity(expect);
     for pair in packed.chunks_exact(2) {
-        out.extend(std::iter::repeat(pair[0]).take(pair[1] as usize));
+        out.extend(std::iter::repeat_n(pair[0], pair[1] as usize));
     }
     if out.len() != expect {
         return Err(format!(

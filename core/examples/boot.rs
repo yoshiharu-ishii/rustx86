@@ -60,7 +60,7 @@ fn main() {
 
     /// 画面に `needle` が出るまで走らせ、**かかった命令数**を返す。
     /// 出ないまま上限に達したか本当に止まったら `None`
-    fn run_until<'a>(m: &mut Machine, needle: &str, budget: u64) -> Option<u64> {
+    fn run_until(m: &mut Machine, needle: &str, budget: u64) -> Option<u64> {
         for i in 0..budget {
             if stuck(m) {
                 return None;
