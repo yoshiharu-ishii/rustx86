@@ -20,8 +20,11 @@ pub mod operand;
 pub mod shift;
 pub mod string;
 
-use alu::{alu16, alu8, condition, set_szp16};
-use operand::{fetch16, fetch8, linear, modrm, pop16, push16, read_op16, read_op8, write_op16, write_op8, Operand};
+use alu::{alu16, alu8, alu_w, condition, set_szp16};
+use operand::{
+    fetch16, fetch8, fetch_w, linear, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
+    read_op_w, write_op16, write_op8, write_op_w, Operand,
+};
 use shift::shift_rot;
 
 use crate::Machine;
@@ -87,6 +90,35 @@ impl Cpu {
         self.regs[r] = (self.regs[r] & 0xFFFF_0000) | v as u32;
     }
 
+    /// 32bitレジスタ (EAX〜EDI)。
+    ///
+    /// **レジスタは最初から `u32` で持っている**ので、386拡張のために
+    /// 器を作り直す必要は無かった。16bit命令が上位16bitを保存するのも
+    /// [`set_reg16`](Self::set_reg16) がそう書いてあるからで、
+    /// 実機と同じ「同じ器の下半分を見ている」関係がそのまま出ている
+    fn reg32(&self, r: usize) -> u32 {
+        self.regs[r]
+    }
+
+    /// 32bit書き込みは**上位も含めて全部置き換える** (16bitのような保存はしない)
+    fn set_reg32(&mut self, r: usize, v: u32) {
+        self.regs[r] = v;
+    }
+
+    /// 幅を実行時に選ぶレジスタ読み出し
+    fn reg_w(&self, r: usize, wide: bool) -> u32 {
+        if wide { self.reg32(r) } else { self.reg16(r) as u32 }
+    }
+
+    /// 幅を実行時に選ぶレジスタ書き込み
+    fn set_reg_w(&mut self, r: usize, v: u32, wide: bool) {
+        if wide {
+            self.set_reg32(r, v)
+        } else {
+            self.set_reg16(r, v as u16)
+        }
+    }
+
     /// 8bitレジスタ: 0-3 = AL CL DL BL, 4-7 = AH CH DH BH
     fn reg8(&self, r: usize) -> u8 {
         if r < 4 {
@@ -126,11 +158,20 @@ impl Cpu {
 pub struct Decoder {
     pub seg_override: Option<usize>,
     pub rep: Option<u8>,
+    /// `0x66` が付いていた。**オペランドの幅が16bitと32bitで入れ替わる**。
+    ///
+    /// 「32bitモード」ではなく「既定の幅をひっくり返す」プレフィクスである点が要点で、
+    /// リアルモード (既定16bit) では 32bit に、プロテクトモードの32bitセグメント
+    /// (既定32bit) では逆に 16bit になる。**モードとは独立している**ので、
+    /// プロテクトモードを実装しなくてもこれだけ先に動く
+    pub opsize32: bool,
+    /// `0x67` が付いていた。実効アドレスの計算が16bit形式と32bit形式で入れ替わる
+    pub addrsize32: bool,
 }
 
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
-    let mut d = Decoder { seg_override: None, rep: None };
+    let mut d = Decoder { seg_override: None, rep: None, opsize32: false, addrsize32: false };
 
     // プレフィクスループ
     let op = loop {
@@ -141,10 +182,16 @@ pub fn step(m: &mut Machine) {
             0x36 => d.seg_override = Some(SS),
             0x3E => d.seg_override = Some(DS),
             0xF0 => {} // LOCK: シングルコアなので無視
+            0x66 => d.opsize32 = true, // オペランドサイズの反転 (386〜)
+            0x67 => d.addrsize32 = true, // アドレスサイズの反転 (386〜)
             0xF2 | 0xF3 => d.rep = Some(b),
             _ => break b,
         }
     };
+
+    if d.opsize32 {
+        m.prefixed_ops.insert(op);
+    }
 
     match op {
         // --- ALUグリッド: 0x00-0x3D (演算3bit x 形式3bit) ---
@@ -160,11 +207,13 @@ pub fn step(m: &mut Machine) {
                     if kind != 7 { write_op8(m, &rm, r); }
                 }
                 1 => {
+                    // r/m16,r16 または r/m32,r32 (`0x66` が付いていれば後者)
                     let (reg, rm) = modrm(m, &d);
-                    let a = read_op16(m, &rm);
-                    let b = m.cpu.reg16(reg);
-                    let r = alu16(&mut m.cpu, kind, a, b);
-                    if kind != 7 { write_op16(m, &rm, r); }
+                    let w = d.opsize32;
+                    let a = read_op_w(m, &rm, w);
+                    let b = m.cpu.reg_w(reg, w);
+                    let r = alu_w(&mut m.cpu, kind, a, b, w);
+                    if kind != 7 { write_op_w(m, &rm, r, w); }
                 }
                 2 => {
                     // r8, r/m8
@@ -176,10 +225,11 @@ pub fn step(m: &mut Machine) {
                 }
                 3 => {
                     let (reg, rm) = modrm(m, &d);
-                    let a = m.cpu.reg16(reg);
-                    let b = read_op16(m, &rm);
-                    let r = alu16(&mut m.cpu, kind, a, b);
-                    if kind != 7 { m.cpu.set_reg16(reg, r); }
+                    let w = d.opsize32;
+                    let a = m.cpu.reg_w(reg, w);
+                    let b = read_op_w(m, &rm, w);
+                    let r = alu_w(&mut m.cpu, kind, a, b, w);
+                    if kind != 7 { m.cpu.set_reg_w(reg, r, w); }
                 }
                 4 => {
                     // AL, imm8
@@ -189,11 +239,13 @@ pub fn step(m: &mut Machine) {
                     if kind != 7 { m.cpu.set_reg8(0, r); }
                 }
                 _ => {
-                    // AX, imm16
-                    let b = fetch16(m);
-                    let a = m.cpu.reg16(AX);
-                    let r = alu16(&mut m.cpu, kind, a, b);
-                    if kind != 7 { m.cpu.set_reg16(AX, r); }
+                    // AX, imm16 / EAX, imm32。**FreeDOSの386判定はここを通る**
+                    // (`66 0D 00 00 04 00` = OR EAX, 0x00040000 で ACフラグを立てる)
+                    let w = d.opsize32;
+                    let b = fetch_w(m, w);
+                    let a = m.cpu.reg_w(AX, w);
+                    let r = alu_w(&mut m.cpu, kind, a, b, w);
+                    if kind != 7 { m.cpu.set_reg_w(AX, r, w); }
                 }
             }
         }
@@ -208,52 +260,63 @@ pub fn step(m: &mut Machine) {
                 let r = alu8(&mut m.cpu, kind, a, b);
                 if kind != 7 { write_op8(m, &rm, r); }
             } else {
-                let a = read_op16(m, &rm);
-                let b = if op == 0x81 { fetch16(m) } else { fetch8(m) as i8 as u16 };
-                let r = alu16(&mut m.cpu, kind, a, b);
-                if kind != 7 { write_op16(m, &rm, r); }
+                let w = d.opsize32;
+                let a = read_op_w(m, &rm, w);
+                // 0x83 は**符号拡張された8bit即値**。32bitなら32bitまで伸びる
+                let b = if op == 0x81 {
+                    fetch_w(m, w)
+                } else if w {
+                    fetch8(m) as i8 as i32 as u32
+                } else {
+                    fetch8(m) as i8 as u16 as u32
+                };
+                let r = alu_w(&mut m.cpu, kind, a, b, w);
+                if kind != 7 { write_op_w(m, &rm, r, w); }
             }
         }
 
         // --- MOV ---
         0x88 => { let (reg, rm) = modrm(m, &d); let v = m.cpu.reg8(reg); write_op8(m, &rm, v); }
-        0x89 => { let (reg, rm) = modrm(m, &d); let v = m.cpu.reg16(reg); write_op16(m, &rm, v); }
+        0x89 => { let (reg, rm) = modrm(m, &d); let w = d.opsize32; let v = m.cpu.reg_w(reg, w); write_op_w(m, &rm, v, w); }
         0x8A => { let (reg, rm) = modrm(m, &d); let v = read_op8(m, &rm); m.cpu.set_reg8(reg, v); }
-        0x8B => { let (reg, rm) = modrm(m, &d); let v = read_op16(m, &rm); m.cpu.set_reg16(reg, v); }
+        0x8B => { let (reg, rm) = modrm(m, &d); let w = d.opsize32; let v = read_op_w(m, &rm, w); m.cpu.set_reg_w(reg, v, w); }
         0x8C => { let (reg, rm) = modrm(m, &d); let v = m.cpu.sregs[reg & 3]; write_op16(m, &rm, v); }
         0x8E => { let (reg, rm) = modrm(m, &d); let v = read_op16(m, &rm); m.cpu.sregs[reg & 3] = v; }
         0xB0..=0xB7 => { let v = fetch8(m); m.cpu.set_reg8((op & 7) as usize, v); }
-        0xB8..=0xBF => { let v = fetch16(m); m.cpu.set_reg16((op & 7) as usize, v); }
+        0xB8..=0xBF => { let w = d.opsize32; let v = fetch_w(m, w); m.cpu.set_reg_w((op & 7) as usize, v, w); }
         0xC6 => { let (_, rm) = modrm(m, &d); let v = fetch8(m); write_op8(m, &rm, v); }
-        0xC7 => { let (_, rm) = modrm(m, &d); let v = fetch16(m); write_op16(m, &rm, v); }
+        0xC7 => { let (_, rm) = modrm(m, &d); let w = d.opsize32; let v = fetch_w(m, w); write_op_w(m, &rm, v, w); }
         0xA0 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let v = m.read8(linear(seg, off)); m.cpu.set_reg8(0, v); }
-        0xA1 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let v = m.read16(linear(seg, off)); m.cpu.set_reg16(AX, v); }
+        0xA1 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let a = linear(seg, off); let w = d.opsize32; let v = if w { m.read32(a) } else { m.read16(a) as u32 }; m.cpu.set_reg_w(AX, v, w); }
         0xA2 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let v = m.cpu.reg8(0); m.write8(linear(seg, off), v); }
-        0xA3 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let v = m.cpu.reg16(AX); m.write16(linear(seg, off), v); }
+        0xA3 => { let off = fetch16(m); let seg = m.cpu.sregs[d.seg_override.unwrap_or(DS)]; let a = linear(seg, off); let w = d.opsize32; let v = m.cpu.reg_w(AX, w); if w { m.write32(a, v) } else { m.write16(a, v as u16) } }
 
         // --- INC/DEC r16 ---
         0x40..=0x47 => {
-            let r = (op & 7) as usize;
-            let a = m.cpu.reg16(r);
-            let v = a.wrapping_add(1);
-            m.cpu.set_reg16(r, v);
-            m.cpu.set_flag(OF, a == 0x7FFF);
+            let (r, w) = ((op & 7) as usize, d.opsize32);
+            let a = m.cpu.reg_w(r, w);
+            let v = if w { a.wrapping_add(1) } else { (a as u16).wrapping_add(1) as u32 };
+            m.cpu.set_reg_w(r, v, w);
+            // **CFは触らない** — INC/DECがADD/SUBと違う唯一の点で、
+            // 多倍長の加算ループでキャリーを壊さないための配慮である
+            m.cpu.set_flag(OF, a == if w { 0x7FFF_FFFF } else { 0x7FFF });
             m.cpu.set_flag(AF, a & 0xF == 0xF);
-            set_szp16(&mut m.cpu, v);
+            alu::set_szp_w(&mut m.cpu, v, w);
         }
         0x48..=0x4F => {
-            let r = (op & 7) as usize;
-            let a = m.cpu.reg16(r);
-            let v = a.wrapping_sub(1);
-            m.cpu.set_reg16(r, v);
-            m.cpu.set_flag(OF, a == 0x8000);
+            let (r, w) = ((op & 7) as usize, d.opsize32);
+            let a = m.cpu.reg_w(r, w);
+            let v = if w { a.wrapping_sub(1) } else { (a as u16).wrapping_sub(1) as u32 };
+            m.cpu.set_reg_w(r, v, w);
+            m.cpu.set_flag(OF, a == if w { 0x8000_0000 } else { 0x8000 });
             m.cpu.set_flag(AF, a & 0xF == 0);
-            set_szp16(&mut m.cpu, v);
+            alu::set_szp_w(&mut m.cpu, v, w);
         }
 
         // --- PUSH/POP ---
-        0x50..=0x57 => { let v = m.cpu.reg16((op & 7) as usize); push16(m, v); }
-        0x58..=0x5F => { let v = pop16(m); m.cpu.set_reg16((op & 7) as usize, v); }
+        // **FreeDOSの386判定はここも通る** (`66 50` = PUSH EAX / `66 58` = POP EAX)
+        0x50..=0x57 => { let w = d.opsize32; let v = m.cpu.reg_w((op & 7) as usize, w); push_w(m, v, w); }
+        0x58..=0x5F => { let w = d.opsize32; let v = pop_w(m, w); m.cpu.set_reg_w((op & 7) as usize, v, w); }
 
         // セグメントレジスタのPUSH/POP。オペコードのbit3-4がそのまま
         // ES/CS/SS/DS の番号になっている (0x06,0x0E,0x16,0x1E)
@@ -454,7 +517,7 @@ pub fn step(m: &mut Machine) {
 
         // --- TEST / XCHG / LEA ---
         0x84 => { let (reg, rm) = modrm(m, &d); let a = read_op8(m, &rm); let b = m.cpu.reg8(reg); alu8(&mut m.cpu, 4, a, b); }
-        0x85 => { let (reg, rm) = modrm(m, &d); let a = read_op16(m, &rm); let b = m.cpu.reg16(reg); alu16(&mut m.cpu, 4, a, b); }
+        0x85 => { let (reg, rm) = modrm(m, &d); let w = d.opsize32; let a = read_op_w(m, &rm, w); let b = m.cpu.reg_w(reg, w); alu_w(&mut m.cpu, 4, a, b, w); }
         0x86 => {
             let (reg, rm) = modrm(m, &d);
             let a = read_op8(m, &rm);
@@ -487,8 +550,33 @@ pub fn step(m: &mut Machine) {
         }
         0x98 => { let v = m.cpu.reg8(0) as i8 as i16 as u16; m.cpu.set_reg16(AX, v); }
         0x99 => { let v = if m.cpu.reg16(AX) & 0x8000 != 0 { 0xFFFF } else { 0 }; m.cpu.set_reg16(DX, v); }
-        0x9C => { let f = (m.cpu.flags as u16) | 0xF002; push16(m, f); }
-        0x9D => { let f = pop16(m); m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002; }
+        // PUSHF / PUSHFD。**FreeDOSの386判定はここから始まる** (`66 9C`)。
+        //
+        // 386判定の常套手段は「EFLAGSのbit18 (AC) を立てて書き戻し、
+        // 読み直して残っているか見る」というもので、そのためには
+        // 32bit幅でフラグを出し入れできる必要がある
+        0x9C => {
+            let f = m.cpu.flags | 0x0002;
+            if d.opsize32 {
+                // 上位2bit (VM/RF) はPUSHFDでは常に0で出る
+                push_w(m, f & 0x00FC_FFFF, true);
+            } else {
+                push_w(m, (f as u16 | 0xF002) as u32, false);
+            }
+        }
+        0x9D => {
+            let f = pop_w(m, d.opsize32);
+            // 書き換えられるビットだけ受け取る。
+            //
+            // **AC (bit18) は受け付けない。** これは486で入ったフラグで、
+            // 「立てて書き戻し、残っていれば486以上」という判定に使われる。
+            // 一度これを通してしまったところ、FreeDOSが486と判断して
+            // `CMOVcc` (Pentium Pro) を使い始めた。
+            //
+            // 幅を32bitにできる = 386、ではあるが**486ではない**。
+            // 名乗るものを1ビット間違えるだけで、相手は別の道を歩き出す。
+            m.cpu.flags = (m.cpu.flags & !0x0FD5) | (f & 0x0FD5) | 0x0002;
+        }
         0x9E => {
             // SAHF: AHの下位バイトをフラグへ
             let ah = m.cpu.reg8(4) as u32;
@@ -496,7 +584,11 @@ pub fn step(m: &mut Machine) {
         }
         0x9F => { let f = (m.cpu.flags as u8 & 0xD5) | 0x02; m.cpu.set_reg8(4, f); }
         0xA8 => { let b = fetch8(m); let a = m.cpu.reg8(0); alu8(&mut m.cpu, 4, a, b); }
-        0xA9 => { let b = fetch16(m); let a = m.cpu.reg16(AX); alu16(&mut m.cpu, 4, a, b); }
+        // TEST AX,imm16 / EAX,imm32。
+        // **即値の長さが幅で変わる**ので、ここを16bit固定にしていると
+        // `0x66` が付いた瞬間にIPが2バイトずれ、以後はデータを命令として食う。
+        // 実際それで遠くの番地まで暴走した (0x66 の記録がそれを教えてくれた)
+        0xA9 => { let w = d.opsize32; let b = fetch_w(m, w); let a = m.cpu.reg_w(AX, w); alu_w(&mut m.cpu, 4, a, b, w); }
 
         // --- GRP2: シフト/回転 ---
         0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 => {
@@ -676,8 +768,35 @@ pub fn step(m: &mut Machine) {
         }
         0xC2 => { let n = fetch16(m); m.cpu.ip = pop16(m); let sp = m.cpu.reg16(SP).wrapping_add(n); m.cpu.set_reg16(SP, sp); }
 
+        // --- x87 (0xD8-0xDF): コプロセッサは載せない ---
+        //
+        // **何もしないのが正しい。** 8087を挿していない8086では、ESC命令は
+        // 実効アドレスを計算してダミーの読み出しをするだけで、メモリも
+        // レジスタも書き換えない (本来は隣に座った8087がバスを盗み見る)。
+        //
+        // FPUの有無を調べるコードは、番兵を置いた場所に `FNSTSW` で書かせて
+        // **書き換わらなかったこと**で不在を知る。だからここで気を利かせて
+        // 何か書くと、逆に「FPUが在る」と誤認させてしまう。
+        //
+        // ModRMだけは読む — IPを正しく進めないと次の命令がずれる。
+        0xD8..=0xDF => {
+            let _ = modrm(m, &d);
+        }
+
         // --- ストリング命令 (REP対応) ---
         0xA4 | 0xA5 | 0xA6 | 0xA7 | 0xAA | 0xAB | 0xAC | 0xAD | 0xAE | 0xAF => string::exec(m, &d, op),
+
+        // --- 二バイト命令空間 (386〜) ---
+        //
+        // 8086では `POP CS` だった 0x0F が、186以降で**逃げ道**になった。
+        // 1バイトの256席が埋まったので、もう1バイト読んで席を増やす方式である。
+        0x0F => {
+            let op2 = fetch8(m);
+            panic!(
+                "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
+                m.cpu.sregs[CS], start_ip
+            )
+        }
 
         _ => panic!(
             "unimplemented opcode {op:#04x} at {:04x}:{:04x}",

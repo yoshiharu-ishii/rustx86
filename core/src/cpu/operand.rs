@@ -100,6 +100,69 @@ pub fn write_op16(m: &mut Machine, op: &Operand, v: u16) {
     }
 }
 
+pub fn read_op32(m: &Machine, op: &Operand) -> u32 {
+    match *op {
+        Operand::Reg(r) => m.cpu.reg32(r),
+        Operand::Mem { addr, .. } => m.read32(addr),
+    }
+}
+
+pub fn write_op32(m: &mut Machine, op: &Operand, v: u32) {
+    match *op {
+        Operand::Reg(r) => m.cpu.set_reg32(r, v),
+        Operand::Mem { addr, .. } => m.write32(addr, v),
+    }
+}
+
+/// 幅を実行時に選ぶ読み出し。`0x66` の有無で16bitと32bitを切り替える
+pub fn read_op_w(m: &Machine, op: &Operand, wide: bool) -> u32 {
+    if wide { read_op32(m, op) } else { read_op16(m, op) as u32 }
+}
+
+/// 幅を実行時に選ぶ書き込み
+pub fn write_op_w(m: &mut Machine, op: &Operand, v: u32, wide: bool) {
+    if wide { write_op32(m, op, v) } else { write_op16(m, op, v as u16) }
+}
+
+/// 即値を幅に合わせて読む
+pub fn fetch_w(m: &mut Machine, wide: bool) -> u32 {
+    if wide { fetch32(m) } else { fetch16(m) as u32 }
+}
+
+pub fn fetch32(m: &mut Machine) -> u32 {
+    let lo = fetch16(m) as u32;
+    let hi = fetch16(m) as u32;
+    hi << 16 | lo
+}
+
+/// 32bitのpush。
+///
+/// **SP自体は16bitのまま**である。`0x66` はオペランドの幅を変えるだけで、
+/// スタックポインタの幅はセグメントのBフラグ (プロテクトモード) が決める。
+/// リアルモードではBが立たないので、SPは16bitで回り続ける
+pub fn push32(m: &mut Machine, v: u32) {
+    let sp = m.cpu.reg16(SP).wrapping_sub(4);
+    m.cpu.set_reg16(SP, sp);
+    m.write32(linear(m.cpu.sregs[SS], sp), v);
+}
+
+pub fn pop32(m: &mut Machine) -> u32 {
+    let sp = m.cpu.reg16(SP);
+    let v = m.read32(linear(m.cpu.sregs[SS], sp));
+    m.cpu.set_reg16(SP, sp.wrapping_add(4));
+    v
+}
+
+/// 幅を実行時に選ぶpush
+pub fn push_w(m: &mut Machine, v: u32, wide: bool) {
+    if wide { push32(m, v) } else { push16(m, v as u16) }
+}
+
+/// 幅を実行時に選ぶpop
+pub fn pop_w(m: &mut Machine, wide: bool) -> u32 {
+    if wide { pop32(m) } else { pop16(m) as u32 }
+}
+
 pub fn push16(m: &mut Machine, v: u16) {
     let sp = m.cpu.reg16(SP).wrapping_sub(2);
     m.cpu.set_reg16(SP, sp);
