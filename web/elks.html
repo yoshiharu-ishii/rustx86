@@ -39,6 +39,11 @@
   }
   .toolbar button:hover:not(:disabled) { background: #2a2a2a; border-color: #4d4d4d; }
   .toolbar button:disabled { opacity: .35; cursor: default; }
+  .toolbar .sel { font-size: .8rem; color: #9a9a9a; display: flex; gap: .3rem; align-items: center; }
+  .toolbar select {
+    font: inherit; font-size: .8rem; padding: .15rem .3rem; border-radius: .3rem;
+    border: 1px solid #3d3d3d; background: #1e1e1e; color: #e0e0e0;
+  }
   .spacer { flex: 1 }
   .gauge {
     font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
@@ -72,6 +77,12 @@
       <button id="restore" disabled>状態を復元</button>
       <button id="snapfile" disabled>状態をJSONで書き出す</button>
       <button id="save">ログを保存</button>
+      <label class="sel">配列
+        <select id="layout">
+          <option value="jp">JIS</option>
+          <option value="us">US</option>
+        </select>
+      </label>
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
     </div>

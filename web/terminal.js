@@ -82,6 +82,24 @@ export class Terminal {
     this.onKey = null;
     /** 貼り付けられたときに呼ばれる。(text) => void */
     this.onPaste = null;
+    /** 文字として打たれたときに呼ばれる (JP配列のとき)。(ch) => void */
+    this.onChar = null;
+
+    /**
+     * キーボード配列。
+     *
+     * **スキャンコードはキーの「位置」なので、配列とは無関係である。**
+     * ずれるのはその先 — ゲストのOSが位置から文字を決める段階で、
+     * ELKSはUS配列の対応表しか持っていない。
+     *
+     * だからJIS配列の実機で `@` のキー (US配列でいう `[` の位置) を押すと、
+     * ELKSは `[` を出す。合わせるには**位置ではなく文字を送る**しかない。
+     *
+     * - `us`: 位置 (KeyboardEvent.code) をそのまま送る。実機に忠実
+     * - `jp`: ブラウザが解釈した文字 (KeyboardEvent.key) を送る。
+     *   ゲストのUS配列に合わせて組み立て直すので、見たままが入る
+     */
+    this.layout = opts.layout ?? 'jp';
 
     canvas.width = this.cols * CELL_W + SCROLLBAR_W;
     canvas.height = this.rows * CELL_H;
@@ -401,11 +419,35 @@ export class Terminal {
       }
       // 打ったら最新へ戻る
       if (this.offset !== 0) this.scrollTo(0);
-      if (this.onKey?.(e.code, true)) e.preventDefault();
+
+      if (this.#sendKey(e, true)) e.preventDefault();
     });
+
     c.addEventListener('keyup', e => {
-      if (this.onKey?.(e.code, false)) e.preventDefault();
+      if (this.#sendKey(e, false)) e.preventDefault();
     });
+  }
+
+  /**
+   * キーをゲストへ流す。配列によって「位置」と「文字」を使い分ける。
+   *
+   * 修飾キーと、文字に対応しないキー (Enter/Esc/矢印など) は
+   * **どちらの配列でも位置で送る** — その並びは配列によらず同じだからである。
+   */
+  #sendKey(e, down) {
+    const isModifier = /^(Control|Alt|Meta|Shift)/.test(e.code);
+    const printable = e.key.length === 1;
+
+    if (this.layout === 'us' || !printable || e.ctrlKey || e.altKey || e.metaKey) {
+      // JP配列でも Shift は握りつぶす。文字を送る側 (下) が自分で組み立てるので、
+      // 両方から送ると二重になる
+      if (this.layout === 'jp' && /^Shift/.test(e.code)) return true;
+      return this.onKey?.(e.code, down) ?? false;
+    }
+    if (isModifier) return this.onKey?.(e.code, down) ?? false;
+    // 文字は押したときだけ送る (離すときの相方は文字を送る側が付ける)
+    if (down) this.onChar?.(e.key);
+    return true;
   }
 
   #scrollbarTo(ev) {

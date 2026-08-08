@@ -67,6 +67,11 @@ export class Machine {
     return this.emu.key(code, down);
   }
 
+  /** 1文字を打ち込む (JP配列のとき)。押して離すまでをRust側が組み立てる */
+  typeChar(ch) {
+    this.emu.type_text(ch);
+  }
+
   /** 文字列を打ち込む (貼り付け用)。物理キーに直せないのでASCIIで送る */
   paste(text) {
     this.emu.type_text(text.replace(/\r\n?/g, '\n'));

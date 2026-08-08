@@ -216,3 +216,66 @@ fn timer_interrupt_reaches_the_cpu() {
         "PICは処理中の印 (ISR) を立てたまま。EOIが来るまで下りない"
     );
 }
+
+// ---------- キーボード配列 ----------
+
+/// ASCII → スキャンコードの対応 (US配列)。
+///
+/// ゲスト (ELKS) はUS配列の対応表しか持たない。JIS配列の実機から使うときは
+/// **位置ではなく文字**を渡して辻褄を合わせるので、ここが正しくないと
+/// 記号がまったく入らなくなる (実際 `@` が落ちていた)。
+#[test]
+fn ascii_maps_to_us_layout_scancodes() {
+    use rustx86_core::dev::kbd::scancode_shift;
+
+    // 数字段の記号は数字のShift。タイプライタからの引き継ぎで、
+    // キーの位置に意味があるわけではない
+    assert_eq!(scancode_shift('2'), Some((0x03, false)));
+    assert_eq!(scancode_shift('@'), Some((0x03, true)), "@ は Shift+2");
+    assert_eq!(scancode_shift('1'), Some((0x02, false)));
+    assert_eq!(scancode_shift('!'), Some((0x02, true)));
+
+    // 英字は位置。大文字はShift付き
+    assert_eq!(scancode_shift('q'), Some((0x10, false)));
+    assert_eq!(scancode_shift('Q'), Some((0x10, true)));
+    assert_eq!(scancode_shift('a'), Some((0x1E, false)));
+    assert_eq!(scancode_shift('z'), Some((0x2C, false)));
+
+    // 記号
+    assert_eq!(scancode_shift(':'), Some((0x27, true)), ": は Shift+;");
+    assert_eq!(scancode_shift('/'), Some((0x35, false)));
+    assert_eq!(scancode_shift('?'), Some((0x35, true)));
+    assert_eq!(scancode_shift('_'), Some((0x0C, true)));
+    assert_eq!(scancode_shift('|'), Some((0x2B, true)));
+
+    // 制御
+    assert_eq!(scancode_shift('\n'), Some((0x1C, false)));
+    assert_eq!(scancode_shift(' '), Some((0x39, false)));
+    assert_eq!(scancode_shift('\x1b'), Some((0x01, false)));
+
+    // 表せない文字は落とす (勝手に別の文字にしない)
+    assert_eq!(scancode_shift('あ'), None);
+}
+
+/// 印字できるASCIIがすべて打てること。取りこぼしがあると
+/// 「その記号だけ入らない」という分かりにくい症状になる
+#[test]
+fn every_printable_ascii_can_be_typed() {
+    use rustx86_core::dev::kbd::scancode_shift;
+    for c in 0x20u8..0x7F {
+        let ch = c as char;
+        assert!(scancode_shift(ch).is_some(), "{ch:?} ({c:#04x}) が打てない");
+    }
+}
+
+/// Shiftが要る文字は、Shiftの上げ下げで挟んで送られる
+#[test]
+fn shifted_characters_are_wrapped_with_shift() {
+    let mut k = rustx86_core::dev::Kbd8042::new();
+    k.type_ascii("@");
+    let mut got = Vec::new();
+    while k.has_data() {
+        got.push(k.read_data());
+    }
+    assert_eq!(got, vec![0x2A, 0x03, 0x83, 0xAA], "Shift押下, 2押下, 2離す, Shift離す");
+}

@@ -116,6 +116,7 @@ function boot(image, label) {
   };
   // 物理キーはそのまま、貼り付けはASCIIとして送る
   term.onKey = (code, down) => machine.key(code, down);
+  term.onChar = ch => machine.typeChar(ch);
   term.onPaste = text => machine.paste(text);
 
   window.__machine = machine; // 動作確認用
@@ -136,6 +137,22 @@ setInterval(() => {
   if (term.offset) parts.push(`▲${term.offset}行前`);
   $('gauge').textContent = parts.join('   ');
 }, 500);
+
+// --- キーボード配列 ---
+//
+// 既定はJIS。**スキャンコードはキーの位置なので配列とは無関係**だが、
+// ゲスト (ELKS) はUS配列の対応表しか持たないため、JIS配列の実機では
+// 見たままの文字が入らない。JISのときは位置ではなく文字を送って辻褄を合わせる。
+
+const LAYOUT_KEY = 'rustx86.layout';
+const layoutSel = $('layout');
+term.layout = localStorage.getItem(LAYOUT_KEY) || 'jp';
+layoutSel.value = term.layout;
+layoutSel.addEventListener('change', () => {
+  term.layout = layoutSel.value;
+  localStorage.setItem(LAYOUT_KEY, term.layout);
+  $('screen').focus();
+});
 
 // --- 操作 ---
 
