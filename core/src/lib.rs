@@ -63,6 +63,10 @@ pub struct Machine {
     pub console: Vec<u8>,
     /// ブートしたディスク。INT 13h のHLEが読む
     pub disk: Option<Disk>,
+    /// BIOS が覚えているShiftの状態 (INT 16h の変換に使う)
+    pub(crate) kbd_shift: bool,
+    /// INT 16h AH=01 で覗いたが、まだ取られていないキー
+    pub(crate) kbd_peeked: Option<u16>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
     pub first_fault: Option<(u8, u16, u16)>,
@@ -87,6 +91,8 @@ impl Machine {
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
+            kbd_shift: false,
+            kbd_peeked: None,
             first_fault: None,
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],
@@ -367,6 +373,23 @@ impl Machine {
         Ok(())
     }
 
+    /// BIOSサービスが返した成否をフラグとして呼び出し元へ届ける。
+    ///
+    /// **`IRET` はスタックに積まれたFLAGSで上書きしてしまう。** サービスが
+    /// `CF` や `ZF` を立てても、そのまま戻ると消える。実BIOSも同じ事情を
+    /// 抱えていて、**積まれている方のFLAGSを書き換えてから**戻る。
+    ///
+    /// x86のBIOSが慣例として「成否はキャリーフラグで返す」形なのに、
+    /// この一手間が要るのは面白いところである。
+    fn return_flags_to_caller(&mut self) {
+        // スタック: [SP]=IP [SP+2]=CS [SP+4]=FLAGS
+        let sp = self.cpu.regs[cpu::SP] as u16;
+        let addr = cpu::operand::linear(self.cpu.sregs[cpu::SS], sp.wrapping_add(4));
+        let stacked = self.read16(addr);
+        let keep = (cpu::CF | cpu::ZF) as u16;
+        self.write16(addr, (stacked & !keep) | (self.cpu.flags as u16 & keep));
+    }
+
     /// カーソルの位置 (行, 桁)。CRTCが持っている
     pub fn cursor_pos(&self) -> (usize, usize) {
         let off = self.devices.crtc.cursor_offset() as usize;
@@ -444,8 +467,13 @@ impl Machine {
         //    OSがIVTを書き換えていればここには来ない
         if self.cpu.sregs[cpu::CS] == BIOS_SEG {
             let vec = self.cpu.ip as u8;
-            self.bios_interrupt(vec);
-            cpu::iret(self);
+            // 完了しなかったサービス (キー待ちなど) はIRETせずに戻る。
+            // 次のサイクルで同じINTがやり直され、実BIOSが割り込みを待って
+            // 回っているのと同じ状態になる
+            if self.bios_interrupt(vec) {
+                self.return_flags_to_caller();
+                cpu::iret(self);
+            }
             return;
         }
 

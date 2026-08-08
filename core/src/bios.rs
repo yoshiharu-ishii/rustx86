@@ -17,7 +17,7 @@
 //! OSがIVTを書き換えたベクタはここへ来なくなる。**乗っ取りに何の分岐も
 //! 要らない**のがこの方式の要点である。
 
-use crate::{cpu, disk, Machine};
+use crate::{bus, cpu, disk, Machine};
 
 /// BIOS HLE の入口として予約したセグメント。
 ///
@@ -110,7 +110,7 @@ impl Machine {
     ///
     /// OSがIVTを書き換えたベクタはここへ来ない。**未実装のサービスは即panicする** —
     /// 静かに間違った値を返すと、遥か後方で意味不明な暴走として現れるためである。
-    pub fn bios_interrupt(&mut self, n: u8) {
+    pub fn bios_interrupt(&mut self, n: u8) -> bool {
         let ah = (self.cpu.regs[cpu::AX] >> 8) as u8;
         match n {
             // --- INT 10h: ビデオ ---
@@ -122,10 +122,88 @@ impl Machine {
                     let c = self.cpu.regs[cpu::AX] as u8;
                     self.console.push(c);
                 }
+                // AH=05: 表示ページの切り替え (1ページしか無いので何もしない)
+                0x05 => {}
+                // AH=06/07: 画面の一部を上/下へずらす。
+                // **DOSの画面はこれで動く** — COMMAND.COMの改行もクリアもここを通る
+                0x06 | 0x07 => {
+                    let lines = self.cpu.regs[cpu::AX] as u8;
+                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                    let cx = self.cpu.regs[cpu::CX] as u16;
+                    let dx = self.cpu.regs[cpu::DX] as u16;
+                    let (top, left) = ((cx >> 8) as usize, (cx & 0xFF) as usize);
+                    let (bottom, right) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
+                    self.scroll_window(top, left, bottom, right, lines, attr, ah == 0x06);
+                }
+                // AH=08: カーソル位置の文字と属性を読む
+                0x08 => {
+                    let (row, col) = self.cursor_pos();
+                    let a = bus::VRAM_TEXT_BASE + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                    let ch = self.read8(a) as u32;
+                    let at = self.read8(a + 1) as u32;
+                    self.cpu.regs[cpu::AX] = at << 8 | ch;
+                }
+                // AH=09/0A: カーソル位置に文字を書く (CX回繰り返す)。
+                // 0x09 は属性も置き、0x0A は文字だけ置く
+                0x09 | 0x0A => {
+                    let ch = self.cpu.regs[cpu::AX] as u8;
+                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                    let count = (self.cpu.regs[cpu::CX] as u16).max(1) as usize;
+                    let (row, col) = self.cursor_pos();
+                    for i in 0..count {
+                        let idx = row * bus::TEXT_COLS + col + i;
+                        if idx >= bus::TEXT_COLS * bus::TEXT_ROWS {
+                            break;
+                        }
+                        let a = bus::VRAM_TEXT_BASE + (idx * 2) as u32;
+                        self.write8(a, ch);
+                        if ah == 0x09 {
+                            self.write8(a + 1, attr);
+                        }
+                    }
+                }
                 0x0F => {
                     // 現在のビデオモードを返す: AL=モード AH=桁数 BH=ページ
                     self.cpu.regs[cpu::AX] = 80 << 8 | 0x03;
                     self.cpu.regs[cpu::BX] &= 0x00FF;
+                }
+                // AH=13: 文字列をまとめて書く
+                0x13 => {
+                    let count = self.cpu.regs[cpu::CX] as u16 as usize;
+                    let mode = self.cpu.regs[cpu::AX] as u8;
+                    let attr = (self.cpu.regs[cpu::BX] >> 8) as u8;
+                    let src = cpu::operand::linear(
+                        self.cpu.sregs[cpu::ES],
+                        self.cpu.regs[cpu::BP] as u16,
+                    );
+                    let dx = self.cpu.regs[cpu::DX] as u16;
+                    let (mut row, mut col) = ((dx >> 8) as usize, (dx & 0xFF) as usize);
+                    for i in 0..count {
+                        // mode の bit1 が立っていると、文字のあとに属性が続く
+                        let step = if mode & 2 != 0 { 2 } else { 1 };
+                        let ch = self.read8(src + (i * step) as u32);
+                        let at = if mode & 2 != 0 {
+                            self.read8(src + (i * step) as u32 + 1)
+                        } else {
+                            attr
+                        };
+                        if ch == b'\n' {
+                            row += 1;
+                            col = 0;
+                            continue;
+                        }
+                        if ch == b'\r' {
+                            col = 0;
+                            continue;
+                        }
+                        if row < bus::TEXT_ROWS && col < bus::TEXT_COLS {
+                            let a = bus::VRAM_TEXT_BASE
+                                + ((row * bus::TEXT_COLS + col) * 2) as u32;
+                            self.write8(a, ch);
+                            self.write8(a + 1, at);
+                        }
+                        col += 1;
+                    }
                 }
                 _ => panic!("INT 10h AH={ah:#04x} 未実装"),
             },
@@ -180,9 +258,33 @@ impl Machine {
             }
 
             // --- INT 16h: キーボード ---
+            //
+            // **DOSはここからキーを読む。** ELKSは8042を直接叩いてIRQ1で
+            // 受けていたので、この入口が空でも動いていた。BIOS越しに触るOSでは
+            // ここが本番になる。
+            //
+            // スキャンコードをASCIIに直すのは**BIOSの仕事**である。装置が返すのは
+            // あくまでキーの位置で、文字にする対応表はファームウェアが持つ。
             0x16 => match ah {
-                0x00 | 0x10 => self.cpu.regs[cpu::AX] = 0, // 入力なし
-                0x01 | 0x11 => self.cpu.set_flag(cpu::ZF, true), // バッファ空
+                // 待って1つ取る。キーが無ければ**完了しない** — IRETせずに
+                // 戻ることで、次のサイクルで同じINTがやり直される。
+                // 実BIOSが STI + HLT で回っているのと同じ状態を作る
+                0x00 | 0x10 => match self.take_key() {
+                    Some(v) => self.cpu.regs[cpu::AX] = v as u32,
+                    None => return false,
+                },
+                // 覗くだけ。無ければZF=1
+                0x01 | 0x11 => match self.peek_key() {
+                    Some(v) => {
+                        self.cpu.regs[cpu::AX] = v as u32;
+                        self.cpu.set_flag(cpu::ZF, false);
+                    }
+                    None => self.cpu.set_flag(cpu::ZF, true),
+                },
+                // シフト状態
+                0x02 | 0x12 => self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0xFF00) | 0,
+                // タイプマティック設定など。応答だけ返す
+                0x03 | 0x05 => {}
                 _ => panic!("INT 16h AH={ah:#04x} 未実装"),
             },
 
@@ -201,6 +303,107 @@ impl Machine {
                 self.cpu.sregs[cpu::CS],
                 self.cpu.ip
             ),
+        }
+        true
+    }
+
+    /// 8042の待ち行列から1つ取り、`AH=スキャンコード AL=ASCII` に組む。
+    /// 離した合図 (最上位ビット) と修飾キーはここで吸収する
+    fn take_key(&mut self) -> Option<u16> {
+        // 覗き見 (AH=01) で先に取り出してある分があればそれを返す。
+        // 装置の待ち行列から一度出したものは、こちらで預かっている
+        if let Some(v) = self.kbd_peeked.take() {
+            return Some(v);
+        }
+        while self.devices.keyboard.has_data() {
+            let sc = self.devices.keyboard.read_data();
+            if sc == 0xFF || sc == 0xE0 {
+                continue;
+            }
+            if sc & 0x80 != 0 {
+                // 離した合図。Shiftなら状態を下ろす
+                if sc & 0x7F == 0x2A || sc & 0x7F == 0x36 {
+                    self.kbd_shift = false;
+                }
+                continue;
+            }
+            if sc == 0x2A || sc == 0x36 {
+                self.kbd_shift = true;
+                continue;
+            }
+            let ascii = scancode_to_ascii(sc, self.kbd_shift).unwrap_or(0);
+            return Some((sc as u16) << 8 | ascii as u16);
+        }
+        None
+    }
+
+    /// 取らずに覗く。取ってしまった1つは控えておいて次で返す
+    fn peek_key(&mut self) -> Option<u16> {
+        if let Some(v) = self.kbd_peeked {
+            return Some(v);
+        }
+        let v = self.take_key();
+        self.kbd_peeked = v;
+        v
+    }
+
+    /// テキスト画面の一部を上 (`up=true`) または下へずらす。
+    /// `lines` が0なら範囲を空白で埋める (画面クリアはこの形で来る)
+    fn scroll_window(
+        &mut self,
+        top: usize,
+        left: usize,
+        bottom: usize,
+        right: usize,
+        lines: u8,
+        attr: u8,
+        up: bool,
+    ) {
+        let bottom = bottom.min(bus::TEXT_ROWS - 1);
+        let right = right.min(bus::TEXT_COLS - 1);
+        if top > bottom || left > right {
+            return;
+        }
+        let cell = |r: usize, c: usize| bus::VRAM_TEXT_BASE + ((r * bus::TEXT_COLS + c) * 2) as u32;
+        let n = if lines == 0 { bottom - top + 1 } else { lines as usize };
+
+        for _ in 0..n.min(bottom - top + 1) {
+            if lines != 0 {
+                if up {
+                    for r in top..bottom {
+                        for c in left..=right {
+                            let v = self.read8(cell(r + 1, c));
+                            let a = self.read8(cell(r + 1, c) + 1);
+                            self.write8(cell(r, c), v);
+                            self.write8(cell(r, c) + 1, a);
+                        }
+                    }
+                } else {
+                    for r in (top + 1..=bottom).rev() {
+                        for c in left..=right {
+                            let v = self.read8(cell(r - 1, c));
+                            let a = self.read8(cell(r - 1, c) + 1);
+                            self.write8(cell(r, c), v);
+                            self.write8(cell(r, c) + 1, a);
+                        }
+                    }
+                }
+            }
+            let blank = if up { bottom } else { top };
+            for c in left..=right {
+                self.write8(cell(blank, c), b' ');
+                self.write8(cell(blank, c) + 1, attr);
+            }
+            if lines == 0 {
+                // 全消し: 残りの行も空白にする
+                for r in top..=bottom {
+                    for c in left..=right {
+                        self.write8(cell(r, c), b' ');
+                        self.write8(cell(r, c) + 1, attr);
+                    }
+                }
+                break;
+            }
         }
     }
 
@@ -295,4 +498,56 @@ impl Machine {
         self.cpu.regs[cpu::AX] = (code as u32) << 8;
         self.cpu.set_flag_cf(true);
     }
+}
+
+/// スキャンコード → ASCII (US配列)。**BIOSの仕事**である。
+///
+/// 装置が返すのはキーの位置で、文字にする対応表はファームウェアが持つ。
+/// 配列を差し替えられるのはこの層があるからで、
+/// [`crate::dev::kbd::scancode_shift`] のちょうど逆向きにあたる。
+fn scancode_to_ascii(sc: u8, shift: bool) -> Option<u8> {
+    const PLAIN: &[(u8, u8)] = &[
+        (0x02, b'1'), (0x03, b'2'), (0x04, b'3'), (0x05, b'4'), (0x06, b'5'),
+        (0x07, b'6'), (0x08, b'7'), (0x09, b'8'), (0x0A, b'9'), (0x0B, b'0'),
+        (0x0C, b'-'), (0x0D, b'='), (0x1A, b'['), (0x1B, b']'), (0x27, b';'),
+        (0x28, b'\''), (0x29, b'`'), (0x2B, b'\\'), (0x33, b','), (0x34, b'.'),
+        (0x35, b'/'),
+    ];
+    const SHIFTED: &[(u8, u8)] = &[
+        (0x02, b'!'), (0x03, b'@'), (0x04, b'#'), (0x05, b'$'), (0x06, b'%'),
+        (0x07, b'^'), (0x08, b'&'), (0x09, b'*'), (0x0A, b'('), (0x0B, b')'),
+        (0x0C, b'_'), (0x0D, b'+'), (0x1A, b'{'), (0x1B, b'}'), (0x27, b':'),
+        (0x28, b'"'), (0x29, b'~'), (0x2B, b'|'), (0x33, b'<'), (0x34, b'>'),
+        (0x35, b'?'),
+    ];
+    const ROW_Q: &[u8] = b"qwertyuiop";
+    const ROW_A: &[u8] = b"asdfghjkl";
+    const ROW_Z: &[u8] = b"zxcvbnm";
+
+    let letter = |base: u8, row: &[u8]| -> Option<u8> {
+        let i = sc.checked_sub(base)? as usize;
+        let c = *row.get(i)?;
+        Some(if shift { c.to_ascii_uppercase() } else { c })
+    };
+    if (0x10..0x1A).contains(&sc) {
+        return letter(0x10, ROW_Q);
+    }
+    if (0x1E..0x27).contains(&sc) {
+        return letter(0x1E, ROW_A);
+    }
+    if (0x2C..0x33).contains(&sc) {
+        return letter(0x2C, ROW_Z);
+    }
+    let table = if shift { SHIFTED } else { PLAIN };
+    if let Some((_, c)) = table.iter().find(|(k, _)| *k == sc) {
+        return Some(*c);
+    }
+    Some(match sc {
+        0x1C => b'\r',
+        0x0E => 8,
+        0x0F => b'\t',
+        0x01 => 27,
+        0x39 => b' ',
+        _ => return None,
+    })
 }
