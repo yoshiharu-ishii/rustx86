@@ -29,6 +29,18 @@ use crate::{bus, cpu, disk, Machine};
 /// 何の分岐も足さずに乗っ取りが成立する。実機のBIOSとOSの関係そのものである。
 pub const BIOS_SEG: u16 = 0xF000;
 
+/// BIOSデータエリアの先頭 (セグメント 0x40)
+const BDA_SEG: u32 = 0x400;
+/// 修飾キーの状態 (bit0=右Shift bit1=左Shift bit2=Ctrl bit3=Alt)
+const BDA_KB_FLAG1: u32 = 0x417;
+/// 待ち行列の先頭位置 (セグメント0x40内のオフセット)
+const BDA_KB_HEAD: u32 = 0x41A;
+/// 待ち行列の末尾位置
+const BDA_KB_TAIL: u32 = 0x41C;
+/// 待ち行列の範囲。16個 (1個2バイト) 分
+const KB_BUF_START: u16 = 0x1E;
+const KB_BUF_END: u16 = 0x3E;
+
 impl Machine {
     /// 電源投入時の下ごしらえ (POST: Power-On Self Test)。
     ///
@@ -40,6 +52,7 @@ impl Machine {
         self.install_bios_vectors();
         self.install_bios_data_area();
         self.install_pic_defaults();
+        self.install_pit_defaults();
     }
 
     /// IVTの全256エントリを BIOS HLE の入口で埋める。実BIOSが起動時にやることと同じ。
@@ -78,6 +91,13 @@ impl Machine {
         self.write16(0x460, 0x0607); // カーソルの形
         self.write8(0x462, 0); // 表示中のページ番号
         self.write16(0x463, 0x3D4); // CRTC のポート番号 (カラー)
+        // キーボードの待ち行列。**空の状態は head == tail** で表す。
+        // 位置を 0x480/0x482 にも書くのは、ここを見て別の場所に付け替える
+        // プログラムがあるためである (常駐ソフトが行列を広げる手口)
+        self.write16(BDA_KB_HEAD, KB_BUF_START);
+        self.write16(BDA_KB_TAIL, KB_BUF_START);
+        self.write16(0x480, KB_BUF_START);
+        self.write16(0x482, KB_BUF_END);
         self.write8(0x475, 0); // ハードディスクの台数
         self.write8(0x484, 24); // 行数 - 1
     }
@@ -102,8 +122,34 @@ impl Machine {
             p.write_data(base); // ICW2: ベクタのベース
             p.write_data(icw3); // ICW3: カスケードの結線
             p.write_data(0x01); // ICW4: 8086モード
-            p.write_data(0xFF); // 全マスク。OSが必要な線だけ開ける
+            // **タイマ(0)・キーボード(1)・スレーブ連結(2)は開けておく。**
+            //
+            // 全部閉じたままにしていたところ、BIOSデータエリアの待ち行列に
+            // キーが一度も積まれなかった。INT 09h が呼ばれないためである。
+            // 実BIOSもここは開けて渡す — キーが押されたことを知る手段が
+            // 割り込みしか無いのだから、閉じたまま渡す意味が無い
+            p.write_data(if i == 0 { 0xF8 } else { 0xFF });
         }
+    }
+
+    /// 実BIOSが起動時に行うPITの設定を再現する。
+    ///
+    /// **これを怠るとタイマ割り込みが一度も来ない。** ELKSは自分でPITを
+    /// 設定するので気づかなかったが、**DOSはBIOSが設定済みであることを前提**に
+    /// している。設定しないままだと、時計が進まないだけでなく
+    /// 「HLTして割り込みを待つ」形の待ち合わせが**永久に目を覚まさない**。
+    ///
+    /// カウンタ0は分周値0 = 65536 で 18.2 Hz。この半端な数字は
+    /// [`pit`](crate::dev::pit) の説明のとおり、NTSCの水晶を流用した名残である。
+    /// カウンタ1はDRAMリフレッシュ用で、出力は使わないが現在値を読んで
+    /// 時間を測るプログラムがあるので動かしておく。
+    fn install_pit_defaults(&mut self) {
+        let pit = &mut self.devices.pit;
+        pit.write_control(0x36); // カウンタ0、LoHi、モード3 (方形波)
+        pit.write_counter(0, 0x00);
+        pit.write_counter(0, 0x00); // 分周値0 = 65536 → 18.2 Hz
+        pit.write_control(0x54); // カウンタ1、LoOnly、モード2 (レート生成)
+        pit.write_counter(1, 18); // DRAMリフレッシュ
     }
 
     /// BIOS HLE: 実BIOSは実装せず、必要なサービスだけホスト側の関数で肩代わりする。
@@ -251,8 +297,19 @@ impl Machine {
             }
 
             // --- INT 09h: キーボード割り込み (IRQ1) ---
+            //
+            // **実BIOSの本体はここである。** 8042からスキャンコードを取り、
+            // 修飾キーの状態を更新し、文字に直して**BIOSデータエリアの
+            // 待ち行列へ積む**。INT 16h はその待ち行列から取り出すだけの薄い口で、
+            // 装置には触らない。
+            //
+            // 以前はここでスキャンコードを捨て、INT 16h が8042を直接読んでいた。
+            // それでも INT 16h しか使わないプログラムは動くが、
+            // **BIOSデータエリアを直接覗くプログラム** (DOSには多い) からは
+            // キーが永久に来ないように見える。実際それでFreeDOSのインストーラが
+            // 入力待ちのまま止まっていた。
             0x09 => {
-                let _ = self.io_read8(0x60); // スキャンコードを捨てる
+                self.keyboard_isr();
                 self.devices.pic[0].write_command(0x20);
             }
 
@@ -301,7 +358,16 @@ impl Machine {
                 // 実BIOSが STI + HLT で回っているのと同じ状態を作る
                 0x00 | 0x10 => match self.take_key() {
                     Some(v) => self.cpu.regs[cpu::AX] = v as u32,
-                    None => return false,
+                    None => {
+                        // **待つなら割り込みを開ける。**
+                        //
+                        // `INT` 命令はIFを落とす (x86の仕様)。落としたまま待つと
+                        // キーボード割り込みが永久に来ず、待っているものが
+                        // 二度と届かない。実BIOSの待ちループに `STI` があるのは
+                        // このためで、ここでも同じことをする
+                        self.cpu.set_flag(cpu::IF, true);
+                        return false;
+                    }
                 },
                 // 覗くだけ。無ければZF=1
                 0x01 | 0x11 => match self.peek_key() {
@@ -311,8 +377,11 @@ impl Machine {
                     }
                     None => self.cpu.set_flag(cpu::ZF, true),
                 },
-                // シフト状態
-                0x02 | 0x12 => self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0xFF00) | 0,
+                // シフト状態。**BDAに置いてある値をそのまま返す**
+                0x02 | 0x12 => {
+                    let f = self.read8(BDA_KB_FLAG1) as u32;
+                    self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0xFF00) | f;
+                }
                 // タイプマティック設定など。応答だけ返す
                 0x03 | 0x05 => {}
                 _ => panic!("INT 16h AH={ah:#04x} 未実装"),
@@ -381,42 +450,78 @@ impl Machine {
 
     /// 8042の待ち行列から1つ取り、`AH=スキャンコード AL=ASCII` に組む。
     /// 離した合図 (最上位ビット) と修飾キーはここで吸収する
-    fn take_key(&mut self) -> Option<u16> {
-        // 覗き見 (AH=01) で先に取り出してある分があればそれを返す。
-        // 装置の待ち行列から一度出したものは、こちらで預かっている
-        if let Some(v) = self.kbd_peeked.take() {
-            return Some(v);
-        }
-        while self.devices.keyboard.has_data() {
+    /// 8042から取ったスキャンコードを、修飾キーの状態を見ながら
+    /// **BIOSデータエリアの待ち行列へ積む**。IRQ1のたびに呼ばれる
+    /// **1回の割り込みで1バイトだけ**処理する。
+    ///
+    /// 実機の8042はバイトごとにIRQ1を上げるので、ISRも1バイトずつ受ける。
+    /// ここでまとめて吸い出すと、**16枠しかないBDAの待ち行列が溢れる**。
+    /// 実際、貼り付けのように一度に流し込んだとき15文字で切れた
+    /// (16枠 - 空判定用の1枠 = 15)。
+    fn keyboard_isr(&mut self) {
+        {
+            if !self.devices.keyboard.has_data() {
+                return;
+            }
             let sc = self.devices.keyboard.read_data();
             if sc == 0xFF || sc == 0xE0 {
-                continue;
+                return;
             }
-            if sc & 0x80 != 0 {
-                // 離した合図。Shiftなら状態を下ろす
-                if sc & 0x7F == 0x2A || sc & 0x7F == 0x36 {
-                    self.kbd_shift = false;
-                }
-                continue;
+            let released = sc & 0x80 != 0;
+            let code = sc & 0x7F;
+            // 修飾キーは文字にならない。状態だけを更新してBDAへ書く
+            let bit = match code {
+                0x2A => Some(0x02u8), // 左Shift
+                0x36 => Some(0x01),   // 右Shift
+                0x1D => Some(0x04),   // Ctrl
+                0x38 => Some(0x08),   // Alt
+                _ => None,
+            };
+            if let Some(b) = bit {
+                let mut f = self.read8(BDA_KB_FLAG1);
+                if released { f &= !b } else { f |= b }
+                self.write8(BDA_KB_FLAG1, f);
+                return;
             }
-            if sc == 0x2A || sc == 0x36 {
-                self.kbd_shift = true;
-                continue;
+            if released {
+                return;
             }
-            let ascii = scancode_to_ascii(sc, self.kbd_shift).unwrap_or(0);
-            return Some((sc as u16) << 8 | ascii as u16);
+            let shift = self.read8(BDA_KB_FLAG1) & 0x03 != 0;
+            let ascii = scancode_to_ascii(code, shift).unwrap_or(0);
+            self.kbd_enqueue((code as u16) << 8 | ascii as u16);
         }
-        None
     }
 
-    /// 取らずに覗く。取ってしまった1つは控えておいて次で返す
-    fn peek_key(&mut self) -> Option<u16> {
-        if let Some(v) = self.kbd_peeked {
-            return Some(v);
+    /// 待ち行列へ1つ積む。**いっぱいなら捨てる** (実機も同じで、そのとき鳴る)
+    fn kbd_enqueue(&mut self, entry: u16) {
+        let tail = self.read16(BDA_KB_TAIL);
+        let next = if tail + 2 >= KB_BUF_END { KB_BUF_START } else { tail + 2 };
+        if next == self.read16(BDA_KB_HEAD) {
+            return; // 満杯
         }
-        let v = self.take_key();
-        self.kbd_peeked = v;
-        v
+        self.write16(BDA_SEG + tail as u32, entry);
+        self.write16(BDA_KB_TAIL, next);
+    }
+
+    /// 待ち行列から1つ取り出す
+    fn take_key(&mut self) -> Option<u16> {
+        let head = self.read16(BDA_KB_HEAD);
+        if head == self.read16(BDA_KB_TAIL) {
+            return None;
+        }
+        let v = self.read16(BDA_SEG + head as u32);
+        let next = if head + 2 >= KB_BUF_END { KB_BUF_START } else { head + 2 };
+        self.write16(BDA_KB_HEAD, next);
+        Some(v)
+    }
+
+    /// 取らずに覗く。**待ち行列があるので預かる必要が無くなった**
+    fn peek_key(&mut self) -> Option<u16> {
+        let head = self.read16(BDA_KB_HEAD);
+        if head == self.read16(BDA_KB_TAIL) {
+            return None;
+        }
+        Some(self.read16(BDA_SEG + head as u32))
     }
 
     /// テキスト画面の一部を上 (`up=true`) または下へずらす。

@@ -30,7 +30,22 @@ fn machine() -> Machine {
     let mut m = Machine::new();
     m.load_boot_sector(&sector).unwrap();
     m.cpu.regs[4] = 0x7C00; // SP
+    // **割り込みを開けておく。** キーは 8042 → IRQ1 → INT 09h → BDAの待ち行列 →
+    // INT 16h という順で届く。実BIOSと同じ経路にしたので、割り込みを止めたままだと
+    // INT 09h が走らず、待ち行列に一文字も積まれない
+    m.cpu.set_flag(rustx86_core::cpu::IF, true);
     m
+}
+
+/// キーを打ち、**割り込みが処理されて待ち行列に届くまで**進める。
+///
+/// 押した瞬間に読めるわけではない。IRQ1が上がり、INT 09h が走って初めて
+/// BIOSの待ち行列に載る — 実機と同じ順序である
+fn type_key(m: &mut Machine, s: &str) {
+    m.devices.keyboard.type_ascii(s);
+    for _ in 0..20_000 {
+        m.step();
+    }
 }
 
 fn cell(m: &Machine, row: usize, col: usize) -> (u8, u8) {
@@ -51,7 +66,7 @@ fn put(m: &mut Machine, row: usize, col: usize, ch: u8, attr: u8) {
 #[test]
 fn int16_translates_scancodes_to_ascii() {
     let mut m = machine();
-    m.devices.keyboard.type_ascii("A");
+    type_key(&mut m, "A");
     m.cpu.regs[AX] = 0x0000; // AH=00: 待って1つ取る
     call_int(&mut m, 0x16, 100_000);
     assert_eq!(m.cpu.regs[AX] as u8, b'A', "AL に ASCII");
@@ -63,7 +78,7 @@ fn int16_translates_scancodes_to_ascii() {
 fn int16_handles_shifted_symbols() {
     for (ch, want) in [('@', b'@'), (':', b':'), ('!', b'!'), ('a', b'a')] {
         let mut m = machine();
-        m.devices.keyboard.type_ascii(&ch.to_string());
+        type_key(&mut m, &ch.to_string());
         m.cpu.regs[AX] = 0x0000;
         call_int(&mut m, 0x16, 100_000);
         assert_eq!(m.cpu.regs[AX] as u8, want, "{ch:?} が取れない");
@@ -71,24 +86,35 @@ fn int16_handles_shifted_symbols() {
 }
 
 /// **キーが無ければ待つ。** IRETせずに戻ることでINTがやり直され、
-/// 実BIOSが割り込みを待って回っているのと同じ状態になる
+/// 実BIOSが割り込みを待って回っているのと同じ状態になる。
+///
+/// 判定にHLTを使わないのは、**BIOSがPITを動かすようにしてから
+/// HLTが「永久に止まった」を意味しなくなった**ためである。
+/// タイマ割り込みが18.2回/秒で起こしにくる。見るべきは
+/// 「キーが取れたか」であって「止まったか」ではない。
 #[test]
 fn int16_blocks_until_a_key_arrives() {
     let mut m = machine();
     m.cpu.regs[AX] = 0x0000;
     call_int(&mut m, 0x16, 5_000);
-    assert!(!m.halted, "キーが無いのに先へ進んでしまった");
+    assert_eq!(m.cpu.regs[AX], 0, "キーが無いのに何か取れている");
+    assert_eq!(
+        m.cpu.sregs[rustx86_core::cpu::CS],
+        rustx86_core::BIOS_SEG,
+        "キーが無いのにBIOSの入口から先へ進んでしまった"
+    );
 
-    // 後からキーを入れると進む
+    // 後からキーを入れると取れる
     m.devices.keyboard.type_ascii("z");
-    for _ in 0..100_000 {
+    let mut got = false;
+    for _ in 0..200_000 {
         m.step();
-        if m.halted {
+        if m.cpu.regs[AX] as u8 == b'z' {
+            got = true;
             break;
         }
     }
-    assert!(m.halted, "キーが来ても進まない");
-    assert_eq!(m.cpu.regs[AX] as u8, b'z');
+    assert!(got, "キーが来ても取れない");
 }
 
 /// AH=01 は取らずに覗く。無ければ ZF=1
@@ -99,7 +125,7 @@ fn int16_peek_does_not_consume() {
     call_int(&mut m, 0x16, 10_000);
     assert!(m.cpu.flag(ZF), "空なのに ZF が立っていない");
 
-    m.devices.keyboard.type_ascii("k");
+    type_key(&mut m, "k");
     m.cpu.regs[AX] = 0x0100;
     call_int(&mut m, 0x16, 10_000);
     assert!(!m.cpu.flag(ZF), "キーがあるのに ZF が立っている");

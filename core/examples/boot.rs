@@ -26,9 +26,24 @@ fn main() {
     //
     // 「一定命令数だけ回してから打つ」ではなく**プロンプトを見てから打つ**のは、
     // 起動にかかる時間が環境で変わるためである。人間が画面を見て打つのと同じ手順。
+    /// **もう二度と動き出さない**と言い切れる状態か。
+    ///
+    /// HLTしているだけでは足りない。OSはキー入力を待つときもHLTするので、
+    /// **叩けば起きる**かどうかを見なければならない。打ったキーがまだ
+    /// 8042の待ち行列に残っていれば、次のtickでIRQ1が上がって目を覚ます。
+    ///
+    /// ここを「halted かつ PIT停止」だけで判定していたため、キーを打った直後に
+    /// 一度もstepせず諦めていた。**入力を渡した本人が、渡した直後に見捨てていた**。
+    fn stuck(m: &Machine) -> bool {
+        m.halted
+            && m.pending_irq.is_none()
+            && !m.devices.pit.counters[0].running
+            && !m.devices.keyboard.has_data()
+    }
+
     fn run_until<'a>(m: &mut Machine, needle: &str, budget: u64) -> bool {
         for _ in 0..budget {
-            if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
+            if stuck(m) {
                 break;
             }
             m.step();
@@ -71,10 +86,36 @@ fn main() {
                 return n;
             }
             eprintln!("[{wait_for:?} を検出 → {send:?} を入力]");
-            m.devices.keyboard.type_ascii(send);
-            // 打った内容が処理されるまで少し回す
+            // `sc:3f,bf` の形なら**生のスキャンコードを流す**。
+            // ファンクションキーのように文字を持たないキーを送るための口で、
+            // DOSの F5 (CONFIG/AUTOEXEC を飛ばす) を打つのに要る
+            if let Some(list) = send.strip_prefix("sc:") {
+                let codes: Vec<u8> = list
+                    .split(',')
+                    .filter_map(|s| u8::from_str_radix(s.trim(), 16).ok())
+                    .collect();
+                m.devices.keyboard.feed(&codes);
+            } else {
+                // **1文字ずつ、間を空けて打つ。**
+                //
+                // まとめて流し込むと、BIOSの待ち行列 (16枠) がゲストの読み出しより
+                // 速く埋まって取りこぼす。人間は毎秒10文字ほどしか打たないので、
+                // 実機ではこの詰まりが起きない。**打つ側が速すぎたのが原因**で、
+                // エミュレータ側のバグではなかった
+                for ch in send.chars() {
+                    m.devices.keyboard.type_ascii(&ch.to_string());
+                    for _ in 0..1_000_000 {
+                        if stuck(&m) {
+                            break;
+                        }
+                        m.step();
+                        n += 1;
+                    }
+                }
+            }
+            // 打った内容が処理されるまで回す
             for _ in 0..250_000_000 {
-                if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
+                if stuck(&m) {
                     break;
                 }
                 m.step();
@@ -133,6 +174,24 @@ fn main() {
     if !m.prefixed_ops.is_empty() {
         let list: Vec<String> = m.prefixed_ops.iter().map(|o| format!("{o:#04x}")).collect();
         println!("--- 0x66 を付けて実行されたオペコード ---\n  {}", list.join(" "));
+    }
+
+    {
+        let (head, tail) = (m.read16(0x41A), m.read16(0x41C));
+        println!(
+            "--- BIOSキー待ち行列: head={head:#06x} tail={tail:#06x} ({}) / 修飾={:#04x} / 8042残り={} ---",
+            if head == tail { "空 = 読まれた" } else { "残っている = 誰も読んでいない" },
+            m.read8(0x417),
+            m.devices.keyboard.has_data(),
+        );
+        let c = &m.devices.pit.counters[0];
+        println!(
+            "--- PIT カウンタ0: running={} mode={} reload={:#06x} ({:.1} Hz) ---",
+            c.running,
+            c.mode,
+            c.reload,
+            m.devices.pit.irq0_hz()
+        );
     }
 
     println!("--- 状態 ---");
