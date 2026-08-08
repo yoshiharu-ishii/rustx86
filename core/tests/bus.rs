@@ -57,19 +57,19 @@ fn io_ports_route_to_their_devices() {
     assert_eq!(decode_io(0xFFFF), IoTarget::Unmapped);
 }
 
-/// `OUT` が正しい装置のレジスタに届く
+/// `OUT` が正しい装置に届く
 #[test]
 fn out_reaches_the_right_device() {
     let mut m = Machine::new();
     m.io_write8(0x21, 0xFE); // PICマスタの割り込みマスク
-    m.io_write8(0xA1, 0xFF); // PICスレーブ
-    m.io_write8(0x43, 0x36); // PITのモード設定
+    m.io_write8(0xA1, 0xFD); // PICスレーブ
+    m.io_write8(0x43, 0x36); // PITの制御 (カウンタ0、LoHi、モード3)
     m.io_write8(0x3F8, b'X'); // UARTの送信
 
-    assert_eq!(m.devices.pic[0][1], 0xFE);
-    assert_eq!(m.devices.pic[1][1], 0xFF);
-    assert_eq!(m.devices.pit[3], 0x36);
-    assert_eq!(m.devices.uart[0], b'X');
+    assert_eq!(m.devices.pic[0].imr, 0xFE);
+    assert_eq!(m.devices.pic[1].imr, 0xFD, "スレーブは別のチップ");
+    assert_eq!(m.devices.pit.counters[0].mode, 3);
+    assert_eq!(m.devices.uart.tx, b"X");
 }
 
 /// 未接続のポートは 0xFF を返す。
@@ -92,9 +92,10 @@ fn unmapped_ports_read_as_all_ones_and_are_recorded() {
 #[test]
 fn word_io_spans_two_ports() {
     let mut m = Machine::new();
-    m.io_write16(0x40, 0xBEEF);
-    assert_eq!(m.devices.pit[0], 0xEF, "下位バイトが先のポートへ");
-    assert_eq!(m.devices.pit[1], 0xBE);
+    // 0x3F8 = UARTの送信、0x3F9 = 割り込み許可。1命令で別レジスタ2つに届く
+    m.io_write16(0x3F8, 0x0341);
+    assert_eq!(m.devices.uart.tx, b"A", "下位バイトが先のポートへ");
+    assert_eq!(m.devices.uart.ier, 0x03, "上位バイトが次のポートへ");
 }
 
 /// テキストVRAMは**メモリ空間に居座る装置**である。
