@@ -1,0 +1,138 @@
+# PRと、mainへのマージで回すCI。
+#
+# 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
+#
+# 要点:
+# - Checksタブに出すのは「CI」(ジョブ、消せない) と「CI 結果」(本文つき) の2つ
+# - レポートは**何をしたかと結果だけ**。説明の文章は docs/ci.md に書く
+# - 各ステージは continue-on-error で最後まで走らせてから束ねる
+#   (テストが落ちてもビルドの結果は見たい)
+# - cosim (CPU照合) は別ワークフロー。CPUを触ったPRでだけ回る
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          rustup target add wasm32-unknown-unknown
+          rustup component add clippy rustfmt
+
+      - name: テスト
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## テスト — `cargo test`'
+            echo '```'
+            cargo test > raw.log 2>&1 || RC=$?
+            grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' raw.log | tee /dev/stderr || true
+            echo '```'
+            exit ${RC:-0}
+          } > report-test.md
+
+      - name: wasmビルド
+        id: wasm
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## wasmビルド — `cargo build --target wasm32-unknown-unknown --release`'
+            echo '```'
+            cargo build -p rustx86-wasm --target wasm32-unknown-unknown --release 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            if [ "${RC:-0}" = "0" ]; then
+              SIZE=$(wc -c < target/wasm32-unknown-unknown/release/rustx86_wasm.wasm)
+              echo "rustx86_wasm.wasm (wasm-opt前): $(( SIZE / 1024 )) KB"
+            fi
+            exit ${RC:-0}
+          } > report-wasm.md
+
+      - name: 整形
+        id: fmt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## 整形 — `cargo fmt --check`'
+            echo '```'
+            cargo fmt --all --check 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            if [ "${RC:-0}" != "0" ]; then echo '`cargo fmt --all` で直る。'; fi
+            exit ${RC:-0}
+          } > report-fmt.md
+
+      - name: lint
+        id: lint
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## lint — `cargo clippy -- -D warnings`'
+            echo '```'
+            cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings > raw.log 2>&1 || RC=$?
+            # 指摘ゼロだとノイズ除去の grep が「一致なし= exit 1」になり、
+            # pipefail が拾って**綺麗なのに落ちる**。先にファイルへ落として分離する
+            grep -vE '^(    Checking|   Compiling|    Finished)' raw.log | tee /dev/stderr || true
+            echo '```'
+            exit ${RC:-0}
+          } > report-lint.md
+
+      # 全ステージを1つのレポートに束ねる。表は「何をしたか」と「結果」だけ
+      - name: レポート発行
+        if: always()
+        id: report
+        run: |
+          ok=0
+          {
+            echo '| 何をしたか | 結果 |'
+            echo '|---|---|'
+            for row in \
+              "test:cargo test" \
+              "wasm:cargo build --target wasm32-unknown-unknown" \
+              "fmt:cargo fmt --check" \
+              "lint:cargo clippy -- -D warnings"; do
+              id=${row%%:*}; cmd=${row#*:}
+              case $id in
+                test) outcome='${{ steps.test.outcome }}' ;;
+                wasm) outcome='${{ steps.wasm.outcome }}' ;;
+                fmt)  outcome='${{ steps.fmt.outcome }}' ;;
+                lint) outcome='${{ steps.lint.outcome }}' ;;
+              esac
+              [ "$outcome" = success ] && { mark='✅'; ok=$((ok+1)); } || mark='❌'
+              echo "| \`$cmd\` | $mark |"
+            done
+            echo ''
+            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
+          } > report.md
+          echo "title=$ok/4 合格" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: CI 結果
+          title: ${{ steps.report.outputs.title }}
+          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
+          report-file: report.md
+
+      - name: 合否判定
+        run: |
+          test "${{ steps.test.outcome }}" = "success" \
+            && test "${{ steps.wasm.outcome }}" = "success" \
+            && test "${{ steps.fmt.outcome }}" = "success" \
+            && test "${{ steps.lint.outcome }}" = "success"

@@ -17,14 +17,22 @@ pub fn daa_das(m: &mut Machine, op: u8) {
     let mut al = old_al;
     let mut cf = false;
     if al & 0x0F > 9 || m.cpu.flag(AF) {
-        al = if sub { al.wrapping_sub(6) } else { al.wrapping_add(6) };
+        al = if sub {
+            al.wrapping_sub(6)
+        } else {
+            al.wrapping_add(6)
+        };
         cf = old_cf || if sub { old_al < 6 } else { al < old_al };
         m.cpu.set_flag(AF, true);
     } else {
         m.cpu.set_flag(AF, false);
     }
     if old_al > 0x99 || old_cf {
-        al = if sub { al.wrapping_sub(0x60) } else { al.wrapping_add(0x60) };
+        al = if sub {
+            al.wrapping_sub(0x60)
+        } else {
+            al.wrapping_add(0x60)
+        };
         cf = true;
     }
     m.cpu.set_reg8(0, al);
@@ -38,10 +46,21 @@ pub fn aaa_aas(m: &mut Machine, op: u8) {
     let sub = op == 0x3F;
     if al & 0x0F > 9 || m.cpu.flag(AF) {
         let ax = m.cpu.reg16(AX);
-        let ax = if sub { ax.wrapping_sub(6) } else { ax.wrapping_add(6) };
+        let ax = if sub {
+            ax.wrapping_sub(6)
+        } else {
+            ax.wrapping_add(6)
+        };
         m.cpu.set_reg16(AX, ax);
         let ah = m.cpu.reg8(4);
-        m.cpu.set_reg8(4, if sub { ah.wrapping_sub(1) } else { ah.wrapping_add(1) });
+        m.cpu.set_reg8(
+            4,
+            if sub {
+                ah.wrapping_sub(1)
+            } else {
+                ah.wrapping_add(1)
+            },
+        );
         m.cpu.set_flag(AF, true);
         m.cpu.set_flag(CF, true);
     } else {
@@ -55,7 +74,9 @@ pub fn aaa_aas(m: &mut Machine, op: u8) {
 /// AAM: 乗算後の補正 (ALを基数で割る)
 pub fn aam(m: &mut Machine) {
     let base = fetch8(m);
-    if base == 0 { panic!("AAM by zero"); }
+    if base == 0 {
+        panic!("AAM by zero");
+    }
     let al = m.cpu.reg8(0);
     m.cpu.set_reg8(4, al / base);
     let r = al % base;

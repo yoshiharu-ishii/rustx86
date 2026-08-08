@@ -24,9 +24,17 @@ fn memory_space_is_split_at_640kb() {
     assert_eq!(decode_mem(0x00000), MemRegion::Ram);
     assert_eq!(decode_mem(0x7C00), MemRegion::Ram, "ブートセクタはRAM側");
     assert_eq!(decode_mem(0x9FFFF), MemRegion::Ram, "640KBの末尾まではRAM");
-    assert_eq!(decode_mem(0xA0000), MemRegion::VideoGraphics, "ここから装置の窓");
+    assert_eq!(
+        decode_mem(0xA0000),
+        MemRegion::VideoGraphics,
+        "ここから装置の窓"
+    );
     assert_eq!(decode_mem(0xB0000), MemRegion::VideoMono);
-    assert_eq!(decode_mem(0xB8000), MemRegion::VideoText, "カラーテキスト画面");
+    assert_eq!(
+        decode_mem(0xB8000),
+        MemRegion::VideoText,
+        "カラーテキスト画面"
+    );
     assert_eq!(decode_mem(0xBFFFF), MemRegion::VideoText);
     assert_eq!(decode_mem(0xC0000), MemRegion::Rom);
     assert_eq!(decode_mem(0xF0000), MemRegion::Rom, "システムBIOSの居場所");
@@ -35,9 +43,21 @@ fn memory_space_is_split_at_640kb() {
 /// リアルモードのアドレスは20bitで折り返す (A20が無かった時代の挙動)
 #[test]
 fn memory_decode_wraps_at_one_megabyte() {
-    assert_eq!(decode_mem(0x10_0000), MemRegion::Ram, "1MBちょうどは0番地へ折り返す");
-    assert_eq!(decode_mem(0x10_B800), MemRegion::Ram, "0x0B800 へ折り返すのでRAM側");
-    assert_eq!(decode_mem(0x1B_8000), MemRegion::VideoText, "0xB8000 へ折り返す");
+    assert_eq!(
+        decode_mem(0x10_0000),
+        MemRegion::Ram,
+        "1MBちょうどは0番地へ折り返す"
+    );
+    assert_eq!(
+        decode_mem(0x10_B800),
+        MemRegion::Ram,
+        "0x0B800 へ折り返すのでRAM側"
+    );
+    assert_eq!(
+        decode_mem(0x1B_8000),
+        MemRegion::VideoText,
+        "0xB8000 へ折り返す"
+    );
 }
 
 /// ポート番号がばらばらなのは設計ではなく履歴。
@@ -46,7 +66,11 @@ fn memory_decode_wraps_at_one_megabyte() {
 fn io_ports_route_to_their_devices() {
     assert_eq!(decode_io(0x20), IoTarget::Pic { slave: false });
     assert_eq!(decode_io(0x21), IoTarget::Pic { slave: false });
-    assert_eq!(decode_io(0xA0), IoTarget::Pic { slave: true }, "スレーブPIC");
+    assert_eq!(
+        decode_io(0xA0),
+        IoTarget::Pic { slave: true },
+        "スレーブPIC"
+    );
     assert_eq!(decode_io(0x40), IoTarget::Pit);
     assert_eq!(decode_io(0x43), IoTarget::Pit);
     assert_eq!(decode_io(0x60), IoTarget::Keyboard);
@@ -85,7 +109,10 @@ fn unmapped_ports_read_as_all_ones_and_are_recorded() {
 
     assert!(m.unhandled_io.contains(&0x1234), "読みも記録される");
     assert!(m.unhandled_io.contains(&0x5678), "書きも記録される");
-    assert!(!m.unhandled_io.contains(&0x21), "対応済みのポートは記録しない");
+    assert!(
+        !m.unhandled_io.contains(&0x21),
+        "対応済みのポートは記録しない"
+    );
 }
 
 /// 16bitのI/Oは連続する2ポートに割れる (装置がまたがることもある)

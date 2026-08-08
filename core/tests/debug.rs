@@ -179,13 +179,7 @@ fn 流し直せば必ず同じ場所に着く() {
         while m.dbg.stop.is_none() {
             m.step();
         }
-        (
-            m.cpu.regs,
-            m.cpu.sregs,
-            m.cpu.ip,
-            m.cpu.flags,
-            m.dbg.instr,
-        )
+        (m.cpu.regs, m.cpu.sregs, m.cpu.ip, m.cpu.flags, m.dbg.instr)
     };
     for n in [1u64, 100, 4096, 9000] {
         assert_eq!(run_to(n), run_to(n), "{n} 命令目が2回で違った");

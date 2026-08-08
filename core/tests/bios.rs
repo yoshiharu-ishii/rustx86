@@ -30,9 +30,9 @@ fn machine() -> Machine {
     let mut m = Machine::new();
     m.load_boot_sector(&sector).unwrap();
     m.cpu.regs[4] = 0x7C00; // SP
-    // **割り込みを開けておく。** キーは 8042 → IRQ1 → INT 09h → BDAの待ち行列 →
-    // INT 16h という順で届く。実BIOSと同じ経路にしたので、割り込みを止めたままだと
-    // INT 09h が走らず、待ち行列に一文字も積まれない
+                            // **割り込みを開けておく。** キーは 8042 → IRQ1 → INT 09h → BDAの待ち行列 →
+                            // INT 16h という順で届く。実BIOSと同じ経路にしたので、割り込みを止めたままだと
+                            // INT 09h が走らず、待ち行列に一文字も積まれない
     m.cpu.set_flag(rustx86_core::cpu::IF, true);
     m
 }
@@ -70,7 +70,11 @@ fn int16_translates_scancodes_to_ascii() {
     m.cpu.regs[AX] = 0x0000; // AH=00: 待って1つ取る
     call_int(&mut m, 0x16, 100_000);
     assert_eq!(m.cpu.regs[AX] as u8, b'A', "AL に ASCII");
-    assert_eq!((m.cpu.regs[AX] >> 8) as u8, 0x1E, "AH にスキャンコード (Aの位置)");
+    assert_eq!(
+        (m.cpu.regs[AX] >> 8) as u8,
+        0x1E,
+        "AH にスキャンコード (Aの位置)"
+    );
 }
 
 /// 記号もShiftの上げ下げを解釈して組み立てる
@@ -128,10 +132,10 @@ fn int16_blocks_until_a_key_arrives() {
 #[test]
 fn int16_translates_control_combinations() {
     for (keys, want) in [
-        ("\u{3}", 0x03u8),  // Ctrl+C
-        ("\u{4}", 0x04),    // Ctrl+D
-        ("\u{1a}", 0x1a),   // Ctrl+Z
-        ("\u{1b}", 0x1b),   // Ctrl+[ は Esc と同じ
+        ("\u{3}", 0x03u8), // Ctrl+C
+        ("\u{4}", 0x04),   // Ctrl+D
+        ("\u{1a}", 0x1a),  // Ctrl+Z
+        ("\u{1b}", 0x1b),  // Ctrl+[ は Esc と同じ
     ] {
         let mut m = machine();
         // 8042へは「Ctrlを押す → キーを押す → 離す」の順で流れる
@@ -166,7 +170,11 @@ fn int16_reports_ctrl_in_the_shift_state() {
     }
     m.cpu.regs[AX] = 0x0200;
     call_int(&mut m, 0x16, 10_000);
-    assert_eq!(m.cpu.regs[AX] as u8 & 0x04, 0x04, "Ctrlのビットが立っていない");
+    assert_eq!(
+        m.cpu.regs[AX] as u8 & 0x04,
+        0x04,
+        "Ctrlのビットが立っていない"
+    );
 }
 
 /// AH=01 は取らずに覗く。無ければ ZF=1
@@ -298,7 +306,10 @@ fn crtc_start_address_scrolls_the_screen_without_touching_memory() {
         Some('B'),
         "開始位置を動かしても画面が変わらない"
     );
-    assert!(m.take_vram_dirty(), "画面が変わったのに描き直しの合図が出ていない");
+    assert!(
+        m.take_vram_dirty(),
+        "画面が変わったのに描き直しの合図が出ていない"
+    );
 }
 
 /// AH=09 はカーソル位置に文字と属性を繰り返し置く
@@ -335,7 +346,7 @@ fn int10_writes_a_string() {
         m.write8(SRC + i as u32, *c);
     }
     m.cpu.sregs[0] = 0; // ES
-    m.cpu.regs[5] = SRC as u32; // BP
+    m.cpu.regs[5] = SRC; // BP
     m.cpu.regs[AX] = 0x1300;
     m.cpu.regs[BX] = 0x0A00; // 明るい緑
     m.cpu.regs[CX] = 2;

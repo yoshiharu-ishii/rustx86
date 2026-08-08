@@ -366,11 +366,15 @@ CGAグラフィックスを要求するものは Tier 6 まで動かない
 ### ブラウザで動かす (これが主役)
 
 ```bash
-cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg && cd ..
+tools/build-web.sh        # wasm を焼く
 python3 web/serve.py 8001
 # http://localhost:8001/ を開き、左からマシンを選ぶ
 ```
 
+- **`tools/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
+  `serve.py` の `no-store` が全部引き受けるので、**かつてあった `?v=番号` は
+  廃止した** — 手で番号を上げる方式は、上げ忘れ・片方だけ上げるという
+  新しい事故を生むだけだった
 - **`--target web`** を選んでいるのは、生成物をそのまま `<script type="module">` で
   読めるからである。bundler向けの出力にすると webpack などが要る
 - **`python3 -m http.server` ではなく `web/serve.py`** を使う。前者はキャッシュを

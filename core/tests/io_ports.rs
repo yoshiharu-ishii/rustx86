@@ -74,7 +74,10 @@ fn byte_out_ignores_ah() {
     // MOV AX,0xFF7E / OUT 0x21,AL
     let m = run(&[0xB8, 0x7E, 0xFF, 0xE6, 0x21], |_| {});
     assert_eq!(m.devices.pic[0].imr, 0x7E);
-    assert!(!m.unhandled_io.contains(&0x22), "8bit OUTが隣のポートに触れていない");
+    assert!(
+        !m.unhandled_io.contains(&0x22),
+        "8bit OUTが隣のポートに触れていない"
+    );
 }
 
 /// 未接続のポートを読むと 0xFF が返り、番号が記録される。

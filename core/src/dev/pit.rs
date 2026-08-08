@@ -61,7 +61,11 @@ impl Counter {
             return 0;
         }
         let period = self.reload_value();
-        let cur = if self.count == 0 { period } else { self.count as u32 };
+        let cur = if self.count == 0 {
+            period
+        } else {
+            self.count as u32
+        };
         if n < cur {
             self.count = (cur - n) as u16;
             return 0;

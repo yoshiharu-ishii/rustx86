@@ -54,14 +54,20 @@ fn dos_prompt() -> Option<Machine> {
     let image = std::fs::read(IMAGE).ok()?;
     let mut m = Machine::new();
     m.boot_from_disk(image).expect("boot");
-    assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000), "カーネルが起動せず");
+    assert!(
+        run_until(&mut m, "FreeDOS kernel", 200_000_000),
+        "カーネルが起動せず"
+    );
     m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5
     assert!(
         run_until(&mut m, "full shell command line", 400_000_000),
         "シェルの場所を聞かれない"
     );
     type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
-    assert!(run_until(&mut m, "A:\\>", 400_000_000), "DOSプロンプトに到達せず");
+    assert!(
+        run_until(&mut m, "A:\\>", 400_000_000),
+        "DOSプロンプトに到達せず"
+    );
     Some(m)
 }
 
@@ -76,7 +82,10 @@ fn eliza_answers_back() {
         return;
     };
     type_slowly(&mut m, "eliza\n");
-    assert!(run_until(&mut m, "your problem", 300_000_000), "ELIZAが起動しない");
+    assert!(
+        run_until(&mut m, "your problem", 300_000_000),
+        "ELIZAが起動しない"
+    );
 
     type_slowly(&mut m, "I am writing an emulator\n");
     assert!(
@@ -149,7 +158,10 @@ fn row4_shows_its_menu() {
         m.text_screen_string()
     );
     let screen = m.text_screen_string();
-    assert!(screen.contains("1 player"), "メニューが出ていない:\n{screen}");
+    assert!(
+        screen.contains("1 player"),
+        "メニューが出ていない:\n{screen}"
+    );
 }
 
 /// **グラフィックスを要求されたら記録に残る。**

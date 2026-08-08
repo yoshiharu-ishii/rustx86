@@ -176,8 +176,7 @@ impl Debug {
     /// 見張るものを全部外す。**命令数と足跡の設定は残す** —
     /// 「ブレークを消したら時計まで止まった」では驚く
     pub fn clear(&mut self) {
-        let (cap, instr, executed, count) =
-            (self.trace_cap, self.instr, self.executed, self.count);
+        let (cap, instr, executed, count) = (self.trace_cap, self.instr, self.executed, self.count);
         *self = Self::new();
         self.trace_cap = cap;
         self.instr = instr;
