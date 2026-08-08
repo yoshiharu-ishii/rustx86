@@ -256,7 +256,26 @@ ISOとフロッピーは読み取り専用で足りるので、B5を待たずに
 
 ## 実行
 
-### まずディスクイメージを取ってくる
+### 用意するもの
+
+**Rust だけあればコアは動く。** ブラウザで動かすときだけ道具が2つ増える。
+
+```bash
+# 1. Rust (安定版でよい。edition 2021)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 2. ブラウザ版を作るとき
+rustup target add wasm32-unknown-unknown   # wasm を吐けるようにする
+cargo install wasm-pack                    # JSとの繋ぎを自動生成する道具
+```
+
+`core` は**外部クレートに依存していない**ので、`cargo test` はこれだけで通る。
+NASM は `asm/*.asm` を書き換えるときだけ要る (`.bin` はコミット済み)。
+
+Unicorn との突き合わせ (`cosim`) はビルドに数分かかるため、
+既定のテスト対象から外してある。
+
+### ディスクイメージを取ってくる
 
 ```bash
 tools/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
@@ -285,23 +304,64 @@ tools/fetch-images.sh elks     # 片方だけでもよい
 CGAグラフィックスを要求するものは Tier 6 まで動かない
 (要求されたモードは記録に残るので、白い画面の理由は分かるようにしてある)。
 
+### ブラウザで動かす (これが主役)
+
 ```bash
-# テスト
+cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg && cd ..
+python3 web/serve.py 8001
+# http://localhost:8001/ を開き、左からマシンを選ぶ
+```
+
+- **`--target web`** を選んでいるのは、生成物をそのまま `<script type="module">` で
+  読めるからである。bundler向けの出力にすると webpack などが要る
+- **`python3 -m http.server` ではなく `web/serve.py`** を使う。前者はキャッシュを
+  効かせるので、**wasmを作り直しても古いものが読まれる**。実際これで
+  「直したのに変わらない」に何度も時間を溶かした。`serve.py` はキャッシュを切る
+- `file://` では開けない。ESモジュールもwasmもHTTP越しでないと読めない
+
+左メニューで **ELKS** と **FreeDOS** を切り替えられる。FreeDOSは
+**プロンプト (`A:\>`) まで自動で進む** — 起動時に F5 を打って CONFIG.SYS と
+AUTOEXEC.BAT を飛ばし、聞かれるシェルの場所を答える、というDOSの定石を
+機械にやらせている。
+
+### CLIで動かす
+
+**直す作業はこちらが速い。** どこで止まったかを繰り返し見たいときは、
+grepもdiffも効くCLIに分がある。
+
+```bash
+# テスト (co-sim を除く)
 cargo test
 
-# ブートセクタ実行
+# ELKS を起動してログインし、tetris を動かす
+cargo run --release --example boot -- images/fd1440.img 300000000 \
+  "login:" 'root\n' "ELKS 0.9.1" 'tetris\n'
+
+# FreeDOS をプロンプトまで進めて dir を打つ
+#   sc:3f,bf は生のスキャンコード (F5)。文字を持たないキーを送るための書き方
+cargo run --release --example boot -- images/fd14games.img 900000000 \
+  "FreeDOS kernel" 'sc:3f,bf' \
+  "full shell command line" '\FREEDOS\BIN\COMMAND.COM\n' \
+  'A:' 'dir\n'
+
+# ブートセクタ1つを実行
 cargo run --example run -- asm/hello.bin
 
 # 実行速度の計測 (--release 必須)
 cargo run --release --example bench -- asm/bench.bin
-
-# CPUだけの速度 (Machine::step() のラッパー分を除いた値)
-cargo run --release --example bench_raw -- asm/bench.bin
+cargo run --release --example bench_raw -- asm/bench.bin   # CPUだけの速度
 
 # ブートセクタのビルド (要nasm。.bin もコミット済みなので通常は不要)
 nasm -f bin -o asm/hello.bin asm/hello.asm
-nasm -f bin -o asm/bench.bin asm/bench.asm
 ```
+
+引数は **「この文字列が画面に出たら」「これを打つ」の対**である。
+何命令目で打つかではなく**画面を見てから打つ**のは、起動にかかる時間が
+環境で変わるためで、人間が画面を見て打つのと同じ手順になっている。
+
+止まったときは、画面・カーソル・割り込みの回数・最初のCPU例外・
+`0x66` が付いたオペコード・要求されたビデオモードが自動で表示される。
+**「なぜ止まったか」がその場で分かる**ようにしてある。
 
 ### ベンチマーク
 
@@ -354,9 +414,8 @@ ALU・メモリ読み書き・シフト・スタック・比較・分岐を混�
 ゴールなので、**ネイティブとどれだけ違うか**は早めに知っておきたい。
 
 ```bash
-cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg
-cd ../web && python3 -m http.server 8001
-# http://localhost:8001/bench.html を開く
+python3 web/serve.py 8001
+# http://localhost:8001/bench.html を開く (左メニューの「実行速度ベンチ」からも行ける)
 ```
 
 任意のブートセクタを、HLTまで or 命令数固定で流せる汎用の計測ツールになっている
