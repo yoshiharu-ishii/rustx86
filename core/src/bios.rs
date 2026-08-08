@@ -49,6 +49,7 @@ impl Machine {
     /// 起動することになり、必ずどこかで転ぶ。実際にELKSは3回転んだ
     /// (A20が開かない / 画面の桁数が0 / タイマがゼロ除算として届く)。
     pub(crate) fn power_on_self_test(&mut self) {
+        self.install_bios_rom_id();
         self.install_bios_vectors();
         self.install_bios_data_area();
         self.install_pic_defaults();
@@ -100,6 +101,24 @@ impl Machine {
         self.write16(0x482, KB_BUF_END);
         self.write8(0x475, 0); // ハードディスクの台数
         self.write8(0x484, 24); // 行数 - 1
+    }
+
+    /// ROMの末尾に**機種の名札**を置く。
+    ///
+    /// 実機のBIOS ROMには、末尾に日付と機種コードが焼かれている。
+    /// ソフトはここを読んで「どの世代の機械か」を決め、その先の判断に使う。
+    /// **置いていなかったので 0 が読まれ**、どの機種でもない機械に見えていた。
+    ///
+    /// - `F000:FFF5` — リリース日 "MM/DD/YY"
+    /// - `F000:FFFE` — 機種コード。**0xFE = PC/XT**。
+    ///   このマシンは8086 + CGA相当なので、それ以上を名乗らない
+    fn install_bios_rom_id(&mut self) {
+        const ROM: u32 = 0xF_0000;
+        for (i, b) in b"08/08/26".iter().enumerate() {
+            self.write8(ROM + 0xFFF5 + i as u32, *b);
+        }
+        self.write8(ROM + 0xFFFE, 0xFE); // PC/XT
+        self.write8(ROM + 0xFFFF, 0x00); // 副機種コード
     }
 
     /// PICを実BIOSと同じ配置で初期化する。
@@ -160,7 +179,11 @@ impl Machine {
         let ah = (self.cpu.regs[cpu::AX] >> 8) as u8;
         match n {
             // --- INT 10h: ビデオ ---
-            0x10 => match ah {
+            0x10 => {
+              if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+                eprintln!("INT10 AH={ah:#04x} AL={:#04x} BX={:#06x}", self.cpu.regs[cpu::AX] as u8, self.cpu.regs[cpu::BX]);
+              }
+              match ah {
                 // AH=00: ビデオモード設定。**テキスト以外は実現できない**。
                 //
                 // 落とさずに受けるのは、モードを試して戻すプログラムがあるためだが、
@@ -215,7 +238,39 @@ impl Machine {
                 // `INT 13h AH=41` (LBA拡張) と同じで、**無いものを在ると
                 // 答えないこと**が肝心である。嘘をつくと、次にVGA前提の
                 // 手順で話しかけられて詰む
-                0x1A | 0x1B => self.cpu.regs[cpu::AX] &= 0xFF00,
+                0x1A | 0x1B => {
+                    if std::env::var("RUSTX86_TRACE_VIDEO").is_ok() {
+                        // INTで積まれた戻り先を覗く: SS:SP に IP、+2 に CS
+                        let sp = self.cpu.regs[cpu::SP] as u16;
+                        let ss = self.cpu.sregs[cpu::SS];
+                        let (rip, rcs) = (
+                            self.read16(cpu::operand::linear(ss, sp)),
+                            self.read16(cpu::operand::linear(ss, sp.wrapping_add(2))),
+                        );
+                        let base = cpu::operand::linear(rcs, rip);
+                        let bytes: Vec<String> =
+                            (0..24).map(|i| format!("{:02x}", self.read8(base + i))).collect();
+                        // 中継表 (INT n; RET) の1つ上 = 本当の呼び出し元。
+                        // 近距離callなので戻り番地は2バイトで SS:SP+6 に積まれている
+                        let up = self.read16(cpu::operand::linear(ss, sp.wrapping_add(6)));
+                        let ubase = cpu::operand::linear(rcs, up);
+                        let ub: Vec<String> =
+                            (0..32).map(|i| format!("{:02x}", self.read8(ubase + i))).collect();
+                        eprintln!(
+                            "AH={ah:#04x} 中継 {rcs:04x}:{rip:04x} [{}]\n  本当の呼び出し元 {rcs:04x}:{up:04x} 戻った直後: {}",
+                            bytes[..6].join(" "), ub.join(" ")
+                        );
+                    }
+                    self.cpu.regs[cpu::AX] &= 0xFF00; // AL≠0x1A = 「その機能は無い」
+                    // **BXも埋める。**
+                    //
+                    // 作法どおりならALを見て「非対応」と分かるので BX は触らなくてよい。
+                    // だが BL (装置の種別) だけを見るプログラムがあり、そういう相手には
+                    // **前の呼び出しの残りかす**がそのまま種別として見えてしまう。
+                    // 実際 zmiy がこれで「VGAだ」と判断し、80x50 で描いて画面から
+                    // はみ出していた。BL=0x02 = カラーCGA、BH=0x00 = 副画面なし。
+                    self.cpu.regs[cpu::BX] = 0x0002;
+                }
                 // AH=11: 文字ジェネレータ (フォント)。
                 //
                 // **このエミュレータはフォントを持っていない。**文字の絵はブラウザ側の
@@ -313,7 +368,8 @@ impl Machine {
                     }
                 }
                 _ => panic!("INT 10h AH={ah:#04x} 未実装"),
-            },
+              }
+            }
 
             // --- INT 08h: タイマ割り込み (IRQ0) ---
             // OSが自前のハンドラを入れるまではBIOSが受ける。実BIOSは

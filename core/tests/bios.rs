@@ -265,6 +265,42 @@ fn cursor_position_is_mirrored_in_the_bios_data_area() {
     assert_eq!(m.cursor_pos(), (3, 21), "CRTC側とずれている");
 }
 
+/// **ハードウェアスクロール。**
+///
+/// テキストVRAMの窓は32KBあり、80x25の1画面はそのうち4000バイトでしかない。
+/// どこから表示するかはCRTCのレジスタ 0x0C/0x0D が決めていて、**ここを動かすと
+/// メモリを1バイトも書き換えずに画面がスクロールする**。80年代の機械が
+/// 遅いCPUで滑らかにスクロールできたのはこの仕組みによる。
+///
+/// 描く側がこれを見ておらず常に先頭を返していたため、CGA向けにこの手で描く
+/// ソフト (zmiy など) は**画面の下が永久に出てこなかった**。CRTCは実装済みで、
+/// 説明にも「ここを動かすとスクロールできる」と書いてあったのに、
+/// **使う側が読んでいなかった**。
+#[test]
+fn crtc_start_address_scrolls_the_screen_without_touching_memory() {
+    let mut m = machine();
+    // 1画面ぶん先 (25行目) に目印を置く
+    put(&mut m, 0, 0, b'A', 0x07);
+    let below = VRAM_TEXT_BASE + (TEXT_COLS * 25 * 2) as u32;
+    m.write8(below, b'B');
+    m.write8(below + 1, 0x07);
+
+    assert_eq!(m.text_screen_string().chars().next(), Some('A'));
+
+    // CRTCの開始位置を1画面ぶん (2000文字) 進める。**メモリは触らない**
+    m.io_write8(0x3D4, 0x0C);
+    m.io_write8(0x3D5, (2000u16 >> 8) as u8);
+    m.io_write8(0x3D4, 0x0D);
+    m.io_write8(0x3D5, 2000u16 as u8);
+
+    assert_eq!(
+        m.text_screen_string().chars().next(),
+        Some('B'),
+        "開始位置を動かしても画面が変わらない"
+    );
+    assert!(m.take_vram_dirty(), "画面が変わったのに描き直しの合図が出ていない");
+}
+
 /// AH=09 はカーソル位置に文字と属性を繰り返し置く
 #[test]
 fn int10_writes_char_with_attribute() {

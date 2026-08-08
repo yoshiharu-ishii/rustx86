@@ -292,6 +292,10 @@ impl Machine {
                 if port == 0x3D4 {
                     self.devices.crtc.write_index(val)
                 } else {
+                    // 表示開始位置が動いたら、メモリは変わらなくても**画面は変わる**
+                    if matches!(self.devices.crtc.index(), 0x0C | 0x0D) {
+                        self.vram_dirty = true;
+                    }
                     self.devices.crtc.write_data(val)
                 }
             }
@@ -304,10 +308,32 @@ impl Machine {
 
     // --- テキストVRAM ---
 
-    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)
+    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)。
+    ///
+    /// **先頭から4000バイトではなく、CRTCが指す位置から4000バイトを返す。**
+    ///
+    /// テキストVRAMの窓は32KBあり、80x25の1画面はそのうち4000バイトでしかない。
+    /// どこから表示するかを決めるのはCRTCのレジスタ 0x0C/0x0D で、ここを動かすと
+    /// **メモリを1バイトも書き換えずに画面をスクロールできる** (ハードウェアスクロール)。
+    /// 80年代の機械が遅いCPUで滑らかにスクロールできたのはこの仕組みによる。
+    ///
+    /// これを見ずに常に先頭を返していたため、CGA向けにハードウェアスクロールで
+    /// 描くソフト (zmiy など) は**画面の下が永久に出てこなかった**。
+    /// CRTCは実装してあり、説明にも「ここを動かすとスクロールできる」と
+    /// 書いてあったのに、**描く側が見ていなかった**。
     pub fn text_vram(&self) -> &[u8] {
-        let b = bus::VRAM_TEXT_BASE as usize;
-        &self.mem[b..b + bus::TEXT_LEN]
+        let win = (bus::VRAM_TEXT_END - bus::VRAM_TEXT_BASE + 1) as usize;
+        // 開始位置は文字単位。1文字2バイトなので倍にする
+        let start = (self.devices.crtc.start_offset() as usize * bus::TEXT_CELL) % win;
+        let b = bus::VRAM_TEXT_BASE as usize + start;
+        // 窓の端をまたぐ場合は、素直に先頭を返す (実機は巻き戻るが、
+        // そこまで使うソフトは見ていない。使うものが出てきたら組み立てる)
+        if start + bus::TEXT_LEN <= win {
+            &self.mem[b..b + bus::TEXT_LEN]
+        } else {
+            let base = bus::VRAM_TEXT_BASE as usize;
+            &self.mem[base..base + bus::TEXT_LEN]
+        }
     }
 
     /// 機械の状態をまるごと書き出す。
