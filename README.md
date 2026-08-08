@@ -392,16 +392,20 @@ grepもdiffも効くCLIに分がある。
 # テスト (co-sim を除く)
 cargo test
 
+# 画面に文字列が出るのを待って、キーを打つ。第2引数は命令数の上限で、空でよい
+#   (既定は50億。**当てる数字ではなく暴走を止める番人**で、
+#    実際に何命令かかったかは実行時に表示される)
+
 # ELKS を起動してログインし、tetris を動かす
-cargo run --release --example boot -- images/fd1440.img 300000000 \
+cargo run --release --example boot -- images/fd1440.img '' \
   "login:" 'root\n' "ELKS 0.9.1" 'tetris\n'
 
 # FreeDOS をプロンプトまで進めて dir を打つ
 #   sc:3f,bf は生のスキャンコード (F5)。文字を持たないキーを送るための書き方
-cargo run --release --example boot -- images/fd14games.img 900000000 \
+cargo run --release --example boot -- images/fd14games.img '' \
   "FreeDOS kernel" 'sc:3f,bf' \
   "full shell command line" '\FREEDOS\BIN\COMMAND.COM\n' \
-  'A:' 'dir\n'
+  'A:\>' 'dir\n'
 
 # ブートセクタ1つを実行
 cargo run --example run -- asm/hello.bin
