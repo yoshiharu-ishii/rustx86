@@ -55,6 +55,33 @@
   }
   #status.warn { color: #fbbf24; }
 
+  /* 左メニュー + 端末。狭い画面では上下に積む */
+  .app { display: grid; grid-template-columns: 13.5rem 1fr; gap: 1rem; align-items: start; }
+  @media (max-width: 52rem) { .app { grid-template-columns: 1fr; } }
+
+  .machines h2 {
+    font-size: .7rem; font-weight: 600; letter-spacing: .06em; opacity: .55;
+    margin: 1rem 0 .35rem; text-transform: none;
+  }
+  .machines h2:first-child { margin-top: 0; }
+  .machines button {
+    display: block; width: 100%; text-align: left; font: inherit;
+    padding: .4rem .6rem; margin-bottom: .25rem; border-radius: .4rem;
+    border: 1px solid var(--line); background: transparent; color: inherit;
+    cursor: pointer; line-height: 1.35;
+  }
+  .machines button:hover:not(:disabled) { background: rgba(128,128,128,.12); }
+  .machines button[aria-current="true"] { border-color: #2563eb; background: rgba(37,99,235,.12); }
+  .machines button:disabled { opacity: .4; cursor: default; }
+  .machines .name { font-size: .88rem; }
+  .machines .meta { font-size: .72rem; opacity: .65; }
+  /* 状態の丸。**「これから」も並べる** — どこまで行けてなぜ止まるかが見える方が教材になる */
+  .dot { display: inline-block; width: .5em; height: .5em; border-radius: 50%; margin-right: .4em; }
+  .dot.ok { background: #16a34a; }
+  .dot.partial { background: #f59e0b; }
+  .dot.todo { background: #9ca3af; }
+  #machineNote { font-size: .8rem; opacity: .75; margin: .6rem 0 0; }
+
   .help { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem;
           margin: 1.25rem 0 0; font-size: .875rem; }
   .help dt { font-weight: 600; white-space: nowrap; }
@@ -69,8 +96,11 @@
   <h1>rustx86 — ブラウザで動く8086マシン</h1>
   <p class="sub">Rustで書いた8086エミュレータ。ブートセクタのあるディスクイメージなら何でも起動する。
     画面はテキストVRAM (0xB8000) を直接描いている。
-    既定では 16bit UNIX の <a href="https://github.com/ghaerr/elks">ELKS</a> を読み込む。</p>
+    左からマシンを選ぶか、イメージを画面にドロップする。</p>
 
+  <div class="app">
+  <nav class="machines" id="machines" aria-label="マシン"></nav>
+  <div>
   <div class="console" id="console">
     <div class="toolbar">
       <button id="boot" disabled>再起動</button>
@@ -91,6 +121,9 @@
     <canvas id="screen" tabindex="0"></canvas>
     <p id="status">読み込み中…</p>
   </div>
+  <p id="machineNote"></p>
+  </div>
+  </div>
 
   <dl class="help">
     <dt>キー入力</dt>
@@ -109,11 +142,9 @@
   </dl>
 
   <p class="note">
-    ディスクイメージはリポジトリに含めていない (配布物のため)。
-    <code>fd1440.img</code> を <a href="https://github.com/ghaerr/elks/releases">ELKSのリリース</a>
-    から取得してドロップするか、このページと同じ場所に置くと自動で読み込む。
-    ELKSのログイン名は <code>root</code>。
-    実行速度を測るなら <a href="./bench.html">ベンチ</a> へ。
+    <strong>ディスクイメージはリポジトリに含めていない</strong> (配布物のため)。
+    選んだマシンの取得先は左のメニューに出る。このページと同じ場所に置けば自動で読み込み、
+    置かなくても画面にドロップすれば起動する。
   </p>
 
   <script type="module" src="./main.js"></script>
