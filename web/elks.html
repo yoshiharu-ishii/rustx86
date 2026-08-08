@@ -18,9 +18,11 @@
   .sub { opacity: .7; font-size: .9rem; margin: 0 0 1.25rem; }
 
   /* 端末を主役にする */
+  /* 枠の中は黒地なので、**文字色をページから継承させない**。
+     ライトテーマだと黒地に黒文字になって何も見えなくなる (実際にそうなった)。 */
   .console {
-    border: 1px solid var(--line); border-radius: .5rem; overflow: hidden;
-    background: #000;
+    border: 1px solid #2a2a2a; border-radius: .5rem; overflow: hidden;
+    background: #000; color: #d8d8d8;
   }
   .console.drop { outline: 2px dashed #00aa00; outline-offset: -6px; }
   #screen { display: block; width: 100%; cursor: text; }
@@ -28,25 +30,25 @@
 
   .toolbar {
     display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
-    padding: .5rem .6rem; border-bottom: 1px solid var(--line);
-    background: rgba(128,128,128,.08);
+    padding: .5rem .6rem; border-bottom: 1px solid #2a2a2a;
+    background: #141414;
   }
   .toolbar button {
     font: inherit; font-size: .85rem; padding: .25rem .8rem; border-radius: .35rem;
-    border: 1px solid var(--line); background: transparent; cursor: pointer;
+    border: 1px solid #3d3d3d; background: #1e1e1e; color: #e0e0e0; cursor: pointer;
   }
-  .toolbar button:disabled { opacity: .4; cursor: default; }
+  .toolbar button:hover:not(:disabled) { background: #2a2a2a; border-color: #4d4d4d; }
+  .toolbar button:disabled { opacity: .35; cursor: default; }
   .spacer { flex: 1 }
   .gauge {
     font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
-    opacity: .75; font-variant-numeric: tabular-nums; white-space: nowrap;
+    color: #5dbb5d; font-variant-numeric: tabular-nums; white-space: nowrap;
   }
   #status {
-    padding: .45rem .7rem; font-size: .85rem; opacity: .8; min-height: 2.1em;
-    border-top: 1px solid var(--line);
+    padding: .45rem .7rem; font-size: .85rem; color: #9a9a9a; min-height: 2.1em;
+    border-top: 1px solid #2a2a2a; background: #0d0d0d;
   }
-  #status.warn { color: #b45309; opacity: 1; }
-  @media (prefers-color-scheme: dark) { #status.warn { color: #fbbf24; } }
+  #status.warn { color: #fbbf24; }
 
   .help { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem;
           margin: 1.25rem 0 0; font-size: .875rem; }
