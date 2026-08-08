@@ -408,6 +408,17 @@ impl Machine {
         }
         w.u16(self.cpu.ip);
         w.u32(self.cpu.flags);
+        // プロテクトモードの状態 (v2)。隠しレジスタを落とすと、復元した瞬間に
+        // 全アドレスが嘘になる — セレクタだけでは base を再構成できない
+        w.u32(self.cpu.cr0);
+        w.u32(self.cpu.gdtr_base);
+        w.u16(self.cpu.gdtr_limit);
+        for h in self.cpu.hidden {
+            w.u32(h.base);
+            w.u32(h.limit);
+            w.u8(h.access);
+            w.bool(h.big);
+        }
 
         // 機械の進行状態
         w.bool(self.halted);
@@ -452,6 +463,17 @@ impl Machine {
         }
         m.cpu.ip = r.u16()?;
         m.cpu.flags = r.u32()?;
+        m.cpu.cr0 = r.u32()?;
+        m.cpu.gdtr_base = r.u32()?;
+        m.cpu.gdtr_limit = r.u16()?;
+        for i in 0..6 {
+            m.cpu.hidden[i] = cpu::SegHidden {
+                base: r.u32()?,
+                limit: r.u32()?,
+                access: r.u8()?,
+                big: r.bool()?,
+            };
+        }
 
         m.halted = r.bool()?;
         m.pending_irq = r.opt_u8()?;
