@@ -16,7 +16,7 @@ flowchart LR
         PUSH[mainへマージ]
     end
 
-    subgraph ci.yml — 毎回
+    subgraph CIY["ci.yml — 毎回"]
         T[テスト<br>cargo test]
         W[wasmビルド<br>--target wasm32]
         F[整形<br>cargo fmt --check]
@@ -24,7 +24,7 @@ flowchart LR
         T & W & F & L --> R[レポート発行<br>合否表 + 全ログを1つに束ねる]
     end
 
-    subgraph cosim.yml — CPUを触ったときだけ
+    subgraph COS["cosim.yml — CPUを触ったときだけ"]
         C[CPU照合<br>Unicornと毎命令比較]
     end
 
