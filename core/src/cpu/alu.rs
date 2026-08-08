@@ -68,6 +68,54 @@ pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
     if op == 7 { a } else { r16 }
 }
 
+/// 32bit版。`0x66` プレフィクスが付いたときの演算。
+///
+/// **AFは下位4bitの桁上がりなので幅が変わっても同じ**、CFとOFだけが幅で変わる。
+/// 8/16/32で構造が完全に平行しているのは偶然ではなく、
+/// 386が16bitの意味論をそのまま広げる形で拡張されたからである。
+pub fn alu32(c: &mut Cpu, op: u8, a: u32, b: u32) -> u32 {
+    let carry = c.flag(CF) as u64;
+    let (r, cf, of, af) = match op {
+        0 => {
+            let r = a as u64 + b as u64;
+            (r, r > 0xFFFF_FFFF, ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) + (b & 0xF) > 0xF)
+        }
+        1 => ((a | b) as u64, false, false, false),
+        2 => {
+            let r = a as u64 + b as u64 + carry;
+            (r, r > 0xFFFF_FFFF, ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) + (b & 0xF) + carry as u32 > 0xF)
+        }
+        3 => {
+            let r = (a as u64).wrapping_sub(b as u64).wrapping_sub(carry);
+            (r, (a as u64) < b as u64 + carry, ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) < (b & 0xF) + carry as u32)
+        }
+        4 => ((a & b) as u64, false, false, false),
+        5 | 7 => {
+            let r = (a as u64).wrapping_sub(b as u64);
+            (r, (a as u64) < b as u64, ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0, (a & 0xF) < (b & 0xF))
+        }
+        _ => ((a ^ b) as u64, false, false, false),
+    };
+    let r32 = r as u32;
+    c.set_flag(CF, cf);
+    c.set_flag(OF, of);
+    c.set_flag(AF, af);
+    set_szp32(c, r32);
+    if op == 7 { a } else { r32 }
+}
+
+/// 幅を実行時に選ぶALU。`0x66` の有無で16bitと32bitを切り替える。
+///
+/// **呼ぶ側に同じ形のコードを2本書かせない**ための入口である。
+/// 分岐表 (`cpu/mod.rs`) が幅ごとに倍に膨れるのを防ぐ。
+pub fn alu_w(c: &mut Cpu, op: u8, a: u32, b: u32, wide: bool) -> u32 {
+    if wide {
+        alu32(c, op, a, b)
+    } else {
+        alu16(c, op, a as u16, b as u16) as u32
+    }
+}
+
 pub fn set_szp8(c: &mut Cpu, v: u8) {
     c.set_flag(ZF, v == 0);
     c.set_flag(SF, v & 0x80 != 0);
@@ -80,6 +128,17 @@ pub fn set_szp16(c: &mut Cpu, v: u16) {
     c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは下位8bitのみ
 }
 
+pub fn set_szp32(c: &mut Cpu, v: u32) {
+    c.set_flag(ZF, v == 0);
+    c.set_flag(SF, v & 0x8000_0000 != 0);
+    c.set_flag(PF, (v as u8).count_ones() % 2 == 0); // PFは幅によらず下位8bitのみ
+}
+
+
+/// 幅を実行時に選ぶ SF/ZF/PF の更新
+pub fn set_szp_w(c: &mut Cpu, v: u32, wide: bool) {
+    if wide { set_szp32(c, v) } else { set_szp16(c, v as u16) }
+}
 
 pub fn condition(c: &Cpu, cc: u8) -> bool {
     let r = match cc >> 1 {

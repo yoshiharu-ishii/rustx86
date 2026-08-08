@@ -25,10 +25,15 @@
 //!
 //! ## どこまで行けるか
 //!
-//! **BIOSではなくCPUで止まる。** 起動の途中で走るユーティリティが
-//! `66 9C` (PUSHFD) から始まる386/486の判定を行うため、
-//! 32bitオペランドサイズ・プレフィクス (`0x66`) が要る。これは Tier 3b の仕事なので、
-//! **続きは32bit化を済ませてから**になる ([ADR-0004](../../docs/adr/0004-how-far-to-follow-the-bios.md))。
+//! Tier 3b で `0x66` を実装したことで、**インストーラの起動まで到達した**。
+//! 途中で3つ踏んだ。
+//!
+//! - **x87 (`0xD8-0xDF`)** — 何もしないのが正しい。8087を挿していない8086では
+//!   ESC命令はメモリを書き換えず、FPU判定は「書き換わらなかったこと」で不在を知る
+//! - **`0x0F` 二バイト空間** — 何が来たか分かるよう、panicに2バイト目を出すようにした
+//! - **`0xA9` (TEST EAX,imm32) の幅対応漏れ** — 即値を16bitで読んでIPが2バイトずれ、
+//!   以後はデータを命令として食っていた。`Machine::prefixed_ops` (0x66 が付いた
+//!   オペコードの記録) がこれを一発で指した
 
 use rustx86_core::Machine;
 
@@ -91,6 +96,38 @@ fn pressing_enter_starts_freecom() {
         run_until(&mut m, "FreeCom version", 200_000_000),
         "FreeCOMが起動せず:\n{}",
         m.text_screen_string()
+    );
+}
+
+/// **Tier 3b の到達点**: 32bit命令を通り抜けてインストーラまで着く。
+///
+/// ここに来るには `0x66` プレフィクス、x87の空実装、`0xA9` の幅対応が要る。
+/// どれか1つでも欠けると、IPがずれてデータを命令として食い始める
+#[test]
+fn reaches_the_installer_through_32bit_instructions() {
+    let Some(mut m) = boot() else {
+        eprintln!("images/fd14boot.img が無いのでスキップ");
+        return;
+    };
+    assert!(run_until(&mut m, "Select from Menu", 200_000_000), "メニューに到達せず");
+    m.devices.keyboard.type_ascii("\n");
+    // **入力待ちのプロンプトまで**待つ。最初の行が出た時点で判定すると、
+    // まだ描き終わっていないところを掴んでしまう
+    assert!(
+        run_until(&mut m, "[Y,N]", 600_000_000),
+        "インストーラの入力待ちに到達せず:\n{}",
+        m.text_screen_string()
+    );
+    assert!(
+        m.text_screen_string().contains("installation program"),
+        "インストーラの表示が無い:\n{}",
+        m.text_screen_string()
+    );
+    // 32bit命令を実際に通っていること (通らずに着いたのなら別の道を歩いている)
+    assert!(
+        m.prefixed_ops.contains(&0x9C),
+        "PUSHFD を通っていない。0x66 が付いたオペコード: {:x?}",
+        m.prefixed_ops
     );
 }
 

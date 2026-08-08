@@ -130,6 +130,11 @@ fn main() {
     // 書いた先が見ている場所と違う、という取り違えがすぐ分かる
     let (crow, ccol) = m.cursor_pos();
     println!("--- カーソル: 行{crow} 桁{ccol} ---");
+    if !m.prefixed_ops.is_empty() {
+        let list: Vec<String> = m.prefixed_ops.iter().map(|o| format!("{o:#04x}")).collect();
+        println!("--- 0x66 を付けて実行されたオペコード ---\n  {}", list.join(" "));
+    }
+
     println!("--- 状態 ---");
     match result {
         Ok(n) => println!("{n} 命令 実行。halted={}", m.halted),
