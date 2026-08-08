@@ -52,6 +52,20 @@ fn run_until(m: &mut Machine, needle: &str, budget: u64) -> bool {
     false
 }
 
+/// **1文字ずつ間を空けて打つ。**
+///
+/// まとめて流し込むと、BIOSの待ち行列 (16枠) がゲストの読み出しより速く埋まって
+/// 取りこぼす。実機で起きないのは人間が毎秒10文字ほどしか打たないからで、
+/// **打つ側が速すぎるのが原因**でありエミュレータのバグではない。
+fn type_slowly(m: &mut Machine, s: &str) {
+    for ch in s.chars() {
+        m.devices.keyboard.type_ascii(&ch.to_string());
+        for _ in 0..1_000_000 {
+            m.step();
+        }
+    }
+}
+
 fn boot() -> Option<Machine> {
     let image = std::fs::read(IMAGE).ok()?;
     let mut m = Machine::new();
@@ -129,6 +143,42 @@ fn reaches_the_installer_through_32bit_instructions() {
         "PUSHFD を通っていない。0x66 が付いたオペコード: {:x?}",
         m.prefixed_ops
     );
+}
+
+/// **DOSプロンプトに到達し、コマンドが動く。**
+///
+/// 起動時に F5 を打って CONFIG.SYS と AUTOEXEC.BAT を飛ばす — DOSの定石である。
+/// 既定のシェルパスは見つからないので聞かれる。答えると `A:\>` が出る
+/// (フロッピーから起動しているので A: であって C: ではない)。
+#[test]
+fn reaches_the_dos_prompt_and_runs_a_command() {
+    let Some(mut m) = boot() else {
+        eprintln!("images/fd14boot.img が無いのでスキップ");
+        return;
+    };
+    assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000), "カーネルが起動せず");
+    m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5
+
+    assert!(
+        run_until(&mut m, "full shell command line", 400_000_000),
+        "シェルの場所を聞かれない:\n{}",
+        m.text_screen_string()
+    );
+    type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+    assert!(
+        run_until(&mut m, "A:\\>", 400_000_000),
+        "DOSプロンプトに到達せず:\n{}",
+        m.text_screen_string()
+    );
+
+    type_slowly(&mut m, "dir\n");
+    assert!(
+        run_until(&mut m, "FD14-BOOT", 400_000_000),
+        "DIRが動かない:\n{}",
+        m.text_screen_string()
+    );
+    let screen = m.text_screen_string();
+    assert!(screen.contains("KERNEL"), "ディレクトリの中身が出ていない:\n{screen}");
 }
 
 /// ウェルカム画面のロゴが**ブロック文字で描かれている**こと。

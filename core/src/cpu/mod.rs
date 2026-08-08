@@ -20,7 +20,7 @@ pub mod operand;
 pub mod shift;
 pub mod string;
 
-use alu::{alu16, alu8, alu_w, condition, set_szp16};
+use alu::{alu16, alu8, alu_w, condition};
 use operand::{
     fetch16, fetch8, fetch_w, linear, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
     read_op_w, write_op16, write_op8, write_op_w, Operand,

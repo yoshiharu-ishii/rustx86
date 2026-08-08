@@ -35,6 +35,11 @@ impl Crtc {
         self.index = val & 0x1F;
     }
 
+    /// 今選ばれているレジスタ番号 (診断用)
+    pub fn index(&self) -> u8 {
+        self.index
+    }
+
     pub fn write_data(&mut self, val: u8) {
         self.regs[self.index as usize] = val;
     }

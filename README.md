@@ -15,13 +15,68 @@ Rust製のx86エミュレータ。リアルモード8086から始めて、プロ
 
 1. ブートセクタの Hello, World が出る ✅
 2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルがブラウザで叩ける** ✅
-3. そのELKSから本物のホストに `ping` が届く ← 次 (Tier 3)
-3. そのELKSから本物のホストに `ping` が届く
-4. 32bit Linux が起動する
+3. **FreeDOS が `A:\>` まで起動し、DOSアプリが動く** ✅
+4. 32bit Linux が起動する ← ここで完成
+5. そのLinuxから本物のホストに `ping` が届く
+
+ネットワークを最後に置いたのは、**タブの中で完結するものを先にやる**と決めたため
+([ADR-0005](docs/adr/0005-local-first-roadmap.md))。ネットワークだけは踏み台の
+用意が要る。
 
 x86_64 (ロングモード) は**このリポジトリのゴールに含めない**。
 やるならこのリポジトリを fork して `rustx86_64` を作る。
 16bitと32bitの地層を登りきることを完成と定義し、終わりを持たせる。
+
+## 動いている様子
+
+どれも**ブラウザのタブの中**で動いている。画面はテキストVRAM (`0xB8000`) を
+そのまま描いたもので、写真はcanvasから取り出した画素そのままである。
+
+### 16bit UNIX (ELKS) — ログインしてシェルが叩ける
+
+![ELKSのシェル](docs/images/elks-shell.png)
+
+`uname -a` が `ibmpc i8086` と答えている。ELKSは8042とテキストVRAMを
+**直接**叩くOSなので、BIOSはほとんど通らない。
+
+### 同梱のテトリスが遊べる
+
+![ELKSのテトリス](docs/images/elks-tetris.png)
+
+ブロックが**背景色を付けた空白**で描かれている (文字コードは 0x20)。
+文字だけを見る確認表示では画面が空に見えるので、一度これに騙された。
+
+### FreeDOS 1.4 — DOSプロンプトまで自動で進む
+
+![FreeDOSのdir](docs/images/freedos-dir.png)
+
+左メニューで選ぶだけでここまで来る。起動時に F5 を打って CONFIG.SYS と
+AUTOEXEC.BAT を飛ばし、聞かれるシェルの場所を答える、というDOSの定石を
+機械にやらせている。`A:` なのはフロッピーから起動しているため。
+
+ELKSと違って**画面もキーもディスクも全部BIOS経由**なので、こちらはBIOS層の
+検証になっている。実際これを動かして、BIOSの穴が **9個**見つかった。
+
+### ハードウェアスクロール
+
+![zmiyのスクロール](docs/images/freedos-zmiy.png)
+
+スネークの `zmiy` は、**50行の盤面をVRAMに描いて、見える25行の窓を蛇に追従させる**。
+窓を動かしているのはCRTCの表示開始レジスタで、**メモリは1バイトも書き換えていない**。
+80年代の機械が遅いCPUで滑らかにスクロールできたのはこの仕組みによる。
+
+この写真は下へ走らせた後で、状態表示が画面の上へ流れていったところである。
+
+### DOSアプリも動く (テキストモードなら)
+
+![FreeDOSのELIZA](docs/images/freedos-eliza.png)
+
+1966年の対話プログラム ELIZA。**画面・キーボード・ファイル読み出しが全部
+通らないと、この受け答えは出ない**ので、総合試験としてよくできている。
+
+なお写真は撮り直せる。開発サーバーに受け口があるので、
+ページから `POST /shot/<名前>` に canvas の内容を投げれば
+`docs/images/` に落ちる ([`web/serve.py`](web/serve.py))。
 
 ## ロードマップ
 
@@ -256,23 +311,112 @@ ISOとフロッピーは読み取り専用で足りるので、B5を待たずに
 
 ## 実行
 
+### 用意するもの
+
+**Rust だけあればコアは動く。** ブラウザで動かすときだけ道具が2つ増える。
+
 ```bash
-# テスト
+# 1. Rust (安定版でよい。edition 2021)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 2. ブラウザ版を作るとき
+rustup target add wasm32-unknown-unknown   # wasm を吐けるようにする
+cargo install wasm-pack                    # JSとの繋ぎを自動生成する道具
+```
+
+`core` は**外部クレートに依存していない**ので、`cargo test` はこれだけで通る。
+NASM は `asm/*.asm` を書き換えるときだけ要る (`.bin` はコミット済み)。
+
+Unicorn との突き合わせ (`cosim`) はビルドに数分かかるため、
+既定のテスト対象から外してある。
+
+### ディスクイメージを取ってくる
+
+```bash
+tools/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
+tools/fetch-images.sh elks     # 片方だけでもよい
+```
+
+**イメージはリポジトリに含めていない。** 再配布が禁じられているからではなく
+(ELKSもFreeDOSもゲームも自由ソフトウェア)、理由は2つある。
+
+- GPLのバイナリ配布には**ソースの提供義務**が付く。守れない話ではないが、
+  エミュレータの教材が他人のOSの再頒布者になると、その責任が恒久的に付いて回る
+- **手で組み立てたイメージは再現できない。** 実際、手元でゲームを載せたイメージと
+  他の人が持っているイメージの中身が食い違って「アプリが入っていない」が起きた。
+  リポジトリに置いても、置き忘れれば同じことが起きる。
+  **スクリプトなら中身が一意に決まる**
+
+出来上がるもの:
+
+| ファイル | 中身 |
+|---|---|
+| `images/fd1440.img` | ELKS 0.9.1。`tetris` `invaders` `ttypong` `sl` `matrix` が最初から入っている |
+| `images/fd14boot.img` | FreeDOS 1.4 の素の起動フロッピー (8086ビルド) |
+| `images/fd14games.img` | 上に `eliza` `zmiy` `row4t` を載せたもの |
+
+**テキストモードのゲームしか入れていない。** この機械の画面はテキストだけなので、
+CGAグラフィックスを要求するものは Tier 6 まで動かない
+(要求されたモードは記録に残るので、白い画面の理由は分かるようにしてある)。
+
+### ブラウザで動かす (これが主役)
+
+```bash
+cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg && cd ..
+python3 web/serve.py 8001
+# http://localhost:8001/ を開き、左からマシンを選ぶ
+```
+
+- **`--target web`** を選んでいるのは、生成物をそのまま `<script type="module">` で
+  読めるからである。bundler向けの出力にすると webpack などが要る
+- **`python3 -m http.server` ではなく `web/serve.py`** を使う。前者はキャッシュを
+  効かせるので、**wasmを作り直しても古いものが読まれる**。実際これで
+  「直したのに変わらない」に何度も時間を溶かした。`serve.py` はキャッシュを切る
+- `file://` では開けない。ESモジュールもwasmもHTTP越しでないと読めない
+
+左メニューで **ELKS** と **FreeDOS** を切り替えられる。FreeDOSは
+**プロンプト (`A:\>`) まで自動で進む** — 起動時に F5 を打って CONFIG.SYS と
+AUTOEXEC.BAT を飛ばし、聞かれるシェルの場所を答える、というDOSの定石を
+機械にやらせている。
+
+### CLIで動かす
+
+**直す作業はこちらが速い。** どこで止まったかを繰り返し見たいときは、
+grepもdiffも効くCLIに分がある。
+
+```bash
+# テスト (co-sim を除く)
 cargo test
 
-# ブートセクタ実行
+# ELKS を起動してログインし、tetris を動かす
+cargo run --release --example boot -- images/fd1440.img 300000000 \
+  "login:" 'root\n' "ELKS 0.9.1" 'tetris\n'
+
+# FreeDOS をプロンプトまで進めて dir を打つ
+#   sc:3f,bf は生のスキャンコード (F5)。文字を持たないキーを送るための書き方
+cargo run --release --example boot -- images/fd14games.img 900000000 \
+  "FreeDOS kernel" 'sc:3f,bf' \
+  "full shell command line" '\FREEDOS\BIN\COMMAND.COM\n' \
+  'A:' 'dir\n'
+
+# ブートセクタ1つを実行
 cargo run --example run -- asm/hello.bin
 
 # 実行速度の計測 (--release 必須)
 cargo run --release --example bench -- asm/bench.bin
-
-# CPUだけの速度 (Machine::step() のラッパー分を除いた値)
-cargo run --release --example bench_raw -- asm/bench.bin
+cargo run --release --example bench_raw -- asm/bench.bin   # CPUだけの速度
 
 # ブートセクタのビルド (要nasm。.bin もコミット済みなので通常は不要)
 nasm -f bin -o asm/hello.bin asm/hello.asm
-nasm -f bin -o asm/bench.bin asm/bench.asm
 ```
+
+引数は **「この文字列が画面に出たら」「これを打つ」の対**である。
+何命令目で打つかではなく**画面を見てから打つ**のは、起動にかかる時間が
+環境で変わるためで、人間が画面を見て打つのと同じ手順になっている。
+
+止まったときは、画面・カーソル・割り込みの回数・最初のCPU例外・
+`0x66` が付いたオペコード・要求されたビデオモードが自動で表示される。
+**「なぜ止まったか」がその場で分かる**ようにしてある。
 
 ### ベンチマーク
 
@@ -325,9 +469,8 @@ ALU・メモリ読み書き・シフト・スタック・比較・分岐を混�
 ゴールなので、**ネイティブとどれだけ違うか**は早めに知っておきたい。
 
 ```bash
-cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg
-cd ../web && python3 -m http.server 8001
-# http://localhost:8001/bench.html を開く
+python3 web/serve.py 8001
+# http://localhost:8001/bench.html を開く (左メニューの「実行速度ベンチ」からも行ける)
 ```
 
 任意のブートセクタを、HLTまで or 命令数固定で流せる汎用の計測ツールになっている
