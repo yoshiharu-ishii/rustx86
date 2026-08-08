@@ -1,0 +1,21 @@
+title: "Rustでx86エミュレータを書く — ブラウザで16bit OSが動くまで"
+summary: |
+  Rust でゼロから x86 エミュレータを書き、WebAssembly でブラウザに載せて、
+  16bit UNIX (ELKS) と FreeDOS を起動するまでの記録です。
+
+  命令デコーダ、Unicorn Engine をオラクルにした検証、8259 PIC や 8254 PIT といった
+  40年前の周辺装置、BIOS の高位エミュレーション、wasm-bindgen での橋渡し、
+  そして 32bit 命令まで。**すべて実際に動いているコードから引用**しています。
+
+  外部クレートに依存しない `core` を読み進めることで、「現代の PC がなぜこの形を
+  しているのか」が地層として見えてくる、という作りを狙っています。
+topics: ["rust", "wasm", "x86", "emulator", "自作"]
+published: true
+price: 0
+chapters:
+  - 01-decoder
+  - 02-cosim
+  - 03-devices
+  - 04-bios
+  - 05-wasm
+  - 06-32bit
