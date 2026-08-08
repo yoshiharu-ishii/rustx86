@@ -101,7 +101,9 @@ fn main() {
                 run(&mut m, n + 1);
             }
             "until" | "u" => {
-                let needle = line.split_once(char::is_whitespace).map(|x| x.1)
+                let needle = line
+                    .split_once(char::is_whitespace)
+                    .map(|x| x.1)
                     .unwrap_or("")
                     .trim();
                 if needle.is_empty() {

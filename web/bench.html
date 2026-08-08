@@ -52,9 +52,9 @@
   <main id="bench"></main>
 
   <script type="module">
-    import init from './pkg/rustx86_wasm.js?v=22';
-    import { mountBench } from './bench.js?v=22';
-    import { Debugger } from './debugger.js?v=22';
+    import init from './pkg/rustx86_wasm.js';
+    import { mountBench } from './bench.js';
+    import { Debugger } from './debugger.js';
 
     await init();
     // 単独ページでもデバッガは使える。載せ方が違うだけで中身は同じ

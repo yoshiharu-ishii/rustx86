@@ -1,31 +1,13 @@
 # PRと、mainへのマージで回すCI。
 #
-# ## Checksタブに出すものは2つだけ
+# 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
 #
-# - 「CI」 — GitHub Actions のジョブそのもの。選んでもログへのリンクにしか
-#   ならないが、これは消せない
-# - 「CI 結果」 — **本文つきの Check run**。先頭に各ステージの合否表、
-#   下に全ステージのレポートが並ぶ。読むのはこちら
-#
-# 以前はステージごとに Check run を発行していたが、左リストが4項目に
-# 膨らんで**リンク集と見分けがつかなくなった**。読む価値のあるものを
-# 1項目に濃縮する。(fuurai-dungeon の型の改良版)
-#
-# ## ステージの選び方 — 手元で回していないものを本命にする
-#
-# `cargo test` は開発中に毎回手で回しているので、CIが足す価値は保険である。
-# 効くのは手元で忘れるもの:
-#
-# - **wasmビルドが本命。** ネイティブのテストが全部通るのにブラウザでだけ
-#   壊れる事故がある (`std::time::Instant` は wasm32 に存在しない、など。
-#   docs/build.md 参照)。これを止められるのはこのステージだけ
-# - **JSとwasmの版ずれ** — キャッシュ破りの `?v=` が揃っていないと、新旧の
-#   コードが混ざって `emu.key is not a function` になる (実際に踏んだ)
-# - **整形 / lint** — ゲートにする前に全件掃除してから入れた。
-#   「緑だが指摘あり」という読めない Check は作らない
-#
-# cosim (Unicornとの突き合わせ) は別ワークフロー (cosim.yml)。
-# CPUの意味論を触ったPRでだけ回る。
+# 要点:
+# - Checksタブに出すのは「CI」(ジョブ、消せない) と「CI 結果」(本文つき) の2つ
+# - レポートは**何をしたかと結果だけ**。説明の文章は docs/ci.md に書く
+# - 各ステージは continue-on-error で最後まで走らせてから束ねる
+#   (テストが落ちてもビルドの結果は見たい)
+# - cosim (CPU照合) は別ワークフロー。CPUを触ったPRでだけ回る
 name: CI
 
 on:
@@ -51,8 +33,6 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add clippy rustfmt
 
-      # 各ステージは continue-on-error で最後まで走らせ、自分の節を
-      # report-*.md に書く。テストが落ちてもビルドの結果は見たい
       - name: テスト
         id: test
         continue-on-error: true
@@ -60,10 +40,6 @@ jobs:
           set -o pipefail
           {
             echo '## テスト — `cargo test`'
-            echo ''
-            echo 'core の94件。cosim (Unicornとの突き合わせ) は別ワークフローで、'
-            echo 'CPUを触ったPRでだけ回る。'
-            echo ''
             echo '```'
             cargo test 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' || RC=$?
             echo '```'
@@ -76,42 +52,16 @@ jobs:
         run: |
           set -o pipefail
           {
-            echo '## ブラウザ版のビルド — `cargo build --target wasm32-unknown-unknown`'
-            echo ''
-            echo 'ネイティブのテストが全部通っても、wasm32 でだけ壊れることがある'
-            echo '(`std::time::Instant` が無い、など)。それを止めるのがこのステージ。'
-            echo ''
+            echo '## wasmビルド — `cargo build --target wasm32-unknown-unknown --release`'
             echo '```'
             cargo build -p rustx86-wasm --target wasm32-unknown-unknown --release 2>&1 | tee /dev/stderr || RC=$?
             echo '```'
             if [ "${RC:-0}" = "0" ]; then
               SIZE=$(wc -c < target/wasm32-unknown-unknown/release/rustx86_wasm.wasm)
-              echo ''
-              echo '| 成果物 | サイズ |'
-              echo '|---|---|'
-              echo "| rustx86_wasm.wasm (wasm-opt前) | $(( SIZE / 1024 )) KB |"
+              echo "rustx86_wasm.wasm (wasm-opt前): $(( SIZE / 1024 )) KB"
             fi
             exit ${RC:-0}
           } > report-wasm.md
-
-      - name: 版ずれ
-        id: web
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          {
-            echo '## JSとwasmの版ずれ — `tools/build-web.sh --check`'
-            echo ''
-            echo 'ブラウザのキャッシュを破るため、web/ の JS と wasm には `?v=番号` を'
-            echo '付けている。この番号がファイル間でずれると、**新しい半分と古い半分が'
-            echo '混ざって** `emu.key is not a function` になる (実際に踏んだ)。'
-            echo '番号が全ファイルで1つに揃っているかを見る。'
-            echo ''
-            echo '```'
-            tools/build-web.sh --check 2>&1 | tee /dev/stderr || RC=$?
-            echo '```'
-            exit ${RC:-0}
-          } > report-web.md
 
       - name: 整形
         id: fmt
@@ -120,14 +70,10 @@ jobs:
           set -o pipefail
           {
             echo '## 整形 — `cargo fmt --check`'
-            echo ''
             echo '```'
             cargo fmt --all --check 2>&1 | tee /dev/stderr || RC=$?
             echo '```'
-            if [ "${RC:-0}" != "0" ]; then
-              echo ''
-              echo '手元で `cargo fmt --all` を打てば直る。'
-            fi
+            if [ "${RC:-0}" != "0" ]; then echo '`cargo fmt --all` で直る。'; fi
             exit ${RC:-0}
           } > report-fmt.md
 
@@ -137,58 +83,52 @@ jobs:
         run: |
           set -o pipefail
           {
-            echo '## lint — `cargo clippy` (警告もエラー扱い)'
-            echo ''
+            echo '## lint — `cargo clippy -- -D warnings`'
             echo '```'
             cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings 2>&1 | tee /dev/stderr | grep -vE '^(    Checking|   Compiling|    Finished)' || RC=$?
             echo '```'
-            if [ "${RC:-0}" = "0" ]; then echo '指摘なし。'; fi
             exit ${RC:-0}
           } > report-lint.md
 
-      # 全ステージの結果を1つのレポートに束ねて発行する
+      # 全ステージを1つのレポートに束ねる。表は「何をしたか」と「結果」だけ
       - name: レポート発行
         if: always()
         id: report
         run: |
-          ok=0; total=0
+          ok=0
           {
-            echo '| ステージ | 何を見るか | 結果 |'
-            echo '|---|---|---|'
+            echo '| 何をしたか | 結果 |'
+            echo '|---|---|'
             for row in \
-              "test:テスト:core の94件" \
-              "wasm:wasmビルド:ブラウザでだけ壊れる事故を止める" \
-              "web:版ずれ:JSとwasmの ?v= が揃っているか" \
-              "fmt:整形:cargo fmt --check" \
-              "lint:lint:clippy、警告もエラー扱い"; do
-              id=${row%%:*}; rest=${row#*:}; name=${rest%%:*}; desc=${rest#*:}
+              "test:cargo test" \
+              "wasm:cargo build --target wasm32-unknown-unknown" \
+              "fmt:cargo fmt --check" \
+              "lint:cargo clippy -- -D warnings"; do
+              id=${row%%:*}; cmd=${row#*:}
               case $id in
                 test) outcome='${{ steps.test.outcome }}' ;;
                 wasm) outcome='${{ steps.wasm.outcome }}' ;;
-                web)  outcome='${{ steps.web.outcome }}' ;;
                 fmt)  outcome='${{ steps.fmt.outcome }}' ;;
                 lint) outcome='${{ steps.lint.outcome }}' ;;
               esac
-              total=$((total+1))
               [ "$outcome" = success ] && { mark='✅'; ok=$((ok+1)); } || mark='❌'
-              echo "| $name | $desc | $mark |"
+              echo "| \`$cmd\` | $mark |"
             done
             echo ''
-            cat report-test.md report-wasm.md report-web.md report-fmt.md report-lint.md 2>/dev/null
+            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
           } > report.md
-          echo "title=$ok/$total 合格" >> "$GITHUB_OUTPUT"
+          echo "title=$ok/4 合格" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/publish-check
         if: always()
         with:
           name: CI 結果
           title: ${{ steps.report.outputs.title }}
-          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.web.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
+          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
           report-file: report.md
 
       - name: 合否判定
         run: |
           test "${{ steps.test.outcome }}" = "success" \
             && test "${{ steps.wasm.outcome }}" = "success" \
-            && test "${{ steps.web.outcome }}" = "success" \
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"

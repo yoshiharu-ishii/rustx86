@@ -366,16 +366,15 @@ CGAグラフィックスを要求するものは Tier 6 まで動かない
 ### ブラウザで動かす (これが主役)
 
 ```bash
-tools/build-web.sh        # wasm を焼き、キャッシュ破りの ?v= を上げる
+tools/build-web.sh        # wasm を焼く
 python3 web/serve.py 8001
 # http://localhost:8001/ を開き、左からマシンを選ぶ
 ```
 
-- **`tools/build-web.sh`** は wasm-pack を呼んだあと、`web/` の `?v=` を
-  **1つの番号に揃えて上げる**。この番号を手で上げていた頃は、上げ忘れて
-  古いコードを眺めたり、片方だけ上げて `emu.key is not a function` を
-  出したりした。**手順書に「気をつけて」と書いてある作業はいずれ失敗する**ので
-  スクリプトにした。JS/HTMLだけ直したときは `--bump-only`
+- **`tools/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
+  `serve.py` の `no-store` が全部引き受けるので、**かつてあった `?v=番号` は
+  廃止した** — 手で番号を上げる方式は、上げ忘れ・片方だけ上げるという
+  新しい事故を生むだけだった
 - **`--target web`** を選んでいるのは、生成物をそのまま `<script type="module">` で
   読めるからである。bundler向けの出力にすると webpack などが要る
 - **`python3 -m http.server` ではなく `web/serve.py`** を使う。前者はキャッシュを

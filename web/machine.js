@@ -8,7 +8,7 @@
 // 画面を何命令ごとに覗くか — 実機なら水晶が決めることを、ブラウザでは
 // ここが決める。
 
-import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js?v=22';
+import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js';
 
 /** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
 const INSTRUCTIONS_PER_FRAME = 3_000_000;
@@ -29,10 +29,12 @@ globalThis.__rustx86_panic ??= msg => console.error(msg);
 
 /** WASMを読み込む。ページの最初に一度だけ */
 export async function loadWasm() {
-  // glue と .wasm 本体の両方にバージョンを付ける。
-  // 片方だけ新しいと「その関数は無い」と言われる (実際に踏んだ)
+  // キャッシュ対策はここには無い。**serve.py が no-store を送る**ので、
+  // ファイルは毎回取り直される。以前は ?v=番号 を全ファイルに付けて手で
+  // 上げていたが、番号がずれると「その関数は無い」と言われる事故のほうが
+  // 多かった (実際に踏んだ)。番号を消せば、揃える作業ごと消える
   const wasm = await init({
-    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm?v=22', import.meta.url),
+    module_or_path: new URL('./pkg/rustx86_wasm_bg.wasm', import.meta.url),
   });
   wasmMemory = wasm.memory;
   // **パニックの中身を拾えるようにする。** これが無いとJS側には

@@ -58,12 +58,7 @@ jobs:
         run: |
           set -o pipefail
           {
-            echo '## Unicornとの突き合わせ (cargo test -p rustx86-cosim)'
-            echo ''
-            echo '同じ命令列を rustx86 と Unicorn Engine の両方で実行し、'
-            echo 'レジスタとフラグを毎命令比較する。境界値混じりの乱数は決定的'
-            echo '(xorshift) なので、落ちたケースは手元で再現できる。'
-            echo ''
+            echo '## CPU照合 — `cargo test -p rustx86-cosim` (Unicornと毎命令比較)'
             echo '```'
             cargo test -p rustx86-cosim 2>&1 | tee /dev/stderr | grep -vE '^(   Compiling|    Finished|     Running)' || RC=$?
             echo '```'
