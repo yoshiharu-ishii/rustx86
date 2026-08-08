@@ -61,6 +61,12 @@ pub struct Machine {
     /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
     /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
     pub prefixed_ops: std::collections::BTreeSet<u8>,
+    /// ゲストが設定しようとしたビデオモード。
+    ///
+    /// **テキスト以外は黙って無視している**ので、グラフィックスを要求された
+    /// ことに気づけない。画面が真っ白なのが「何も描いていない」のか
+    /// 「描いた先が無い」のかを区別するために控えておく
+    pub video_modes: std::collections::BTreeSet<u8>,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -96,6 +102,7 @@ impl Machine {
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
+            video_modes: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
@@ -285,6 +292,10 @@ impl Machine {
                 if port == 0x3D4 {
                     self.devices.crtc.write_index(val)
                 } else {
+                    // 表示開始位置が動いたら、メモリは変わらなくても**画面は変わる**
+                    if matches!(self.devices.crtc.index(), 0x0C | 0x0D) {
+                        self.vram_dirty = true;
+                    }
                     self.devices.crtc.write_data(val)
                 }
             }
@@ -297,10 +308,32 @@ impl Machine {
 
     // --- テキストVRAM ---
 
-    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)
+    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)。
+    ///
+    /// **先頭から4000バイトではなく、CRTCが指す位置から4000バイトを返す。**
+    ///
+    /// テキストVRAMの窓は32KBあり、80x25の1画面はそのうち4000バイトでしかない。
+    /// どこから表示するかを決めるのはCRTCのレジスタ 0x0C/0x0D で、ここを動かすと
+    /// **メモリを1バイトも書き換えずに画面をスクロールできる** (ハードウェアスクロール)。
+    /// 80年代の機械が遅いCPUで滑らかにスクロールできたのはこの仕組みによる。
+    ///
+    /// これを見ずに常に先頭を返していたため、CGA向けにハードウェアスクロールで
+    /// 描くソフト (zmiy など) は**画面の下が永久に出てこなかった**。
+    /// CRTCは実装してあり、説明にも「ここを動かすとスクロールできる」と
+    /// 書いてあったのに、**描く側が見ていなかった**。
     pub fn text_vram(&self) -> &[u8] {
-        let b = bus::VRAM_TEXT_BASE as usize;
-        &self.mem[b..b + bus::TEXT_LEN]
+        let win = (bus::VRAM_TEXT_END - bus::VRAM_TEXT_BASE + 1) as usize;
+        // 開始位置は文字単位。1文字2バイトなので倍にする
+        let start = (self.devices.crtc.start_offset() as usize * bus::TEXT_CELL) % win;
+        let b = bus::VRAM_TEXT_BASE as usize + start;
+        // 窓の端をまたぐ場合は、素直に先頭を返す (実機は巻き戻るが、
+        // そこまで使うソフトは見ていない。使うものが出てきたら組み立てる)
+        if start + bus::TEXT_LEN <= win {
+            &self.mem[b..b + bus::TEXT_LEN]
+        } else {
+            let base = bus::VRAM_TEXT_BASE as usize;
+            &self.mem[base..base + bus::TEXT_LEN]
+        }
     }
 
     /// 機械の状態をまるごと書き出す。
@@ -416,13 +449,19 @@ impl Machine {
         (off / bus::TEXT_COLS, off % bus::TEXT_COLS)
     }
 
-    /// カーソルを (行, 桁) へ動かす
+    /// カーソルを (行, 桁) へ動かす。
+    ///
+    /// **CRTCとBIOSデータエリアの両方に書く。** 実機でもこの2箇所に同じ位置が
+    /// 載っていて、画面はCRTCを見るが、**ソフトはBDAの方を直接読むことがある**。
+    /// BDA側 (0x450、ページ0のカーソル位置) を更新していなかったので、
+    /// 覗いた側からはいつまでも「行0桁0」に見えていた。
     pub fn set_cursor_pos(&mut self, row: usize, col: usize) {
         let row = row.min(bus::TEXT_ROWS - 1);
         let col = col.min(bus::TEXT_COLS - 1);
         self.devices
             .crtc
             .set_cursor_offset((row * bus::TEXT_COLS + col) as u16);
+        self.write16(0x450, (row as u16) << 8 | col as u16);
     }
 
     /// 描画側が読んだ印。次の書き込みまで dirty が下りる
