@@ -85,10 +85,27 @@ const CSS = `
      裏の画面を覗きたいとき用。操作ボタンは残るので畳んだまま Step もできる */
   .rx-dbg.panel.min { height: auto; overflow: hidden; }
   .rx-dbg.panel.min section, .rx-dbg.panel.min .why { display: none; }
-  /* 左端のリサイズつまみ。右固定なので、掴んで左へ引くと広がる */
-  .rx-dbg .resize { position: absolute; left: -3px; top: 0; width: 8px; height: 100%;
-                    cursor: ew-resize; }
+  /* リサイズつまみ。パネルは右上に固定なので、左端=横幅・下端=高さ・
+     左下角=両方 を変える */
+  .rx-dbg .resize { position: absolute; z-index: 2; }
+  .rx-dbg .resize.x { left: -3px; top: 0; width: 8px; height: 100%; cursor: ew-resize; }
+  .rx-dbg .resize.y { left: 0; bottom: -3px; width: 100%; height: 8px; cursor: ns-resize; }
+  .rx-dbg .resize.xy { left: -3px; bottom: -3px; width: 14px; height: 14px;
+                       cursor: nesw-resize; }
   .rx-dbg .resize:hover { background: #2563eb44; }
+  /* スクロールバーをデバッガの地の色に合わせる。既定の明るいバーが
+     ダークなパネルから浮くので */
+  .rx-dbg, .rx-dbg pre, .rx-dbg .grow pre {
+    scrollbar-width: thin; scrollbar-color: #30363d transparent;
+  }
+  .rx-dbg ::-webkit-scrollbar, .rx-dbg::-webkit-scrollbar { width: 10px; height: 10px; }
+  .rx-dbg ::-webkit-scrollbar-track, .rx-dbg::-webkit-scrollbar-track { background: transparent; }
+  .rx-dbg ::-webkit-scrollbar-thumb, .rx-dbg::-webkit-scrollbar-thumb {
+    background: #30363d; border-radius: 5px; border: 2px solid #0b0e14;
+  }
+  .rx-dbg ::-webkit-scrollbar-thumb:hover, .rx-dbg::-webkit-scrollbar-thumb:hover {
+    background: #45505f;
+  }
   .rx-dbg .hbtn { padding: 2px 8px; margin-left: 4px; }
   .rx-dbg .close { margin-left: auto; }
 `;
@@ -329,27 +346,44 @@ export class Debugger {
       min.textContent = on ? '□' : '–';
       min.title = on ? '元に戻す' : '最小化 (裏の画面を覗く)';
     };
-    // 左端のつまみで横幅を変える。右固定なので掴んで左へ引くと広がる。
-    // 画面を覆いすぎるときは右へ引いて縮める
-    const grip = this.doc.createElement('div');
-    grip.className = 'resize';
-    this.root.appendChild(grip);
-    grip.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const startX = e.clientX;
-      const startW = this.root.getBoundingClientRect().width;
-      const move = (ev) => {
+    // つまみ3つ。パネルは右上固定なので:
+    //   左端 (x)  = 掴んで左へ引くと横幅が広がる
+    //   下端 (y)  = 掴んで下へ引くと高さが伸びる
+    //   左下角(xy) = 両方いっぺんに
+    for (const axis of ['x', 'y', 'xy']) {
+      const grip = this.doc.createElement('div');
+      grip.className = 'resize ' + axis;
+      this.root.appendChild(grip);
+      grip.addEventListener('mousedown', (e) => this.startResize(e, axis));
+    }
+  }
+
+  /** リサイズのドラッグ。axis は 'x' / 'y' / 'xy' */
+  startResize(e, axis) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const r = this.root.getBoundingClientRect();
+    const startW = r.width;
+    const startH = r.height;
+    // 高さを手で決めたら calc(100vh) の自動追従はやめる (固定モードへ)
+    const move = (ev) => {
+      if (axis !== 'y') {
         // 左へ動かす (clientXが減る) と広がる
-        const w = Math.max(300, Math.min(900, startW + (startX - ev.clientX)));
-        this.root.style.width = w + 'px';
-      };
-      const up = () => {
-        this.doc.removeEventListener('mousemove', move);
-        this.doc.removeEventListener('mouseup', up);
-      };
-      this.doc.addEventListener('mousemove', move);
-      this.doc.addEventListener('mouseup', up);
-    });
+        this.root.style.width = Math.max(300, Math.min(900, startW + (startX - ev.clientX))) + 'px';
+      }
+      if (axis !== 'x') {
+        // 下へ動かす (clientYが増える) と伸びる
+        this.root.style.height =
+          Math.max(120, Math.min(window.innerHeight - 24, startH + (ev.clientY - startY))) + 'px';
+      }
+    };
+    const up = () => {
+      this.doc.removeEventListener('mousemove', move);
+      this.doc.removeEventListener('mouseup', up);
+    };
+    this.doc.addEventListener('mousemove', move);
+    this.doc.addEventListener('mouseup', up);
   }
 
   /** 中身を組み立てる。**子ウインドウかページ内かをここは知らない** */
