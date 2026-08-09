@@ -94,13 +94,14 @@
     margin: 1rem 0 .35rem; text-transform: none;
   }
   .machines h2:first-child { margin-top: 0; }
-  .machines button {
+  /* 別ページに住むマシン (Linux) は <a> で並ぶので、ボタンと見た目を揃える */
+  .machines button, .machines a {
     display: block; width: 100%; text-align: left; font: inherit;
     padding: .4rem .6rem; margin-bottom: .25rem; border-radius: .4rem;
     border: 1px solid var(--line); background: transparent; color: inherit;
-    cursor: pointer; line-height: 1.35;
+    cursor: pointer; line-height: 1.35; text-decoration: none;
   }
-  .machines button:hover:not(:disabled) { background: rgba(128,128,128,.12); }
+  .machines button:hover:not(:disabled), .machines a:hover { background: rgba(128,128,128,.12); }
   .machines button[aria-current="true"] { border-color: #2563eb; background: rgba(37,99,235,.12); }
   .machines button:disabled { opacity: .4; cursor: default; }
   .machines .name { font-size: .88rem; }
