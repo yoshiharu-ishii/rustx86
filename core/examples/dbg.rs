@@ -317,8 +317,14 @@ fn info(m: &Machine) {
     // モードと、その根拠。保護モードで死ぬときの手掛かりは大抵ここにある
     if c.pe() {
         println!(
-            "mode=protected  CR0={:08x}  GDTR={:08x}+{:04x}  IDTR={:08x}+{:04x}",
-            c.cr0, c.gdtr_base, c.gdtr_limit, c.idtr_base, c.idtr_limit
+            "mode=protected (CPL={})  CR0={:08x}  GDTR={:08x}+{:04x}  IDTR={:08x}+{:04x}  TR={:04x}",
+            c.cpl(),
+            c.cr0,
+            c.gdtr_base,
+            c.gdtr_limit,
+            c.idtr_base,
+            c.idtr_limit,
+            c.tr_sel
         );
         for (name, i) in [("CS", CS), ("DS", DS), ("SS", SS)] {
             let h = &c.hidden[i];

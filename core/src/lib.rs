@@ -415,6 +415,9 @@ impl Machine {
         w.u16(self.cpu.gdtr_limit);
         w.u32(self.cpu.idtr_base);
         w.u16(self.cpu.idtr_limit);
+        w.u16(self.cpu.tr_sel);
+        w.u32(self.cpu.tr_base);
+        w.u32(self.cpu.tr_limit);
         for h in self.cpu.hidden {
             w.u32(h.base);
             w.u32(h.limit);
@@ -470,6 +473,9 @@ impl Machine {
         m.cpu.gdtr_limit = r.u16()?;
         m.cpu.idtr_base = r.u32()?;
         m.cpu.idtr_limit = r.u16()?;
+        m.cpu.tr_sel = r.u16()?;
+        m.cpu.tr_base = r.u32()?;
+        m.cpu.tr_limit = r.u32()?;
         for i in 0..6 {
             m.cpu.hidden[i] = cpu::SegHidden {
                 base: r.u32()?,
