@@ -67,6 +67,8 @@ pub const ES: usize = 0;
 pub const CS: usize = 1;
 pub const SS: usize = 2;
 pub const DS: usize = 3;
+pub const FS: usize = 4;
+pub const GS: usize = 5;
 
 // FLAGS
 pub const CF: u32 = 1 << 0;
