@@ -81,6 +81,15 @@ const CSS = `
                   min-height: 0; height: calc(100vh - 24px); overflow: auto;
                   z-index: 9999; border: 1px solid #30363d; border-radius: 8px;
                   box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+  /* 最小化: ヘッダ (タイトル+状態+操作ボタン) だけ残して畳む。
+     裏の画面を覗きたいとき用。操作ボタンは残るので畳んだまま Step もできる */
+  .rx-dbg.panel.min { height: auto; overflow: hidden; }
+  .rx-dbg.panel.min section, .rx-dbg.panel.min .why { display: none; }
+  /* 左端のリサイズつまみ。右固定なので、掴んで左へ引くと広がる */
+  .rx-dbg .resize { position: absolute; left: -3px; top: 0; width: 8px; height: 100%;
+                    cursor: ew-resize; }
+  .rx-dbg .resize:hover { background: #2563eb44; }
+  .rx-dbg .hbtn { padding: 2px 8px; margin-left: 4px; }
   .rx-dbg .close { margin-left: auto; }
 `;
 
@@ -91,6 +100,7 @@ const HTML = `
     <div class="row">
       <h2 style="margin:0">rustx86 debugger</h2>
       <span class="state" id="rxState">—</span>
+      <button class="hbtn" id="rxMin" title="最小化 (裏の画面を覗く)">–</button>
       <button class="close" id="rxClose" hidden>Close</button>
     </div>
     <div class="row" style="margin-top:8px">
@@ -128,6 +138,20 @@ const HTML = `
   </section>
 
   <section>
+    <h2>Memory</h2>
+    <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
+      キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
+      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
+    <div class="row">
+      <input id="rxMa" value="0x400">
+      <input id="rxMl" value="256" style="width:5em">
+      <label class="note" style="margin:0"><input type="checkbox" id="rxLive"
+        checked style="width:auto"> live</label>
+    </div>
+    <pre id="rxMem" style="margin-top:6px; max-height:16em; overflow:auto"></pre>
+  </section>
+
+  <section>
     <h2>Watchpoints</h2>
     <p class="note">機械を止めて、<strong>どの命令がやったか</strong>まで言う。</p>
     <div class="row">
@@ -160,19 +184,6 @@ const HTML = `
     <pre id="rxTrace" style="margin-top:6px; max-height:11em; overflow:auto"></pre>
   </section>
 
-  <section class="grow">
-    <h2>Memory</h2>
-    <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
-      キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
-      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
-    <div class="row">
-      <input id="rxMa" value="0x400">
-      <input id="rxMl" value="256" style="width:5em">
-      <label class="note" style="margin:0"><input type="checkbox" id="rxLive"
-        checked style="width:auto"> live</label>
-    </div>
-    <pre id="rxMem" style="margin-top:6px"></pre>
-  </section>
 `;
 
 /**
@@ -287,6 +298,7 @@ export class Debugger {
       this.root.classList.add('panel');
       this.$('rxClose').hidden = false;
       this.$('rxClose').onclick = () => this.hide();
+      this.setupPanelControls();
     }
     // 開いている間は命令数を数えさせる。見張るものが無いと元締めが切れて
     // **命令数が0のまま**になり、何も壊れていないのに壊れて見える
@@ -305,6 +317,39 @@ export class Debugger {
     this.root = null;
     if (this.win && !this.win.closed) this.win.close();
     this.win = null;
+  }
+
+  /** ページ内パネルだけの操作: 最小化 と 横幅リサイズ */
+  setupPanelControls() {
+    // 最小化: ヘッダだけ残して畳む。裏の画面を覗きたいとき。
+    // 操作ボタンはヘッダに残るので、畳んだまま Step も打てる
+    const min = this.$('rxMin');
+    min.onclick = () => {
+      const on = this.root.classList.toggle('min');
+      min.textContent = on ? '□' : '–';
+      min.title = on ? '元に戻す' : '最小化 (裏の画面を覗く)';
+    };
+    // 左端のつまみで横幅を変える。右固定なので掴んで左へ引くと広がる。
+    // 画面を覆いすぎるときは右へ引いて縮める
+    const grip = this.doc.createElement('div');
+    grip.className = 'resize';
+    this.root.appendChild(grip);
+    grip.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = this.root.getBoundingClientRect().width;
+      const move = (ev) => {
+        // 左へ動かす (clientXが減る) と広がる
+        const w = Math.max(300, Math.min(900, startW + (startX - ev.clientX)));
+        this.root.style.width = w + 'px';
+      };
+      const up = () => {
+        this.doc.removeEventListener('mousemove', move);
+        this.doc.removeEventListener('mouseup', up);
+      };
+      this.doc.addEventListener('mousemove', move);
+      this.doc.addEventListener('mouseup', up);
+    });
   }
 
   /** 中身を組み立てる。**子ウインドウかページ内かをここは知らない** */
