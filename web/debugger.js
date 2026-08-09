@@ -83,7 +83,9 @@ const CSS = `
                   box-shadow: 0 8px 32px rgba(0,0,0,.5); }
   /* 最小化: ヘッダ (タイトル+状態+操作ボタン) だけ残して畳む。
      裏の画面を覗きたいとき用。操作ボタンは残るので畳んだまま Step もできる */
-  .rx-dbg.panel.min { height: auto; overflow: hidden; }
+  /* インラインで焼いた height (縦リサイズの結果) より勝たせる。
+     でないと畳んでも大きな空パネルが残る */
+  .rx-dbg.panel.min { height: auto !important; overflow: hidden; }
   .rx-dbg.panel.min section, .rx-dbg.panel.min .why { display: none; }
   /* リサイズつまみ。パネルは右上に固定なので、左端=横幅・下端=高さ・
      左下角=両方 を変える */
@@ -96,15 +98,15 @@ const CSS = `
   /* スクロールバーをデバッガの地の色に合わせる。既定の明るいバーが
      ダークなパネルから浮くので */
   .rx-dbg, .rx-dbg pre, .rx-dbg .grow pre {
-    scrollbar-width: thin; scrollbar-color: #30363d transparent;
+    scrollbar-width: thin; scrollbar-color: #5b6673 transparent;
   }
-  .rx-dbg ::-webkit-scrollbar, .rx-dbg::-webkit-scrollbar { width: 10px; height: 10px; }
+  .rx-dbg ::-webkit-scrollbar, .rx-dbg::-webkit-scrollbar { width: 11px; height: 11px; }
   .rx-dbg ::-webkit-scrollbar-track, .rx-dbg::-webkit-scrollbar-track { background: transparent; }
   .rx-dbg ::-webkit-scrollbar-thumb, .rx-dbg::-webkit-scrollbar-thumb {
-    background: #30363d; border-radius: 5px; border: 2px solid #0b0e14;
+    background: #5b6673; border-radius: 5px; border: 2px solid #0b0e14;
   }
   .rx-dbg ::-webkit-scrollbar-thumb:hover, .rx-dbg::-webkit-scrollbar-thumb:hover {
-    background: #45505f;
+    background: #79879a;
   }
   .rx-dbg .hbtn { padding: 2px 8px; margin-left: 4px; }
   .rx-dbg .close { margin-left: auto; }
