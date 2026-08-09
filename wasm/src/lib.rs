@@ -245,7 +245,7 @@ impl Emulator {
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
                "bytes":"{}","asm":"{}","trap":"{}","instr":{},"executed":{},"halted":{},"lin":{},
                "pe":{},"cr0":{},"cpl":{},"pg":{},"cr2":{},"cr3":{},"gdtrBase":{},"gdtrLimit":{},"idtrBase":{},"idtrLimit":{},"trSel":{},
-               "cs":{},"ds":{},"ss":{}}}"#,
+               "cs":{},"ds":{},"ss":{},"machine":"{}","ramMb":{}}}"#,
             c.regs
                 .iter()
                 .map(|v| v.to_string())
@@ -280,6 +280,8 @@ impl Emulator {
             seg(CS),
             seg(DS),
             seg(SS),
+            self.m.profile.name,
+            self.m.ram_bytes() / (1 << 20),
         )
     }
 
