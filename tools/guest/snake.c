@@ -1,14 +1,20 @@
 /* snake — シリアル端末で動く古典スネーク。
  *
  * rustx86 の Linux ゲスト用に、依存を libc だけに絞った1ファイル。
- * 画面は ANSI エスケープ、入力は termios の生モード。
+ *
+ * ## 描画は差分だけ
+ *
+ * シリアルは細い管である (エミュレータなら尚更)。毎フレーム全画面を
+ * 流すと1.4KB×毎tickで管が詰まるので、**動いたマスだけ**書く:
+ * 蛇の頭 (書く)・尻尾 (消す)・餌 (出たとき) — 1フレーム数十バイトで済む。
+ * 枠は起動時に1回だけ描く。80年代のBBSドアゲームと同じ設計である。
+ *
  * ビルド (i386静的): gcc -m32 -static -O2 -o snake snake.c
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <termios.h>
 #include <sys/select.h>
 #include <time.h>
@@ -21,7 +27,7 @@ static struct termios saved;
 
 static void restore(void) {
     tcsetattr(0, TCSANOW, &saved);
-    printf("\x1b[?25h\x1b[0m\x1b[2J\x1b[H");
+    printf("\x1b[?25h\x1b[0m\x1b[%d;1H\n", H + 3);
     fflush(stdout);
 }
 
@@ -46,40 +52,37 @@ static int key(void) {
     return -1;
 }
 
+/* 盤面座標 (0..W-1, 0..H-1) のマスに1文字置く。枠のぶん +2/+2 ずらす */
+static void put(int x, int y, char c) {
+    printf("\x1b[%d;%dH%c", y + 2, x + 2, c);
+}
+
 int main(void) {
     int sx[MAXLEN], sy[MAXLEN], len = 3, dx = 1, dy = 0;
-    int fx, fy, score = 0, i, c, head = 0;
-    unsigned seed = (unsigned)time(0);
+    int fx, fy, score = 0, i, c;
 
     raw();
-    printf("\x1b[2J\x1b[?25l");
+    /* 枠は1回だけ描く */
+    printf("\x1b[2J\x1b[?25l\x1b[H+");
+    for (i = 0; i < W; i++) putchar('-');
+    printf("+  score 0\r\n");
+    for (i = 0; i < H; i++) {
+        printf("|\x1b[%d;%dH|\r\n", i + 2, W + 2);
+    }
+    printf("+");
+    for (i = 0; i < W; i++) putchar('-');
+    printf("+  hjkl/wasd で移動、q で終了");
+
     for (i = 0; i < len; i++) { sx[i] = W / 2 - i; sy[i] = H / 2; }
-    srand(seed);
-    fx = rand() % (W - 2) + 1; fy = rand() % (H - 2) + 1;
+    for (i = 0; i < len; i++) put(sx[i], sy[i], i ? 'o' : '@');
+    srand((unsigned)time(0));
+    fx = rand() % W; fy = rand() % H;
+    put(fx, fy, '*');
+    fflush(stdout);
 
     for (;;) {
-        /* 枠 */
-        printf("\x1b[H\x1b[1m+");
-        for (i = 0; i < W; i++) putchar('-');
-        printf("+\x1b[0m  score %d\r\n", score);
-        {
-            static char grid[H][W + 1];
-            int r;
-            memset(grid, ' ', sizeof grid);
-            grid[fy][fx] = '*';
-            for (i = 0; i < len; i++)
-                grid[sy[i]][sx[i]] = i ? 'o' : '@';
-            for (r = 0; r < H; r++) {
-                grid[r][W] = 0;
-                printf("\x1b[1m|\x1b[0m%s\x1b[1m|\x1b[0m\r\n", grid[r]);
-            }
-        }
-        printf("\x1b[1m+");
-        for (i = 0; i < W; i++) putchar('-');
-        printf("+\x1b[0m  hjkl/wasd で移動、q で終了\r\n");
-        fflush(stdout);
-
-        usleep(120000);
+        struct timespec ts = {0, 120 * 1000 * 1000};
+        nanosleep(&ts, 0);
         c = key();
         if (c == 'q') break;
         if ((c == 'h' || c == 'a') && dx != 1) { dx = -1; dy = 0; }
@@ -87,23 +90,28 @@ int main(void) {
         if ((c == 'k' || c == 'w') && dy != 1) { dx = 0; dy = -1; }
         if ((c == 'j' || c == 's') && dy != -1) { dx = 0; dy = 1; }
 
-        /* 進む: 尾から詰める */
-        for (i = len - 1; i > 0; i--) { sx[i] = sx[i - 1]; sy[i] = sy[i - 1]; }
-        sx[0] += dx; sy[0] += dy;
-
-        /* 壁と自分 */
-        if (sx[0] < 0 || sx[0] >= W || sy[0] < 0 || sy[0] >= H) break;
+        int nx = sx[0] + dx, ny = sy[0] + dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) break;
         for (i = 1; i < len; i++)
-            if (sx[i] == sx[0] && sy[i] == sy[0]) goto dead;
+            if (sx[i] == nx && sy[i] == ny) goto dead;
 
-        if (sx[0] == fx && sy[0] == fy) {
+        /* 差分: 旧頭を胴に、新頭を描き、伸びないなら尻尾を消す */
+        put(sx[0], sy[0], 'o');
+        if (nx == fx && ny == fy) {
             score += 10;
             if (len < MAXLEN) len++;
-            sx[len - 1] = sx[len - 2]; sy[len - 1] = sy[len - 2];
-            fx = rand() % (W - 2) + 1; fy = rand() % (H - 2) + 1;
+            printf("\x1b[1;%dH%-6d", W + 11, score);
+            fx = rand() % W; fy = rand() % H;
+            put(fx, fy, '*');
+        } else {
+            put(sx[len - 1], sy[len - 1], ' ');
         }
+        for (i = len - 1; i > 0; i--) { sx[i] = sx[i - 1]; sy[i] = sy[i - 1]; }
+        sx[0] = nx; sy[0] = ny;
+        put(nx, ny, '@');
+        fflush(stdout);
     }
 dead:
-    printf("\x1b[%d;%dH\x1b[1;31m GAME OVER — score %d \x1b[0m\r\n", H / 2 + 1, W / 2 - 8, score);
+    printf("\x1b[%d;%dH GAME OVER — score %d ", H / 2 + 1, W / 2 - 8, score);
     return 0;
 }
