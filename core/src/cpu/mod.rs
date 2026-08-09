@@ -22,8 +22,8 @@ pub mod string;
 
 use alu::{alu16, alu8, alu_w, condition};
 use operand::{
-    fetch16, fetch8, fetch_w, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8, read_op_w,
-    write_op16, write_op8, write_op_w, Operand,
+    fetch16, fetch8, fetch_w, modrm, pop16, pop32, pop_w, push16, push32, push_w, read_op16,
+    read_op8, read_op_w, write_op16, write_op8, write_op_w, Operand,
 };
 use shift::shift_rot;
 
@@ -71,6 +71,9 @@ pub struct Cpu {
     /// GDTR (LGDTで積む)。記述子表の場所と大きさ
     pub gdtr_base: u32,
     pub gdtr_limit: u16,
+    /// IDTR (LIDTで積む)。保護モードの割り込みはIVTではなくこの表を引く
+    pub idtr_base: u32,
+    pub idtr_limit: u16,
     /// セグメントの**隠しレジスタ** (実機と同じ構造)。
     ///
     /// 実機の386は、セグメントレジスタをロードした瞬間に記述子の中身
@@ -120,6 +123,8 @@ impl Cpu {
             cr0: 0,
             gdtr_base: 0,
             gdtr_limit: 0,
+            idtr_base: 0,
+            idtr_limit: 0,
             hidden: [SegHidden::real(0); 6],
         }
     }
@@ -868,7 +873,8 @@ pub fn step(m: &mut Machine) {
             // LEA: セグメントを適用しない実効オフセットを取る
             let (reg, rm) = modrm(m, &d);
             match rm {
-                Operand::Mem { off, .. } => m.cpu.set_reg16(reg, off),
+                // オフセットの幅はオペランドサイズに従う (32bitなら EAX 等へ全桁)
+                Operand::Mem { off, .. } => m.cpu.set_reg_w(reg, off, d.opsize32),
                 Operand::Reg(_) => panic!("LEA with register operand"),
             }
         }
@@ -1131,7 +1137,10 @@ pub fn step(m: &mut Machine) {
                     m.cpu.sregs[CS] = seg;
                     m.cpu.ip = off;
                 }
-                _ => panic!("GRP5 /{kind} not implemented"),
+                _ => panic!(
+                    "GRP5 /{kind} not implemented at {:04x}:{:04x}",
+                    m.cpu.sregs[CS], start_ip
+                ),
             }
         }
 
@@ -1207,6 +1216,12 @@ pub fn step(m: &mut Machine) {
                             let base = m.read32(addr.wrapping_add(2));
                             m.cpu.gdtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
                         }
+                        // LIDT: 形はLGDTと同じ
+                        (3, Operand::Mem { addr, .. }) => {
+                            m.cpu.idtr_limit = m.read16(*addr);
+                            let base = m.read32(addr.wrapping_add(2));
+                            m.cpu.idtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
+                        }
                         _ => panic!(
                             "unimplemented 0f 01 /{reg} at {:04x}:{:04x}",
                             m.cpu.sregs[CS], start_ip
@@ -1238,6 +1253,13 @@ pub fn step(m: &mut Machine) {
                             }
                         }
                     }
+                }
+                // ud2: 「わざと#UDを起こす」ための公式の命令。
+                // 未実装オペコードの即panicとは別物 — こちらは**仕様どおりの例外**
+                0x0B => {
+                    // フォールトは**その命令自身を指すIP**で配送する (再実行できる形)
+                    m.cpu.ip = start_ip;
+                    interrupt(m, 6);
                 }
                 _ => panic!(
                     "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
@@ -1271,6 +1293,14 @@ pub fn interrupt(m: &mut Machine, n: u8) {
         m.int_recent.pop_front();
     }
     m.int_recent.push_back((n, cs, ip));
+
+    // ここからモードで作法が分かれる。
+    if m.cpu.pe() {
+        interrupt_protected(m, n);
+        return;
+    }
+
+    // --- リアルモード: IVT (0番地の 4バイト×256) を引く ---
     let f = (m.cpu.flags as u16) | 0xF002;
     push16(m, f);
     // ハンドラ実行中は多重割り込みとシングルステップを止める。
@@ -1288,8 +1318,68 @@ pub fn interrupt(m: &mut Machine, n: u8) {
     m.cpu.sregs[CS] = m.read16(vec + 2);
 }
 
+/// 保護モードの割り込み配送。IVTではなく**IDTのゲート記述子**を引く。
+///
+/// ゲートは「どのセグメントの、どこへ、どの作法で」を全部言う8バイト:
+///
+/// ```text
+///   dw offset[15:0]   dw selector   db 0   db type   dw offset[31:16]
+/// ```
+///
+/// type 0xE = 割り込みゲート (IFを落として入る) / 0xF = トラップゲート
+/// (IFはそのまま)。この1bitの違いが「割り込みハンドラは再入しない」を
+/// ハードウェアで作っている。
+///
+/// まだやらないこと (リング0だけの世界なので恒真):
+/// DPLチェック、スタック切り替え (TSS)、エラーコードのpush
+fn interrupt_protected(m: &mut Machine, n: u8) {
+    let off = n as u32 * 8;
+    if off + 7 > m.cpu.idtr_limit as u32 {
+        panic!(
+            "vector {n:#04x} is beyond IDT limit {:#06x}",
+            m.cpu.idtr_limit
+        );
+    }
+    let a = m.cpu.idtr_base.wrapping_add(off);
+    let lo = m.read32(a);
+    let hi = m.read32(a.wrapping_add(4));
+    let ty = ((hi >> 8) & 0x1F) as u8;
+    if hi & 0x8000 == 0 {
+        panic!("vector {n:#04x}: gate not present");
+    }
+    let (sel, dest) = ((lo >> 16) as u16, (lo & 0xFFFF) | (hi & 0xFFFF_0000));
+    match ty {
+        0x0E | 0x0F => {}
+        _ => panic!("vector {n:#04x}: unimplemented gate type {ty:#04x}"),
+    }
+
+    // EFLAGS, CS, EIP を32bitで積む (32bitゲート)
+    push32(m, m.cpu.flags);
+    push32(m, m.cpu.sregs[CS] as u32);
+    push32(m, m.cpu.ip as u32);
+    if ty == 0x0E {
+        // 割り込みゲートだけがIFを落とす
+        m.cpu.set_flag(IF, false);
+    }
+    m.cpu.set_flag(TF, false);
+    load_seg(m, CS, sel);
+    m.cpu.ip = dest as u16;
+}
+
 /// 割り込みからの復帰。IP・CS・FLAGS をこの順で取り出す
 pub fn iret(m: &mut Machine) {
+    // 保護モード (32bitゲートで入った) なら EIP, CS, EFLAGS を32bitで取り出す。
+    // 積む側 (interrupt_protected) と対でなければスタックが腐る
+    if m.cpu.pe() {
+        let ip = pop32(m);
+        let sel = pop32(m) as u16;
+        let f = pop32(m);
+        load_seg(m, CS, sel);
+        m.cpu.ip = ip as u16;
+        // 復元するフラグの範囲はリアルモードと同じ (AC等の上位はまだ持たない)
+        m.cpu.flags = (f & 0x0FD5) | 0x0002;
+        return;
+    }
     m.cpu.ip = pop16(m);
     m.cpu.sregs[CS] = pop16(m);
     let f = pop16(m);

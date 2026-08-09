@@ -277,7 +277,7 @@ fn why(m: &Machine, s: &Stop) -> String {
 
 fn show_where(m: &Machine) {
     let cpu = &m.cpu;
-    let lin = (cpu.sregs[rustx86_core::cpu::CS] as u32) << 4 | cpu.ip as u32;
+    let lin = cpu.lin(rustx86_core::cpu::CS, cpu.ip as u32);
     let mut b = String::new();
     for i in 0..8 {
         b.push_str(&format!("{:02x} ", m.read8(lin.wrapping_add(i))));
@@ -317,8 +317,8 @@ fn info(m: &Machine) {
     // モードと、その根拠。保護モードで死ぬときの手掛かりは大抵ここにある
     if c.pe() {
         println!(
-            "mode=protected  CR0={:08x}  GDTR={:08x}+{:04x}",
-            c.cr0, c.gdtr_base, c.gdtr_limit
+            "mode=protected  CR0={:08x}  GDTR={:08x}+{:04x}  IDTR={:08x}+{:04x}",
+            c.cr0, c.gdtr_base, c.gdtr_limit, c.idtr_base, c.idtr_limit
         );
         for (name, i) in [("CS", CS), ("DS", DS), ("SS", SS)] {
             let h = &c.hidden[i];
