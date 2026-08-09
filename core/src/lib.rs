@@ -787,6 +787,13 @@ impl Machine {
             w.u32(d);
         }
         w.u16(self.cpu.fpu_cw); // v7
+        w.u32(self.cpu.mxcsr); // v7
+        for x in self.cpu.xmm {
+            w.u32(x as u32);
+            w.u32((x >> 32) as u32);
+            w.u32((x >> 64) as u32);
+            w.u32((x >> 96) as u32);
+        }
         w.u32(self.cpu.tsc as u32); // v7 (下位のみ。较正はやり直せるので十分)
         w.u32((self.cpu.tsc >> 32) as u32);
         for h in self.cpu.hidden {
@@ -855,6 +862,14 @@ impl Machine {
             m.cpu.dr[i] = r.u32()?;
         }
         m.cpu.fpu_cw = r.u16()?; // v7
+        m.cpu.mxcsr = r.u32()?; // v7
+        for i in 0..8 {
+            let a = r.u32()? as u128;
+            let b = r.u32()? as u128;
+            let c = r.u32()? as u128;
+            let d = r.u32()? as u128;
+            m.cpu.xmm[i] = a | b << 32 | c << 64 | d << 96;
+        }
         m.cpu.tsc = r.u32()? as u64 | ((r.u32()? as u64) << 32);
         for i in 0..6 {
             m.cpu.hidden[i] = cpu::SegHidden {

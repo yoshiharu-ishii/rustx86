@@ -34,6 +34,7 @@ pub mod interrupt;
 pub mod operand;
 pub mod segment;
 pub mod shift;
+pub mod sse;
 pub mod string;
 pub mod twobyte;
 
@@ -157,6 +158,11 @@ pub struct Cpu {
     pub tr_sel: u16,
     pub tr_base: u32,
     pub tr_limit: u32,
+    /// XMMレジスタ (SSE/SSE2)。整数演算の128bit器として使われるのが
+    /// 現代の主用途 — memcpyもstrlenも、gccはここで束ねて回す
+    pub xmm: [u128; 8],
+    /// MXCSR (SSEの制御/状態)。丸めモード等。既定 0x1F80
+    pub mxcsr: u32,
     /// セグメントの**隠しレジスタ** (実機と同じ構造)。
     ///
     /// 実機の386は、セグメントレジスタをロードした瞬間に記述子の中身
@@ -195,6 +201,8 @@ impl Cpu {
             tr_sel: 0,
             tr_base: 0,
             tr_limit: 0,
+            xmm: [0; 8],
+            mxcsr: 0x1F80,
             hidden: [SegHidden::real(0); 6],
         }
     }

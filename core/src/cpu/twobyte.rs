@@ -253,8 +253,16 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.regs[AX] = 0x0633;
                     m.cpu.regs[BX] = 0;
                     m.cpu.regs[CX] = 0;
-                    // FPU|TSC|CX8|CMOV
-                    m.cpu.regs[DX] = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15);
+                    // FPU|TSC|CX8|CMOV|FXSR|SSE|SSE2。
+                    // FXSRを名乗る = カーネルはFXSAVE/FXRSTORでXMMを退避し始める。
+                    // 名乗った分は全部実装してある (sse.rs)
+                    m.cpu.regs[DX] = (1 << 0)
+                        | (1 << 4)
+                        | (1 << 8)
+                        | (1 << 15)
+                        | (1 << 24)
+                        | (1 << 25)
+                        | (1 << 26);
                 }
                 _ => {
                     m.cpu.regs[AX] = 0;
@@ -479,9 +487,20 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             m.cpu.ip = start_ip;
             interrupt(m, 6);
         }
+        // 0F AE: FXSAVE/FXRSTOR/MXCSR/フェンス (SSEの管理命令群)
+        0xAE => {
+            if !super::sse::grp_0fae(m, d) {
+                m.cpu.ip = start_ip;
+                m.trap("unimplemented 0f ae variant".into());
+            }
+        }
         _ => {
-            let _ = start_ip;
-            m.trap(format!("unimplemented opcode 0f {op2:#04x}"));
+            // 残りはSSE/SSE2の空間を試す。プレフィクス (66/F2/F3) が
+            // 命令選択子に化けるデコードは sse.rs が知っている
+            if !super::sse::step_sse(m, d, op2) {
+                m.cpu.ip = start_ip;
+                m.trap(format!("unimplemented opcode 0f {op2:#04x}"));
+            }
         }
     }
 }
