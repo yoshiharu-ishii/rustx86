@@ -12,7 +12,41 @@ pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
 pub use cpu::Cpu;
 pub use disk::Disk;
 
-pub const MEM_SIZE: usize = 1 << 20; // リアルモード 1MB
+/// 16bit機の既定RAM。8086のアドレスバスは20本なので 1MB。
+/// マシンプロファイルを渡さない `Machine::new()` はこれを使う
+pub const MEM_SIZE: usize = 1 << 20;
+
+/// マシンの仕様。**いま割れるものだけ持つ** — RAMサイズ。
+///
+/// 装置構成 (NE2000 / virtio) はまだマシンごとに割れないので入れない
+/// (取りうる値が1つの抽象は投機である)。起動方法はメソッド呼び出し
+/// (`load_boot_sector` / 将来の bzImage ロード) で表せるので、これも入れない。
+/// 本当に割れるのは Linux が来て RAM が 1MB に収まらなくなる、この一点だった。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineProfile {
+    pub name: &'static str,
+    /// RAMのバイト数。任意でよい。物理アドレスがこれを超えたら**折り返さず未マップ**
+    /// (実機でRAMを超えた番地がチップセットに落ちるのと同じ)。8086の1MB折り返しは
+    /// これとは別で、`cpu::lin` がリアルモードのアドレスを 0xF_FFFF に丸めている
+    pub ram_bytes: usize,
+}
+
+impl MachineProfile {
+    /// 16bit機 (ELKS / FreeDOS)。1MB
+    pub const PC_16BIT: Self = Self {
+        name: "16bit PC",
+        ram_bytes: MEM_SIZE,
+    };
+
+    /// 32bit PC (Linux用)。`mb` MB。任意のMB数を取れる (物理は折り返さず、
+    /// RAMを超えた番地は未マップになるので2の冪でなくてよい)
+    pub fn pc_32bit(mb: usize) -> Self {
+        Self {
+            name: "32bit PC",
+            ram_bytes: mb << 20,
+        }
+    }
+}
 
 /// 何命令ごとに装置を進めるか。
 ///
@@ -85,6 +119,8 @@ pub struct Machine {
     pub int_first: Vec<(u16, u32)>,
     /// 直近の割り込み (ベクタ, CS, IP)。**panic直前に何が起きたかはここに出る**
     pub int_recent: std::collections::VecDeque<(u8, u16, u32)>,
+    /// このマシンの仕様 (RAMサイズなど)。覗き窓に出す
+    pub profile: MachineProfile,
     /// 外から覗くための仕掛け。**機械の状態ではない**のでスナップショットには入れない
     pub dbg: debug::Debug,
     /// 未実装にぶつかって止まった理由。
@@ -115,10 +151,16 @@ impl Default for Machine {
 }
 
 impl Machine {
+    /// 既定の 16bit機 (1MB)。既存の呼び出し元はこれで従来どおり
     pub fn new() -> Self {
+        Self::with_profile(MachineProfile::PC_16BIT)
+    }
+
+    /// 仕様を指定して作る。RAMサイズがプロファイルで決まる
+    pub fn with_profile(profile: MachineProfile) -> Self {
         Self {
             cpu: Cpu::new(),
-            mem: vec![0; MEM_SIZE],
+            mem: vec![0; profile.ram_bytes],
             pending_irq: None,
             devices: Devices::new(),
             unhandled_io: std::collections::BTreeSet::new(),
@@ -132,10 +174,30 @@ impl Machine {
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],
             int_recent: std::collections::VecDeque::with_capacity(33),
+            profile,
             dbg: debug::Debug::new(),
             trap_ip: 0,
             trap: None,
             halted: false,
+        }
+    }
+
+    /// RAMのバイト数 (= 実際の確保量)
+    pub fn ram_bytes(&self) -> usize {
+        self.mem.len()
+    }
+
+    /// 物理アドレスへ書く (変換しない)。テストや装置初期化用
+    pub fn write_phys8(&mut self, pa: u32, val: u8) {
+        if let Some(b) = self.mem.get_mut(pa as usize) {
+            *b = val;
+        }
+        // 超えたら捨てる (未マップへの書き込みは実機でも消える)
+    }
+
+    pub fn write_phys32(&mut self, pa: u32, val: u32) {
+        for (i, b) in val.to_le_bytes().iter().enumerate() {
+            self.write_phys8(pa.wrapping_add(i as u32), *b);
         }
     }
 
@@ -218,8 +280,10 @@ impl Machine {
     /// 物理アドレスから読む (変換しない)。ページテーブルの歩きと、
     /// 物理番地で語る装置・テストが使う
     pub fn read_phys8(&self, pa: u32) -> u8 {
-        // マスクは「物理RAMの大きさ」。Tier 4 でLinuxを迎えるとき広げる
-        self.mem[(pa as usize) & (MEM_SIZE - 1)]
+        // RAMを超えた番地は未マップ。実機のバスと同じく 0xFF を返す (折り返さない)。
+        // リアルモードのアドレスは cpu::lin が 1MB に丸めてから来るので、
+        // 16bit機 (1MB) でここが 0xFF を返すことはない
+        *self.mem.get(pa as usize).unwrap_or(&0xFF)
     }
 
     pub fn read_phys32(&self, pa: u32) -> u32 {
@@ -274,7 +338,10 @@ impl Machine {
         // 線形→物理。以後の VRAM 判定もデバッガも**物理番地**で語る
         // (VRAMは物理アドレス空間の窓なので、そこに写像された線形から書いても
         //  正しく dirty が立つ)
-        let a = (self.translate(addr) as usize) & (MEM_SIZE - 1);
+        let a = self.translate(addr) as usize;
+        if a >= self.mem.len() {
+            return; // RAMを超えた書き込みは捨てる
+        }
         // デバッガを切っていれば真偽値1つで抜ける。**最も回数の多い経路**なので
         // 見張る番地の集合を引く前に元締めで落とす
         if self.dbg.on && self.dbg.mem_write.contains(&(a as u32)) {
@@ -582,13 +649,21 @@ impl Machine {
         m.devices.cmos.load(&mut r)?;
         m.devices.crtc.load(&mut r)?;
 
+        // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
+        // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
+        // 別マシンとして復元したことを覗き窓に映すため profile も合わせる
         let mem = r.rle()?;
-        if mem.len() != MEM_SIZE {
-            return Err(format!(
-                "メモリの大きさが合わない ({} != {MEM_SIZE})",
-                mem.len()
-            ));
+        if !mem.len().is_power_of_two() {
+            return Err(format!("RAMサイズが2の冪でない ({})", mem.len()));
         }
+        m.profile = if mem.len() == MEM_SIZE {
+            MachineProfile::PC_16BIT
+        } else {
+            MachineProfile {
+                name: "32bit PC",
+                ram_bytes: mem.len(),
+            }
+        };
         m.mem = mem;
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)
