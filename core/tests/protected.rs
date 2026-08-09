@@ -273,3 +273,51 @@ fn リング0の受け手ではスタックがtssのものに差し替わる() {
         "ESPがTSSのESP0基準でない"
     );
 }
+
+// ---- ページング (asm/pm_paging.asm) ----
+
+const PAGING_IMAGE: &[u8] = include_bytes!("../../asm/pm_paging.bin");
+
+fn boot_paging() -> Machine {
+    let mut m = Machine::new();
+    m.load_boot_sector(PAGING_IMAGE).unwrap();
+    m
+}
+
+#[test]
+fn 高位の仮想番地が物理0の別名になる() {
+    let mut m = boot_paging();
+    run(&mut m, 100_000);
+    assert!(m.halted, "HLTに到達していない");
+    // 0xC0000500 への書き込みが物理 0x500 に落ちた
+    assert_eq!(
+        m.read_phys32(0x500),
+        0xCAFE_F00D,
+        "別名を通じて物理0x500に書けていない"
+    );
+    // 低位から同じ物理を読めた
+    assert_eq!(
+        m.read_phys32(0x600),
+        0xCAFE_F00D,
+        "恒等写像で読み戻せていない"
+    );
+}
+
+#[test]
+fn ページングが有効になっている() {
+    let mut m = boot_paging();
+    run(&mut m, 100_000);
+    assert!(m.cpu.cr0 & 0x8000_0000 != 0, "CR0.PGが立っていない");
+    assert_eq!(
+        m.cpu.cr3 & !0xFFF,
+        0x2000,
+        "CR3がページディレクトリを指していない"
+    );
+    // 変換関数を直接叩く: 0xC0000500 → 物理 0x500
+    assert_eq!(m.translate(0xC000_0500), 0x500, "変換が別名になっていない");
+    assert_eq!(
+        m.translate(0x0000_1234),
+        0x1234,
+        "恒等写像の変換が壊れている"
+    );
+}
