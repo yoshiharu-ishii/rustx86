@@ -100,4 +100,64 @@ fn 保護モードの状態はスナップショットで往復する() {
     assert!(n.cpu.seg_is32(cpu::CS), "Dビットが失われた");
     assert_eq!(n.cpu.gdtr_base, m.cpu.gdtr_base);
     assert_eq!(n.read32(0x500), 0x32B1_7600);
+
+    // IDTRも往復する (v3)
+    let mut m = boot_idt();
+    run(&mut m, 10_000);
+    let saved = m.save_state();
+    let mut n = Machine::new();
+    n.load_state(&saved).unwrap();
+    assert_eq!(n.cpu.idtr_base, m.cpu.idtr_base, "IDTRが失われた");
+    assert_eq!(n.cpu.idtr_limit, m.cpu.idtr_limit);
+}
+
+// ---- IDTと例外 (asm/pm_idt.asm) ----
+
+const IDT_IMAGE: &[u8] = include_bytes!("../../asm/pm_idt.bin");
+
+fn boot_idt() -> Machine {
+    let mut m = Machine::new();
+    m.load_boot_sector(IDT_IMAGE).unwrap();
+    m
+}
+
+#[test]
+fn ソフトウェア割り込みがゲートを通ってiretdで帰る() {
+    let mut m = boot_idt();
+    run(&mut m, 10_000);
+    assert!(m.halted, "HLTに到達していない");
+    // handler が書いた目印と、iretd で戻った直後に書いた目印の両方が要る
+    assert_eq!(
+        m.read32(0x504),
+        0x50F7_1234,
+        "int 7 のhandlerが走っていない"
+    );
+    assert_eq!(
+        m.read32(0x508),
+        0xBAC2_5AFE,
+        "iretd で元の場所に戻れていない"
+    );
+}
+
+#[test]
+fn ud2が例外としてidt経由で配送される() {
+    let mut m = boot_idt();
+    run(&mut m, 10_000);
+    assert!(m.halted);
+    assert_eq!(m.read32(0x500), 0x0BAD_0F0B, "#UD のhandlerが走っていない");
+    // フォールトから iretd で戻っていたら 0x50C に死の目印が書かれている
+    assert_eq!(
+        m.read32(0x50C),
+        0,
+        "ud2 の後ろへ落ちてきている (戻ってはいけない)"
+    );
+}
+
+#[test]
+fn 保護モードの割り込みはidtrを見る() {
+    let mut m = boot_idt();
+    run(&mut m, 10_000);
+    assert!(m.cpu.pe());
+    assert_ne!(m.cpu.idtr_base, 0, "LIDTが積まれていない");
+    assert_eq!(m.cpu.idtr_limit, 8 * 8 - 1);
 }

@@ -201,7 +201,8 @@ impl Emulator {
     pub fn cpu_json(&self) -> String {
         use rustx86_core::cpu::*;
         let c = &self.m.cpu;
-        let lin = (c.sregs[CS] as u32) << 4 | c.ip as u32;
+        // 保護モードでは sel<<4 は嘘の番地になる。隠しレジスタ経由で引く
+        let lin = c.lin(CS, c.ip as u32);
         let bytes: Vec<String> = (0..8)
             .map(|i| format!("{:02x}", self.m.read8(lin.wrapping_add(i))))
             .collect();
@@ -231,7 +232,7 @@ impl Emulator {
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
                "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{},
-               "pe":{},"cr0":{},"gdtrBase":{},"gdtrLimit":{},
+               "pe":{},"cr0":{},"gdtrBase":{},"gdtrLimit":{},"idtrBase":{},"idtrLimit":{},
                "cs":{},"ds":{},"ss":{}}}"#,
             c.regs
                 .iter()
@@ -255,6 +256,8 @@ impl Emulator {
             c.cr0,
             c.gdtr_base,
             c.gdtr_limit,
+            c.idtr_base,
+            c.idtr_limit,
             seg(CS),
             seg(DS),
             seg(SS),

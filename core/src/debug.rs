@@ -218,12 +218,13 @@ impl Debug {
     /// **実行前**に判定するので、止まった状態でその命令を見られる。
     ///
     /// 止まっている (HLT) 間は呼ばれない。呼ぶと同じ番地で永久に止まるため
-    pub(crate) fn before_exec(&mut self, cs: u16, ip: u16) -> bool {
+    pub(crate) fn before_exec(&mut self, lin: u32, cs: u16, ip: u16) -> bool {
         self.at = (cs, ip);
         if self.code.is_empty() {
             return false;
         }
-        let lin = (cs as u32) << 4 | ip as u32;
+        // 線形アドレスは呼び手が隠しレジスタ経由で計算して渡す。
+        // ここで sel<<4 を計算すると保護モードで嘘になる
         if self.code.contains(&lin) {
             // 再開直後の1回だけ見逃す
             if self.resume_at == Some(lin) {

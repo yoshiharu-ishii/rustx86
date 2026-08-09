@@ -413,6 +413,8 @@ impl Machine {
         w.u32(self.cpu.cr0);
         w.u32(self.cpu.gdtr_base);
         w.u16(self.cpu.gdtr_limit);
+        w.u32(self.cpu.idtr_base);
+        w.u16(self.cpu.idtr_limit);
         for h in self.cpu.hidden {
             w.u32(h.base);
             w.u32(h.limit);
@@ -466,6 +468,8 @@ impl Machine {
         m.cpu.cr0 = r.u32()?;
         m.cpu.gdtr_base = r.u32()?;
         m.cpu.gdtr_limit = r.u16()?;
+        m.cpu.idtr_base = r.u32()?;
+        m.cpu.idtr_limit = r.u16()?;
         for i in 0..6 {
             m.cpu.hidden[i] = cpu::SegHidden {
                 base: r.u32()?,
@@ -614,7 +618,9 @@ impl Machine {
         //     (通すと同じ番地で永久に止まる)
         if self.dbg.on {
             let (cs, ip) = (self.cpu.sregs[cpu::CS], self.cpu.ip);
-            if self.dbg.before_exec(cs, ip) {
+            // 線形アドレスは隠しレジスタ経由。sel<<4 は保護モードで嘘になる
+            let lin = self.cpu.lin(cpu::CS, ip as u32);
+            if self.dbg.before_exec(lin, cs, ip) {
                 self.dbg.instr -= 1; // 実行しなかったので数え戻す
                 return;
             }
@@ -622,7 +628,6 @@ impl Machine {
             // instr との差がそのまま「暇にしていた時間」になる
             self.dbg.executed += 1;
             if self.dbg.trace_cap > 0 {
-                let lin = (cs as u32) << 4 | ip as u32;
                 let mut bytes = [0u8; 5];
                 for (i, b) in bytes.iter_mut().enumerate() {
                     *b = self.read8(lin.wrapping_add(i as u32));
