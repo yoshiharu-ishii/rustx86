@@ -30,7 +30,18 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# 置き場所を自分で探す。リポジトリでは tools/ の親がルートだが、
+# **配布zipではスクリプトがルート直下に居る** — 決め打ちすると展開フォルダの
+# 外に web/ を作ってしまう (Releaseで実際に起きた)。web/ の在り処で判定する
+here=$(cd "$(dirname "$0")" && pwd)
+if [ -d "$here/web" ]; then
+  cd "$here"
+elif [ -d "$here/../web" ]; then
+  cd "$here/.."
+else
+  echo "web/ が見つからない。リポジトリのルートか、配布zipの展開先で実行する" >&2
+  exit 1
+fi
 IMAGES=images
 WEB=web
 WORK=$(mktemp -d)
