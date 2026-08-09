@@ -68,10 +68,20 @@ export const MACHINES = [
   {
     group: '32bit プロテクトモード',
     id: 'linux',
-    label: 'Linux',
-    sub: 'bzImage 直接ロード',
-    status: 'todo',
-    note: 'Tier 4。BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。',
+    label: 'Linux 6.18',
+    sub: 'bzImage + initramfs',
+    // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
+    // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
+    // linux-machine.js (ワーカー)。**選び方と見た目はELKSと同じ**にする。
+    kind: 'linux',
+    status: 'ok',
+    note:
+      'BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。' +
+      'コンソールはシリアル (ttyS0)。シェルまで1〜2分かかる — デコンプレッサ・' +
+      'ページング・ドライバ初期化を全部ソフトウェアでやっているため。' +
+      'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
+    // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
+    // 無いときの案内は linux-machine.js が fetch 失敗時に出す
   },
   {
     group: 'その他',
