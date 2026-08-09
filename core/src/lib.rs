@@ -97,6 +97,11 @@ pub struct Machine {
     pub pending_irq: Option<u8>,
     /// PICに未処理の要求がある印。ベクタはまだ決めない (INTAで決まる)
     pic_service: bool,
+    /// いま「CPU自身の内部アクセス」中か — 記述子表 (GDT/IDT/TSS) の読みと、
+    /// 例外配送のスタック操作は、CPL=3でも**スーパーバイザ権限で行われる**
+    /// (実機の暗黙のシステムアクセス)。この間はページのU/S検査を免除する。
+    /// これを忘れると、リング3からの例外配送がIDT読みで弾かれてゲートがゴミになる
+    pub sys_access: std::cell::Cell<bool>,
     /// 命令の実行中に起きたページフォールト。命令の終わりで #PF として配送する。
     /// Cell なのは読み経路 (&self) からも失敗を記録するため。
     /// 実機は命令の途中で中断するが、うちは**完走させてから巻き戻す**
@@ -198,6 +203,7 @@ impl Machine {
             pending_irq: None,
             pic_service: false,
             pending_fault: std::cell::Cell::new(None),
+            sys_access: std::cell::Cell::new(false),
             devices: Devices::new(),
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
@@ -482,7 +488,7 @@ impl Machine {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
             return Ok(la); // PG off: 線形がそのまま物理
         }
-        let user = self.cpu.cpl() == 3;
+        let user = self.cpu.cpl() == 3 && !self.sys_access.get();
         let wp = self.cpu.cr0 & 0x0001_0000 != 0;
         let fault = |present: bool| PageFault { la, write, present };
         let dir = (la >> 22) & 0x3FF;
@@ -1076,26 +1082,30 @@ impl Machine {
         // 4. 命令を実行する。TFは**実行前**の値を見る。
         //    ハンドラ内でTFが落ちても、この命令のシングルステップは成立させる
         let tf = self.cpu.flag(cpu::TF);
-        self.trap_ip = self.cpu.ip; // 未実装トラップと#PF巻き戻しの「犯行現場」用
+        self.trap_ip = self.cpu.ip; // 未実装トラップの「犯行現場」用
         self.pending_fault.set(None);
+        // フォールトに備えてCPU状態を控える。**実機の約束は「フォールトした
+        // 命令は何も起きなかったことになる」** — IPだけ巻き戻して汚れた
+        // レジスタを残すと、再実行が汚れの上に積む。実際に `add mem,reg` の
+        // 読みがデマンドページングに当たり、フォールトの器 0xFFFFFFFF を
+        // 足した EDX (-1) のまま再実行して、muslのELF解析が1バイトずれた
+        let saved = self.cpu.clone();
         cpu::step(self);
 
-        // 命令中にページフォールトが起きていたら、**命令の先頭へ巻き戻して**
-        // #PF を配送する。実機は命令の途中で中断するが、うちは完走させてから
-        // 巻き戻す (フォールトした書き込みは捨ててあるので二重実行にならない)。
-        // ハンドラが原因を直して iret すれば、同じ命令がやり直される
+        // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
+        // #PF を配送する。ハンドラがページを直して iret すれば、同じ命令が
+        // 白紙からやり直される (メモリ側は: フォールトした書き込み自体は
+        // 捨ててあり、それ以外の同一命令内の書き込みは再実行が上書きする)
         if let Some(f) = self.pending_fault.take() {
             // フェッチがフォールトすると 0xFF (未マップの器) を命令として
             // デコードし、偽の「未実装」トラップが立つことがある。
-            // 本当の事件は #PF の方 — トラップは取り消して配送する。
-            // (vmalloc領域への呼び出しは正当で、ハンドラがページテーブルを
-            //  同期してから同じ命令をやり直すのがLinuxの日常)
+            // 本当の事件は #PF の方 — トラップは取り消して配送する
             self.trap = None;
+            self.cpu = saved;
             self.cpu.cr2 = f.la;
             let err = (f.present as u32)
                 | ((f.write as u32) << 1)
                 | (((self.cpu.cpl() == 3) as u32) << 2);
-            self.cpu.ip = self.trap_ip;
             cpu::page_fault(self, err);
             return;
         }
