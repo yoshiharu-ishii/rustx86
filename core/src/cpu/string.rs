@@ -73,6 +73,12 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
     };
     let src_seg = d.seg_override.unwrap_or(DS);
     loop {
+        // ページフォールトが起きたら**その反復を確定せずに**止める。
+        // 命令ごと巻き戻され、CX/SI/DIは完了済みの反復だけを指しているので、
+        // ハンドラ復帰後の再実行が続きから正しく再開する (実機のREP再開と同じ)
+        if m.pending_fault.get().is_some() {
+            break;
+        }
         if d.rep.is_some() && m.cpu.reg_w(CX, a32) == 0 {
             break;
         }
@@ -80,9 +86,15 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
         let di = m.cpu.reg_w(DI, a32);
         match op {
             0xA4 | 0xA5 => {
-                // MOVS
+                // MOVS。読みがフォールトしたらゴミを書かずに止める
                 let v = read_w(m, m.cpu.lin(src_seg, si), width);
+                if m.pending_fault.get().is_some() {
+                    break;
+                }
                 write_w(m, m.cpu.lin(ES, di), v, width);
+                if m.pending_fault.get().is_some() {
+                    break;
+                }
                 advance(&mut m.cpu, SI, a32, width);
                 advance(&mut m.cpu, DI, a32, width);
             }

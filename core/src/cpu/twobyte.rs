@@ -51,6 +51,20 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
         0x00 => {
             let (reg, rm) = modrm(m, d);
             match reg {
+                // SLDT / LLDT: LDTセレクタの読み書き。表は引かない (保持のみ)
+                0 => {
+                    let v = m.cpu.ldtr_sel;
+                    super::operand::write_op16(m, &rm, v);
+                }
+                2 => {
+                    let sel = read_op16(m, &rm);
+                    if sel & !0x7 != 0 {
+                        // 実LDTを積もうとした — 保持だけでは嘘になるので止める
+                        m.trap(format!("LLDT with non-null selector {sel:#06x}"));
+                        return;
+                    }
+                    m.cpu.ldtr_sel = sel;
+                }
                 // LTR: TSSの場所をTRへ。記述子はGDTから読む
                 3 => {
                     let sel = read_op16(m, &rm);
@@ -66,10 +80,10 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.tr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
                     m.cpu.tr_limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
                 }
-                _ => panic!(
-                    "unimplemented 0f 00 /{reg} at {:04x}:{:04x}",
-                    m.cpu.sregs[CS], start_ip
-                ),
+                _ => {
+                    m.cpu.ip = start_ip; // 巻き戻して現場を保存
+                    m.trap(format!("unimplemented 0f 00 /{reg}"));
+                }
             }
         }
         // システム表の操作
@@ -98,6 +112,18 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 ),
             }
         }
+        // MOV r32, DRn / MOV DRn, r32。CR系と同じく常にレジスタ形式。
+        // ハードウェアブレークは持たないので、器として保持するだけ
+        0x21 | 0x23 => {
+            let mrm = fetch8(m);
+            let dr = ((mrm >> 3) & 7) as usize;
+            let r = (mrm & 7) as usize;
+            if op2 == 0x21 {
+                m.cpu.regs[r] = m.cpu.dr[dr];
+            } else {
+                m.cpu.dr[dr] = m.cpu.regs[r];
+            }
+        }
         // MOV r32, CRn / MOV CRn, r32。ModRMだがmodは無視して常にレジスタ形式
         0x20 | 0x22 => {
             let mrm = fetch8(m);
@@ -109,6 +135,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     0 => m.cpu.cr0,
                     2 => m.cpu.cr2,
                     3 => m.cpu.cr3,
+                    4 => m.cpu.cr4,
                     _ => panic!("unimplemented read of CR{cr}"),
                 };
             } else {
@@ -127,6 +154,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     }
                     2 => m.cpu.cr2 = v,
                     3 => m.cpu.cr3 = v, // ページテーブルが替わる。TLBは持たないので何もしない
+                    4 => m.cpu.cr4 = v,
                     _ => panic!("unimplemented write of CR{cr}"),
                 }
             }
@@ -150,6 +178,13 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
         0x06 => m.cpu.cr0 &= !0x8,
         // WBINVD: キャッシュ書き戻し+無効化。キャッシュを持たないので何もしない
         0x09 => {}
+        // RDMSR/WRMSR: MSRは1本も名乗っていない (CPUID.EDXのMSRビット=0)。
+        // 実機のMSR無しCPUと同じく **#GP** を返す — カーネルの rdmsr_safe は
+        // #GPを例外表 (fixup) で受けて「無い」と理解する設計になっている
+        0x30 | 0x32 => {
+            m.cpu.ip = start_ip; // フォールトは命令の先頭で配送
+            super::interrupt::interrupt_protected_err(m, 13, Some(0));
+        }
         // RDTSC: タイムスタンプカウンタを EDX:EAX へ
         0x31 => {
             let t = m.cpu.tsc;
@@ -259,6 +294,50 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             let r = (op2 & 7) as usize;
             m.cpu.regs[r] = m.cpu.regs[r].swap_bytes();
         }
+        // BSF/BSR (386〜): 最下位/最上位の立っているビットの位置。
+        // ソースが0ならZF=1で結果は未定義 (実機は保存が多いが、書かない)
+        0xBC | 0xBD => {
+            let w = d.opsize32;
+            let (reg, rm) = modrm(m, d);
+            let v = read_op_w(m, &rm, w);
+            if v == 0 {
+                m.cpu.set_flag(super::ZF, true);
+            } else {
+                m.cpu.set_flag(super::ZF, false);
+                let pos = if op2 == 0xBC {
+                    v.trailing_zeros()
+                } else {
+                    31 - v.leading_zeros()
+                };
+                m.cpu.set_reg_w(reg, pos, w);
+            }
+        }
+        // IMUL r, r/m (2オペランド形、386〜)。フラグの意味は 0x69/0x6B と同じ
+        0xAF => {
+            let w = d.opsize32;
+            let (reg, rm) = modrm(m, d);
+            let (a, b) = if w {
+                (
+                    m.cpu.reg_w(reg, true) as i32 as i64,
+                    read_op_w(m, &rm, true) as i32 as i64,
+                )
+            } else {
+                (
+                    m.cpu.reg16(reg) as i16 as i64,
+                    read_op16(m, &rm) as i16 as i64,
+                )
+            };
+            let r = a * b;
+            let ext = if w {
+                m.cpu.set_reg32(reg, r as u32);
+                (r as i32 as i64) != r
+            } else {
+                m.cpu.set_reg16(reg, r as u16);
+                (r as i16 as i64) != r
+            };
+            m.cpu.set_flag(super::CF, ext);
+            m.cpu.set_flag(super::OF, ext);
+        }
         // MOVZX/MOVSX (386〜): 小さい値をゼロ拡張/符号拡張して広いレジスタへ。
         // Cコンパイラが u8/i8/u16/i16 → int の変換で山ほど出す
         0xB6 | 0xB7 | 0xBE | 0xBF => {
@@ -281,6 +360,18 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 }
             };
             m.cpu.set_reg_w(reg, v, d.opsize32);
+        }
+        // PUSH/POP FS・GS (386〜)。1バイト空間に席が無かったのでここに居る。
+        // スタックの刻みは 0x06/0x0E 系と同じくオペランドサイズ
+        0xA0 | 0xA8 => {
+            let s = if op2 == 0xA0 { FS } else { GS };
+            let v = m.cpu.sregs[s];
+            super::operand::push_w(m, v as u32, d.opsize32);
+        }
+        0xA1 | 0xA9 => {
+            let s = if op2 == 0xA1 { FS } else { GS };
+            let v = super::operand::pop_w(m, d.opsize32) as u16;
+            super::load_seg(m, s, v);
         }
         // SHLD/SHRD (386〜): 倍精度シフト。隣のレジスタから溢れたビットを
         // 継ぎ足しながらずらす — 64bit値を32bitレジスタ2本でずらすための命令

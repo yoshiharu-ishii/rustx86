@@ -136,6 +136,11 @@ impl Pic8259 {
     ///
     /// 優先順位は**線の番号が若いほど高い**。処理中 (ISR) より優先度の低い線は
     /// 待たされる — これが「割り込みの交通整理」の中身である。
+    /// 未処理の (マスクされていない) 要求があるか。ベクタはまだ決めない
+    pub fn has_pending(&self) -> bool {
+        self.irr & !self.imr != 0
+    }
+
     pub fn acknowledge(&mut self) -> Option<u8> {
         let pending = self.irr & !self.imr;
         if pending == 0 {

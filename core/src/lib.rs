@@ -95,6 +95,13 @@ pub struct Machine {
     /// 保留中のハードウェア割り込みベクタ。IFが立っている命令境界で受け付ける。
     /// Tier 2a で 8259 PIC がここへ挙手する
     pub pending_irq: Option<u8>,
+    /// PICに未処理の要求がある印。ベクタはまだ決めない (INTAで決まる)
+    pic_service: bool,
+    /// 命令の実行中に起きたページフォールト。命令の終わりで #PF として配送する。
+    /// Cell なのは読み経路 (&self) からも失敗を記録するため。
+    /// 実機は命令の途中で中断するが、うちは**完走させてから巻き戻す**
+    /// (フォールトした書き込みは捨てているので、再実行しても二重にならない)
+    pub pending_fault: std::cell::Cell<Option<PageFault>>,
     /// I/Oポート空間にぶら下がる装置。中身は Tier 2b で実装する
     pub devices: Devices,
     /// 誰も名乗り出なかったポート番号。
@@ -152,6 +159,17 @@ pub struct Machine {
     pub halted: bool,
 }
 
+/// ページ変換の失敗。#PF として配送される
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageFault {
+    /// 失敗した線形アドレス (CR2 へ入る)
+    pub la: u32,
+    /// 書き込みだったか (エラーコード bit1)
+    pub write: bool,
+    /// ページは居たが保護で弾いたか (エラーコード bit0)
+    pub present: bool,
+}
+
 /// 実行を止めた「未実装」の中身。どの命令が、どこで、を抱える
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trap {
@@ -178,6 +196,8 @@ impl Machine {
             cpu: Cpu::new(),
             mem: vec![0; profile.ram_bytes],
             pending_irq: None,
+            pic_service: false,
+            pending_fault: std::cell::Cell::new(None),
             devices: Devices::new(),
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
@@ -260,9 +280,16 @@ impl Machine {
         if self.devices.keyboard.take_irq() {
             self.devices.pic[0].raise(IRQ_KEYBOARD);
         }
-        if self.pending_irq.is_none() {
-            self.pending_irq = self.devices.pic[0].acknowledge();
-        }
+        // **ここでは acknowledge しない。** ベクタ番号が決まるのは CPU が
+        // INTA で受ける瞬間で、それより早くベクタを固定すると、OSがPICを
+        // 再マップした後に**古いベクタ**が飛び出す (Linuxの sti 直後に
+        // BIOS時代の vector 8 = #DF タスクゲートへ突っ込んで実際に死んだ)
+        self.pic_service = self.devices.pic[0].has_pending();
+    }
+
+    /// PICに未処理の要求があるか (CPUが受けにいくべきか)
+    fn pic_has_service(&self) -> bool {
+        self.pic_service
     }
 
     /// ディスクイメージを入れ、その先頭セクタからブートする
@@ -374,7 +401,13 @@ impl Machine {
     }
 
     pub fn read8(&self, addr: u32) -> u8 {
-        self.read_phys8(self.translate(addr))
+        match self.translate_for(addr, false) {
+            Ok(pa) => self.read_phys8(pa),
+            Err(f) => {
+                self.note_fault(f);
+                0xFF // フォールトした読みの器。命令の終わりに#PFで巻き戻す
+            }
+        }
     }
 
     /// 物理アドレスから読む (変換しない)。ページテーブルの歩きと、
@@ -403,26 +436,61 @@ impl Machine {
     ///
     /// TLB (変換の写し) はまだ持たない。決定的なので**毎回歩いても結果は同じ**で、
     /// 速度が問題になるまで足さない (「測ってから足す」— docs/ci.md と同じ流儀)。
-    /// 未マップは即panic — #PF配送はまだ無く、正体 (どの線形番地か) を報告する
+    ///
+    /// こちらは**寛容な版** (デバッガ・ツール用)。未マップは RAM 外の番地を
+    /// 返し、読めば 0xFF になる。CPUの実行経路は [`translate_for`] を使い、
+    /// 失敗を #PF として配送する
     pub fn translate(&self, la: u32) -> u32 {
+        self.translate_for(la, false).unwrap_or(0xFFFF_FFFF)
+    }
+
+    /// CPUのアクセス経路の変換。**ページ保護もここで裁く**:
+    ///   - present が無ければ不在フォールト
+    ///   - 書き込みで R/W=0 のページは、CR0.WP (リング0でも守る) か
+    ///     リング3なら保護フォールト。カーネルはこの挙動を起動時に試験し、
+    ///     #PFが来ないと「壊れたWP」として起動を拒否する (実際に拒否された)
+    pub fn translate_for(&self, la: u32, write: bool) -> Result<u32, PageFault> {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
-            return la; // PG off: 線形がそのまま物理
+            return Ok(la); // PG off: 線形がそのまま物理
         }
+        let user = self.cpu.cpl() == 3;
+        let wp = self.cpu.cr0 & 0x0001_0000 != 0;
+        let fault = |present: bool| PageFault { la, write, present };
         let dir = (la >> 22) & 0x3FF;
         let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
         if pde & 1 == 0 {
-            panic!("page fault: {la:#010x} — PDE not present (まだ#PF配送は無い)");
+            return Err(fault(false));
         }
         if pde & 0x80 != 0 {
             // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる
-            return (pde & 0xFFC0_0000) | (la & 0x003F_FFFF);
+            if write && pde & 2 == 0 && (user || wp) {
+                return Err(fault(true));
+            }
+            if user && pde & 4 == 0 {
+                return Err(fault(true));
+            }
+            return Ok((pde & 0xFFC0_0000) | (la & 0x003F_FFFF));
         }
         let tbl = (la >> 12) & 0x3FF;
         let pte = self.read_phys32((pde & !0xFFF) + tbl * 4);
         if pte & 1 == 0 {
-            panic!("page fault: {la:#010x} — PTE not present (まだ#PF配送は無い)");
+            return Err(fault(false));
         }
-        (pte & !0xFFF) | (la & 0xFFF)
+        // R/W・U/S は2段の**厳しい方**が効く
+        if write && (pde & 2 == 0 || pte & 2 == 0) && (user || wp) {
+            return Err(fault(true));
+        }
+        if user && (pde & 4 == 0 || pte & 4 == 0) {
+            return Err(fault(true));
+        }
+        Ok((pte & !0xFFF) | (la & 0xFFF))
+    }
+
+    /// 変換失敗を記録する (最初の1件だけ)。命令の終わりで #PF になる
+    fn note_fault(&self, f: PageFault) {
+        if self.pending_fault.get().is_none() {
+            self.pending_fault.set(Some(f));
+        }
     }
 
     /// メモリ書き込み。
@@ -438,7 +506,13 @@ impl Machine {
         // 線形→物理。以後の VRAM 判定もデバッガも**物理番地**で語る
         // (VRAMは物理アドレス空間の窓なので、そこに写像された線形から書いても
         //  正しく dirty が立つ)
-        let a = self.translate(addr) as usize;
+        let a = match self.translate_for(addr, true) {
+            Ok(pa) => pa,
+            Err(f) => {
+                self.note_fault(f);
+                return; // フォールトした書き込みは実行しない (再実行で改めて書く)
+            }
+        } as usize;
         if a >= self.mem.len() {
             return; // RAMを超えた書き込みは捨てる
         }
@@ -668,6 +742,11 @@ impl Machine {
         w.u32(self.cpu.tr_limit);
         w.u32(self.cpu.cr2);
         w.u32(self.cpu.cr3);
+        w.u32(self.cpu.cr4); // v7
+        w.u16(self.cpu.ldtr_sel); // v7
+        for d in self.cpu.dr {
+            w.u32(d);
+        }
         w.u16(self.cpu.fpu_cw); // v7
         w.u32(self.cpu.tsc as u32); // v7 (下位のみ。较正はやり直せるので十分)
         w.u32((self.cpu.tsc >> 32) as u32);
@@ -731,6 +810,11 @@ impl Machine {
         m.cpu.tr_limit = r.u32()?;
         m.cpu.cr2 = r.u32()?;
         m.cpu.cr3 = r.u32()?;
+        m.cpu.cr4 = r.u32()?; // v7
+        m.cpu.ldtr_sel = r.u16()?; // v7
+        for i in 0..8 {
+            m.cpu.dr[i] = r.u32()?;
+        }
         m.cpu.fpu_cw = r.u16()?; // v7
         m.cpu.tsc = r.u32()? as u64 | ((r.u32()? as u64) << 32);
         for i in 0..6 {
@@ -744,6 +828,7 @@ impl Machine {
 
         m.halted = r.bool()?;
         m.pending_irq = r.opt_u8()?;
+        // pic_service は派生状態なのでPICから作り直す
 
         for i in 0..2 {
             m.devices.pic[i].load(&mut r)?;
@@ -771,6 +856,7 @@ impl Machine {
                 has_cpuid: true,
             }
         };
+        m.pic_service = m.devices.pic[0].has_pending();
         m.mem = mem;
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)
@@ -852,6 +938,16 @@ impl Machine {
         self.io_write8(port.wrapping_add(1), (val >> 8) as u8);
     }
 
+    /// 32bitのI/O。専用装置 (PCIコンフィグ等) を積むまでは16bit×2で表す
+    pub fn io_read32(&mut self, port: u16) -> u32 {
+        self.io_read16(port) as u32 | (self.io_read16(port.wrapping_add(2)) as u32) << 16
+    }
+
+    pub fn io_write32(&mut self, port: u16, val: u32) {
+        self.io_write16(port, val as u16);
+        self.io_write16(port.wrapping_add(2), (val >> 16) as u16);
+    }
+
     /// 1サイクル進める。
     ///
     /// 順序に意味がある。**割り込みの受付は命令の途中ではなく境界で行う**。
@@ -873,11 +969,23 @@ impl Machine {
         //    成立するのはこのため
         //    `is_some()` を先に見るのは、`take()` が None を書き戻すため。
         //    毎命令の書き込みになり、実測で数%効いた (ベンチが捕まえた)
-        if self.pending_irq.is_some() && self.cpu.flag(cpu::IF) {
-            let vec = self.pending_irq.take().unwrap();
-            self.halted = false;
-            cpu::interrupt(self, vec);
-            return;
+        if self.cpu.flag(cpu::IF) {
+            if self.pending_irq.is_some() {
+                let vec = self.pending_irq.take().unwrap();
+                self.halted = false;
+                cpu::interrupt(self, vec);
+                return;
+            }
+            // PICからは**受ける瞬間に**ベクタをもらう (INTA相当)
+            if self.pic_has_service() {
+                if let Some(vec) = self.devices.pic[0].acknowledge() {
+                    self.pic_service = self.devices.pic[0].has_pending();
+                    self.halted = false;
+                    cpu::interrupt(self, vec);
+                    return;
+                }
+                self.pic_service = false;
+            }
         }
         // 2. 装置を進める。毎命令ではなくまとめて進め、ホットパスの負担を抑える
         self.tick_countdown -= 1;
@@ -939,8 +1047,29 @@ impl Machine {
         // 4. 命令を実行する。TFは**実行前**の値を見る。
         //    ハンドラ内でTFが落ちても、この命令のシングルステップは成立させる
         let tf = self.cpu.flag(cpu::TF);
-        self.trap_ip = self.cpu.ip; // 未実装トラップの「犯行現場」用
+        self.trap_ip = self.cpu.ip; // 未実装トラップと#PF巻き戻しの「犯行現場」用
+        self.pending_fault.set(None);
         cpu::step(self);
+
+        // 命令中にページフォールトが起きていたら、**命令の先頭へ巻き戻して**
+        // #PF を配送する。実機は命令の途中で中断するが、うちは完走させてから
+        // 巻き戻す (フォールトした書き込みは捨ててあるので二重実行にならない)。
+        // ハンドラが原因を直して iret すれば、同じ命令がやり直される
+        if let Some(f) = self.pending_fault.take() {
+            // フェッチがフォールトすると 0xFF (未マップの器) を命令として
+            // デコードし、偽の「未実装」トラップが立つことがある。
+            // 本当の事件は #PF の方 — トラップは取り消して配送する。
+            // (vmalloc領域への呼び出しは正当で、ハンドラがページテーブルを
+            //  同期してから同じ命令をやり直すのがLinuxの日常)
+            self.trap = None;
+            self.cpu.cr2 = f.la;
+            let err = (f.present as u32)
+                | ((f.write as u32) << 1)
+                | (((self.cpu.cpl() == 3) as u32) << 2);
+            self.cpu.ip = self.trap_ip;
+            cpu::page_fault(self, err);
+            return;
+        }
 
         // 5. トラップフラグが立っていたら、命令が終わってから INT 1。
         //    「実行してから止まる」ので、デバッガは1命令ずつ進められる
