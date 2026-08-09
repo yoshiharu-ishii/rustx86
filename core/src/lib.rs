@@ -87,7 +87,25 @@ pub struct Machine {
     pub int_recent: std::collections::VecDeque<(u8, u16, u32)>,
     /// 外から覗くための仕掛け。**機械の状態ではない**のでスナップショットには入れない
     pub dbg: debug::Debug,
+    /// 未実装にぶつかって止まった理由。
+    ///
+    /// **panicではなくこれで止める**のが要点。panicするとwasmインスタンスが
+    /// 死んで、その瞬間のレジスタもスタックも覗けなくなる。Linux起動は
+    /// 「走らせる→止まった所を見る→実装する」の繰り返しなので、
+    /// **止まった所が生きたまま見える**ことが道具の生命線になる。
+    /// 名前は報告する (静かに壊れない方針は維持) が、機械は殺さない
+    /// トラップの発生地点を控えるための「実行前IP」。毎命令 step 入口で更新
+    pub trap_ip: u32,
+    pub trap: Option<Trap>,
     pub halted: bool,
+}
+
+/// 実行を止めた「未実装」の中身。どの命令が、どこで、を抱える
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trap {
+    pub reason: String,
+    pub cs: u16,
+    pub ip: u32,
 }
 
 impl Default for Machine {
@@ -115,6 +133,8 @@ impl Machine {
             int_first: vec![(0, 0); 256],
             int_recent: std::collections::VecDeque::with_capacity(33),
             dbg: debug::Debug::new(),
+            trap_ip: 0,
+            trap: None,
             halted: false,
         }
     }
@@ -181,6 +201,16 @@ impl Machine {
 
     /// 線形アドレスから読む。**ページングが有効ならここで物理へ変換する**。
     /// CPUが触るのはこちら (呼び出し側は線形アドレスを渡す)
+    /// 未実装にぶつかった。**その命令を実行する前の CS:IP** で止める。
+    /// 呼び出し側は直後に return して、命令を実行しないこと
+    pub(crate) fn trap(&mut self, reason: String) {
+        self.trap = Some(Trap {
+            reason,
+            cs: self.cpu.sregs[cpu::CS],
+            ip: self.trap_ip,
+        });
+    }
+
     pub fn read8(&self, addr: u32) -> u8 {
         self.read_phys8(self.translate(addr))
     }
@@ -646,6 +676,10 @@ impl Machine {
     /// 命令の実行中に割り込むと、書き換え途中のレジスタやスタックのまま
     /// ハンドラへ飛ぶことになり、`IRET` で戻っても再開できない。
     pub fn step(&mut self) {
+        // 未実装で止まっていたら、以後は何もしない (run系がここで抜ける)
+        if self.trap.is_some() {
+            return;
+        }
         // 0. デバッガ。切っていれば真偽値1つで抜ける。
         //    命令数は**この呼び出しの回数**で数えるので、`boot` の例が出す
         //    命令数と同じ座標になる (決定的なので巻き戻しの目盛りになる)
@@ -723,6 +757,7 @@ impl Machine {
         // 4. 命令を実行する。TFは**実行前**の値を見る。
         //    ハンドラ内でTFが落ちても、この命令のシングルステップは成立させる
         let tf = self.cpu.flag(cpu::TF);
+        self.trap_ip = self.cpu.ip; // 未実装トラップの「犯行現場」用
         cpu::step(self);
 
         // 5. トラップフラグが立っていたら、命令が終わってから INT 1。
@@ -741,6 +776,9 @@ impl Machine {
             // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
             if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
                 break;
+            }
+            if self.trap.is_some() {
+                break; // 未実装にぶつかった。生きたまま止まっている
             }
             self.step();
             n += 1;

@@ -63,7 +63,9 @@ const CSS = `
   .rx-dbg .k { color: #8b949e; }
   .rx-dbg .v { color: #79c0ff; }
   .rx-dbg .changed { color: #f0883e; }
-  .rx-dbg .hex { color: #7ee787; }
+  .rx-dbg .hex { color: #6e7681; font-size: 12px; }
+  .rx-dbg .asm { color: #7ee787; }
+  .rx-dbg .state.stopped { color: #f0883e; }
   /* **必ず1行。** 折り返すと下の欄が丸ごとずれる */
   .rx-dbg .why { margin: 6px 0 0; color: #f0883e; height: 1.4em;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -121,7 +123,7 @@ const HTML = `
 
   <section>
     <h2>Next instruction</h2>
-    <p class="note">CS:IP と、これから実行するバイト列。逆アセンブラはまだ無い。</p>
+    <p class="note">CS:IP と、これから実行する命令 (逆アセンブル) と生バイト。幅はCSのDビットで16/32を切り替える。</p>
     <pre id="rxHere"></pre>
   </section>
 
@@ -397,8 +399,12 @@ export class Debugger {
     // **HLT を隠さない。** ワークロードが終わって止まっているだけなのに
     // 「paused」と出ると、レジスタが動かないのがバグに見える。
     // ベンチは hlt で終わるので、必ずここへ来る
-    st.textContent = c.halted ? 'halted' : stopped ? 'stopped' : paused ? 'paused' : 'running';
-    st.className = 'state ' + (c.halted || stopped || paused ? 'stopped' : 'running');
+    const trapped = !!c.trap;
+    st.textContent = trapped ? 'trapped' : c.halted ? 'halted' : stopped ? 'stopped' : paused ? 'paused' : 'running';
+    st.className = 'state ' + (trapped || c.halted || stopped || paused ? 'stopped' : 'running');
+    // 未実装で止まったら理由を出す。**機械は生きている**ので、この状態で
+    // レジスタもスタックもメモリも覗ける (それがこの停止の値打ち)
+    if (trapped) this.setWhy('未実装: ' + c.trap);
     this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
     this.$('rxRestart').hidden = !this.host.restart;
     if (!stopped) this.setWhy('');
@@ -451,7 +457,8 @@ export class Debugger {
 
     this.$('rxHere').innerHTML =
       `<span class="v">${hex16(c.sregs[1])}:${hex16(c.ip)}</span>  ` +
-      `<span class="hex">${c.bytes}</span>${c.halted ? '  [HLT]' : ''}`;
+      `<span class="asm">${esc(c.asm)}</span>${c.halted ? '  [HLT]' : ''}<br>` +
+      `<span class="hex">${c.bytes}</span>`;
 
     const w = JSON.parse(emu.watches_json());
     const f = (a, n) => (a.length ? `${n}: ` + a.map((v) => '0x' + v.toString(16)).join(' ') : '');
@@ -550,10 +557,11 @@ export class Debugger {
       this.$('rxTrace').textContent = 'まだ何も残していない。Start recording を押してから走らせる';
       return;
     }
-    this.$('rxTrace').textContent = t
+    this.$('rxTrace').innerHTML = t
       .slice(-40)
-      .map((s) => `${String(s.i).padStart(12)}: ${hex16(s.cs)}:${hex16(s.ip)}  ${s.b}`)
-      .join('\n');
+      .map((s) => `${String(s.i).padStart(12)}: <span class="v">${hex16(s.cs)}:${hex16(s.ip)}</span>  ` +
+                  `<span class="asm">${esc(s.asm)}</span>`)
+      .join('<br>');
   }
 }
 
@@ -575,5 +583,7 @@ function fmtInstr(n) {
     `<span class="k" style="margin-left:.6em">${n.toLocaleString()}</span>`;
 }
 
+// HTMLに出す前に最低限エスケープする (逆アセンブルは信頼できるが念のため)
+const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const hex16 = (v) => (v >>> 0).toString(16).padStart(4, '0');
 const hex32 = (v) => (v >>> 0).toString(16).padStart(8, '0');

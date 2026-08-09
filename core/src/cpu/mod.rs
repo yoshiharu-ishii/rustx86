@@ -1051,9 +1051,11 @@ pub fn step(m: &mut Machine) {
         // 1バイトの256席が埋まったので、もう1バイト読んで席を増やす方式である。
         0x0F => twobyte::step_0f(m, &d, start_ip),
 
-        _ => panic!(
-            "unimplemented opcode {op:#04x} at {:04x}:{:04x}",
-            m.cpu.sregs[CS], start_ip
-        ),
+        // 未実装は panic せず**巻き戻せる停止**にする。機械は生きたまま止まり、
+        // レジスタもスタックも覗ける (Linux起動のデバッグループの生命線)
+        _ => {
+            let _ = start_ip;
+            m.trap(format!("unimplemented opcode {op:#04x}"));
+        }
     }
 }

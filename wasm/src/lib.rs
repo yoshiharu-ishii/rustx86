@@ -221,6 +221,18 @@ impl Emulator {
         .filter(|(f, _)| c.flag(*f))
         .map(|(_, n)| *n)
         .collect();
+        // 現在の命令を逆アセンブルする。**幅はCSのDビットが決める** (16/32)。
+        // core は逆アセンブラを持たない (無依存を貫く) ので、ここで別クレートに任せる
+        let raw: Vec<u8> = (0..8).map(|i| self.m.read8(lin.wrapping_add(i))).collect();
+        let bits = if c.seg_is32(CS) { 32 } else { 16 };
+        let asm = rustx86_disasm::one(&raw, bits, c.ip as u64);
+        // 未実装で止まっているか (panicではなく巻き戻せる停止)
+        let trap = self
+            .m
+            .trap
+            .as_ref()
+            .map(|t| t.reason.replace('"', "'"))
+            .unwrap_or_default();
         // 保護モードの様子。隠しレジスタは「見張るべき3本」だけ渡す
         let seg = |i: usize| {
             let h = &c.hidden[i];
@@ -231,7 +243,7 @@ impl Emulator {
         };
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
-               "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{},
+               "bytes":"{}","asm":"{}","trap":"{}","instr":{},"executed":{},"halted":{},"lin":{},
                "pe":{},"cr0":{},"cpl":{},"pg":{},"cr2":{},"cr3":{},"gdtrBase":{},"gdtrLimit":{},"idtrBase":{},"idtrLimit":{},"trSel":{},
                "cs":{},"ds":{},"ss":{}}}"#,
             c.regs
@@ -248,6 +260,8 @@ impl Emulator {
             c.flags,
             flags.join(" "),
             bytes.join(" "),
+            asm.replace('\\', "\\\\").replace('"', "'"),
+            trap,
             self.m.dbg.instr,
             self.m.dbg.executed,
             self.m.halted,
@@ -379,6 +393,11 @@ impl Emulator {
 
     /// 足跡をJSONで
     pub fn trace_json(&self) -> String {
+        let bits = if self.m.cpu.seg_is32(rustx86_core::cpu::CS) {
+            32
+        } else {
+            16
+        };
         let rows: Vec<String> = self
             .m
             .dbg
@@ -386,12 +405,14 @@ impl Emulator {
             .iter()
             .map(|s| {
                 let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
+                let asm = rustx86_disasm::one(&s.bytes, bits, s.ip as u64).replace('"', "'");
                 format!(
-                    r#"{{"i":{},"cs":{},"ip":{},"b":"{}"}}"#,
+                    r#"{{"i":{},"cs":{},"ip":{},"b":"{}","asm":"{}"}}"#,
                     s.instr,
                     s.cs,
                     s.ip,
-                    b.join(" ")
+                    b.join(" "),
+                    asm
                 )
             })
             .collect();
