@@ -78,13 +78,13 @@ pub struct Machine {
     pub disk: Option<Disk>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
-    pub first_fault: Option<(u8, u16, u16)>,
+    pub first_fault: Option<(u8, u16, u32)>,
     /// ベクタごとの発生回数。全部数える (周期割り込みで溢れないよう回数だけ)
     pub int_counts: Vec<u32>,
     /// ベクタごとの初出位置 (CS, IP)
-    pub int_first: Vec<(u16, u16)>,
+    pub int_first: Vec<(u16, u32)>,
     /// 直近の割り込み (ベクタ, CS, IP)。**panic直前に何が起きたかはここに出る**
-    pub int_recent: std::collections::VecDeque<(u8, u16, u16)>,
+    pub int_recent: std::collections::VecDeque<(u8, u16, u32)>,
     /// 外から覗くための仕掛け。**機械の状態ではない**のでスナップショットには入れない
     pub dbg: debug::Debug,
     pub halted: bool,
@@ -406,7 +406,7 @@ impl Machine {
         for s in self.cpu.sregs {
             w.u16(s);
         }
-        w.u16(self.cpu.ip);
+        w.u32(self.cpu.ip);
         w.u32(self.cpu.flags);
         // プロテクトモードの状態 (v2)。隠しレジスタを落とすと、復元した瞬間に
         // 全アドレスが嘘になる — セレクタだけでは base を再構成できない
@@ -463,7 +463,7 @@ impl Machine {
         for i in 0..6 {
             m.cpu.sregs[i] = r.u16()?;
         }
-        m.cpu.ip = r.u16()?;
+        m.cpu.ip = r.u32()?;
         m.cpu.flags = r.u32()?;
         m.cpu.cr0 = r.u32()?;
         m.cpu.gdtr_base = r.u32()?;
@@ -619,7 +619,7 @@ impl Machine {
         if self.dbg.on {
             let (cs, ip) = (self.cpu.sregs[cpu::CS], self.cpu.ip);
             // 線形アドレスは隠しレジスタ経由。sel<<4 は保護モードで嘘になる
-            let lin = self.cpu.lin(cpu::CS, ip as u32);
+            let lin = self.cpu.lin(cpu::CS, ip);
             if self.dbg.before_exec(lin, cs, ip) {
                 self.dbg.instr -= 1; // 実行しなかったので数え戻す
                 return;
