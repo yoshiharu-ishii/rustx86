@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rustx86 — ブラウザで動く8086マシン</title>
+<title>rustx86 — ブラウザで動くx86エミュレータ</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -125,8 +125,10 @@
 </style>
 </head>
 <body>
-  <h1>rustx86 — ブラウザで動く8086マシン</h1>
-  <p class="sub">Rustで書いた8086エミュレータ。ブートセクタのあるディスクイメージなら何でも起動する。
+  <h1>rustx86</h1>
+  <p class="sub">Rustで書いた x86 エミュレータ。CPUは <strong>8086 リアルモードから i386</strong>
+    (プロテクトモード・ページング・特権リング) まで、一段ずつ自分で登る。
+    いま起動できるOSは 16bit (ELKS / FreeDOS)、32bit Linux はこれから。
     画面はテキストVRAM (0xB8000) を直接描いている。
     左からマシンを選ぶか、イメージを画面にドロップする。</p>
 
