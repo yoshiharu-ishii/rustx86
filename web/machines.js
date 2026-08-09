@@ -68,10 +68,16 @@ export const MACHINES = [
   {
     group: '32bit プロテクトモード',
     id: 'linux',
-    label: 'Linux',
-    sub: 'bzImage 直接ロード',
-    status: 'todo',
-    note: 'Tier 4。BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。',
+    label: 'Linux 6.18',
+    sub: 'bzImage + initramfs',
+    // **別ページに住む。** Linuxのコンソールはシリアル (ttyS0) で、
+    // このページのVGAテキスト端末とは描画の作法が丸ごと違う。
+    // 無理に同居させず、独立ページ (linux.html) へリンクで飛ぶ。
+    href: './linux.html',
+    status: 'ok',
+    note:
+      'BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。' +
+      'コンソールはシリアルなので独立ページで動く。起動には1〜2分かかる。',
   },
   {
     group: 'その他',

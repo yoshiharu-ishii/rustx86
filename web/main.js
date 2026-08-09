@@ -377,15 +377,21 @@ function renderMachines() {
     h.textContent = group;
     nav.append(h);
     for (const m of list) {
-      const b = document.createElement('button');
-      b.dataset.id = m.id;
-      b.disabled = m.status === 'todo';
+      // **別ページに住むマシンはリンクにする** (Linux)。見た目はボタンと揃えるが、
+      // 中身は本物の <a> — 新しいタブで開く・URLをコピーする、が普通にできる
+      const b = document.createElement(m.href ? 'a' : 'button');
       b.title = m.note ?? '';
       b.innerHTML =
         `<span class="name"><span class="dot ${m.status}"></span>${m.label}</span>` +
         `<span class="meta">${m.sub ?? ''}${m.sub ? ' · ' : ''}${statusLabel(m.status)}</span>`;
       b.querySelector('.meta').style.display = 'block';
-      b.addEventListener('click', () => select(m));
+      if (m.href) {
+        b.href = m.href;
+      } else {
+        b.dataset.id = m.id;
+        b.disabled = m.status === 'todo';
+        b.addEventListener('click', () => select(m));
+      }
       nav.append(b);
     }
   }
