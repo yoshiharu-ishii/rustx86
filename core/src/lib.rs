@@ -1,5 +1,6 @@
 pub mod bios;
 pub mod bus;
+pub mod bzimage;
 pub mod cp437;
 pub mod cpu;
 pub mod debug;
@@ -258,6 +259,76 @@ impl Machine {
         self.mem[0x7C00..0x7E00].copy_from_slice(&boot);
         self.cpu.set_cs_ip(0x0000, 0x7C00);
         self.cpu.regs[cpu::DX] = 0x0000; // DL = 0 (フロッピーA)
+        Ok(())
+    }
+
+    /// bzImage を直接ロードして 32bit カーネルエントリへ飛ぶ (Tier 3b)。
+    ///
+    /// ブートローダ (GRUB) がやることを肩代わりする「32bit ブートプロトコル」:
+    ///   1. カーネル本体を物理 1MB へ置く
+    ///   2. zero page (boot_params) を組んで、cmdline と e820 を入れる
+    ///   3. **フラットな32bit protected mode・paging off** の状態を作る
+    ///   4. `%esi` = zero page の物理番地、`code32_start` へジャンプ
+    ///
+    /// GDTを組んで far jump…という手順は踏まず、**隠しレジスタに直接
+    /// フラットセグメント (base=0, limit=4GB, 32bit) を書く**。実機の
+    /// ブートローダが GDT を経て到達する状態を、こちらは結果だけ作れる。
+    ///
+    /// カーネルは早々にこの状態を捨てて自前のGDT/ページテーブルを作るので、
+    /// ここで渡すのは「最初の一歩を踏み出せる姿勢」だけでよい
+    pub fn boot_bzimage(&mut self, image: &[u8], cmdline: &str) -> Result<(), String> {
+        use cpu::{CS, DS, ES, FS, GS, SS};
+        let hdr = bzimage::SetupHeader::parse(image)?;
+        if !hdr.loaded_high() {
+            return Err("LOADED_HIGH でない (bzImage ではなく zImage?)".into());
+        }
+
+        self.power_on_self_test();
+
+        // カーネル本体を物理 1MB へ。bzImage の kernel_offset 以降が本体
+        let kbody = &image[hdr.kernel_offset().min(image.len())..];
+        const KERNEL_BASE: u32 = 0x0010_0000;
+        for (i, b) in kbody.iter().enumerate() {
+            self.write_phys8(KERNEL_BASE + i as u32, *b);
+        }
+
+        // cmdline を低位に置く (慣習の 0x2_0000)
+        const CMDLINE_ADDR: u32 = 0x0002_0000;
+        for (i, b) in cmdline.bytes().enumerate() {
+            self.write_phys8(CMDLINE_ADDR + i as u32, b);
+        }
+        self.write_phys8(CMDLINE_ADDR + cmdline.len() as u32, 0);
+
+        // zero page を組んで低位に置く (慣習の 0x1_0000)
+        const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
+        let zp = bzimage::build_zero_page(image, self.mem.len() as u64, CMDLINE_ADDR);
+        for (i, b) in zp.iter().enumerate() {
+            self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
+        }
+
+        // --- フラットな32bit protected mode を直接作る ---
+        self.cpu.cr0 |= 1; // PE (PG は立てない)
+        let flat = cpu::SegHidden {
+            base: 0,
+            limit: 0xFFFF_FFFF,
+            access: 0x9B, // present, code, 32bit のつもり
+            big: true,    // Dビット = 32bit
+        };
+        let flat_data = cpu::SegHidden {
+            access: 0x93, // present, data
+            ..flat
+        };
+        self.cpu.sregs[CS] = 0x10; // 何かしらのセレクタ (フラットなので値は表示用)
+        self.cpu.hidden[CS] = flat;
+        for s in [DS, ES, FS, GS, SS] {
+            self.cpu.sregs[s] = 0x18;
+            self.cpu.hidden[s] = flat_data;
+        }
+
+        // 規約: %esi = zero page、エントリへ
+        self.cpu.regs[cpu::SI] = ZERO_PAGE_ADDR;
+        self.cpu.set_ip(hdr.code32_start);
+        self.cpu.set_flag(cpu::IF, false); // カーネルが自分でSTIするまで割り込み禁止
         Ok(())
     }
 
