@@ -167,13 +167,22 @@ pub fn iret(m: &mut Machine) {
         // 復帰**で、ESPとSSもスタックから取り出す。積む側 (リング遷移) と対。
         // 「行ったことのない場所へ戻る」— リング3への降下もこの経路を使う
         let to_outer = ((sel & 3) as u8) > m.cpu.cpl();
+        // **popは全部、旧特権のうちに済ませる。** 実機のリング遷移は命令の
+        // 最後に一括で完成する — CSを先に積むと、その瞬間CPL=3になり、
+        // 残りのpop (カーネルスタック=US=0のページ) がU/S検査で弾かれて
+        // ゴミを拾う (Linuxの最初のユーザー空間復帰がこれで死んだ)
+        let outer = if to_outer {
+            let esp = pop32(m);
+            let ss = pop32(m) as u16;
+            Some((esp, ss))
+        } else {
+            None
+        };
         load_seg_raw(m, CS, sel);
         m.cpu.set_ip(ip);
         // 復元するフラグの範囲は POPFD と同じ (IOPL/NT/AC/ID まで)
         m.cpu.flags = (f & 0x0024_7FD5) | 0x0002;
-        if to_outer {
-            let esp = pop32(m);
-            let ss = pop32(m) as u16;
+        if let Some((esp, ss)) = outer {
             load_seg_raw(m, SS, ss);
             m.cpu.regs[SP] = esp;
         }
