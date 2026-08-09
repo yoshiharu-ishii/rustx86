@@ -254,15 +254,27 @@ fn sp_wrap(m: &Machine, v: u32) -> u32 {
     }
 }
 
+/// PUSH/POP は**書き込み (読み出し) が成功したときだけ** SP を確定する。
+///
+/// 書いてからSPを引く順にしていたところ、スタック伸長の #PF で
+/// 「ESPは減ったが書けていない」状態が残り、ハンドラ復帰後の再実行で
+/// ESPが二重に減った (Linuxのftrace初期化後、ret が4ズレの野良番地へ飛んだ)。
+/// フォールトした命令は巻き戻して再実行される — だから**途中の状態を残さない**
 pub fn push32(m: &mut Machine, v: u32) {
     let sp = sp_wrap(m, sp_read(m).wrapping_sub(4));
-    sp_write(m, sp);
     m.write32(m.cpu.lin(SS, sp), v);
+    if m.pending_fault.get().is_some() {
+        return;
+    }
+    sp_write(m, sp);
 }
 
 pub fn pop32(m: &mut Machine) -> u32 {
     let sp = sp_read(m);
     let v = m.read32(m.cpu.lin(SS, sp));
+    if m.pending_fault.get().is_some() {
+        return v;
+    }
     sp_write(m, sp.wrapping_add(4));
     v
 }
@@ -287,14 +299,20 @@ pub fn pop_w(m: &mut Machine, wide: bool) -> u32 {
 
 pub fn push16(m: &mut Machine, v: u16) {
     let sp = sp_wrap(m, sp_read(m).wrapping_sub(2));
-    sp_write(m, sp);
     let addr = m.cpu.lin(SS, sp);
     m.write16(addr, v);
+    if m.pending_fault.get().is_some() {
+        return;
+    }
+    sp_write(m, sp);
 }
 
 pub fn pop16(m: &mut Machine) -> u16 {
     let sp = sp_read(m);
     let v = m.read16(m.cpu.lin(SS, sp));
+    if m.pending_fault.get().is_some() {
+        return v;
+    }
     sp_write(m, sp.wrapping_add(2));
     v
 }

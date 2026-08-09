@@ -47,7 +47,7 @@ use shift::shift_rot;
 use crate::Machine;
 // 制御の流れ (割り込み・iret) は interrupt.rs へ。呼び出し元 (lib.rs) の
 // `cpu::interrupt` / `cpu::iret` をそのまま保つため再エクスポートする
-pub use interrupt::{interrupt, iret};
+pub use interrupt::{interrupt, iret, page_fault};
 // セグメンテーションは segment.rs へ。step() と interrupt.rs が使う
 pub(crate) use interrupt::{divide_error, software_int};
 pub(crate) use segment::{load_seg, load_seg_raw, SegHidden};
@@ -126,6 +126,10 @@ pub struct Cpu {
     pub cr2: u32,
     /// CR3。ページディレクトリの物理番地 (下位12bitはフラグ)
     pub cr3: u32,
+    /// CR4 (486〜)。PSE/PAE等の機能ビット。**保持するだけ** — 名乗っていない
+    /// 機能のビットが立ってもうちの動作は変わらない (カーネルはCPUIDで
+    /// 名乗った分しか立てない)
+    pub cr4: u32,
     /// GDTR (LGDTで積む)。記述子表の場所と大きさ
     pub gdtr_base: u32,
     pub gdtr_limit: u16,
@@ -139,6 +143,14 @@ pub struct Cpu {
     /// 実機のような周波数の意味は無いが、カーネルの較正は
     /// 「PITと突き合わせて比率を測る」だけなので、単調に増えれば成立する
     pub tsc: u64,
+    /// デバッグレジスタ DR0-DR7。**保持のみ** — ハードウェアブレークは
+    /// 実装しない (カーネルが初期化で触るのに答えるため)。
+    /// DR6/DR7 はリセット値に意味がある (それぞれ 0xFFFF0FF0 / 0x400)
+    pub dr: [u32; 8],
+    /// LDTR (LLDTで積む)。プロセス別セグメント表のセレクタ。
+    /// カーネルはブートでヌル(0)を積むだけなので、**保持のみ**で表は引かない
+    /// (TIビット付きセレクタが実際に来たら、そのとき実装する)
+    pub ldtr_sel: u16,
     /// TR (LTRで積む)。TSSの場所 — リング3→0の瞬間に使うスタックの置き場。
     /// **リングで唯一、本当に新しい部品** (docs/registers.md)
     pub tr_sel: u16,
@@ -170,12 +182,15 @@ impl Cpu {
             cr0: 0,
             cr2: 0,
             cr3: 0,
+            cr4: 0,
             fpu_cw: 0x037F, // FNINIT後の既定値
             tsc: 0,
             gdtr_base: 0,
             gdtr_limit: 0,
             idtr_base: 0,
             idtr_limit: 0,
+            dr: [0, 0, 0, 0, 0, 0, 0xFFFF_0FF0, 0x400],
+            ldtr_sel: 0,
             tr_sel: 0,
             tr_base: 0,
             tr_limit: 0,
@@ -385,6 +400,9 @@ pub fn step(m: &mut Machine) {
             0x2E => d.seg_override = Some(CS),
             0x36 => d.seg_override = Some(SS),
             0x3E => d.seg_override = Some(DS),
+            // FS/GS上書き (386〜)。Linuxはper-CPUデータを %fs で引く
+            0x64 => d.seg_override = Some(FS),
+            0x65 => d.seg_override = Some(GS),
             0xF0 => {}                    // LOCK: シングルコアなので無視
             0x66 => d.opsize32 = !cs32,   // オペランドサイズの**反転** (386〜)
             0x67 => d.addrsize32 = !cs32, // アドレスサイズの反転 (386〜)
@@ -643,16 +661,20 @@ pub fn step(m: &mut Machine) {
         }
 
         // セグメントレジスタのPUSH/POP。オペコードのbit3-4がそのまま
-        // ES/CS/SS/DS の番号になっている (0x06,0x0E,0x16,0x1E)
+        // ES/CS/SS/DS の番号になっている (0x06,0x0E,0x16,0x1E)。
+        // **32bitコードではdword1個ぶんの席を使う** — 値は16bitでも、
+        // スタックの刻みは4バイト。ここを2バイトで積むとESPがずれ、
+        // カーネルの sync_core (pushf; push %cs; push $1f; iret) が腐った
         0x06 | 0x0E | 0x16 | 0x1E => {
             let v = m.cpu.sregs[(op >> 3) as usize & 3];
-            push16(m, v);
+            push_w(m, v as u32, d.opsize32);
         }
         // POP CS (0x0F) は8086にしか無く、186以降は2バイト命令の導入符になった。
         // ここでは実装しない (Tier 3 で 0x0F を二バイト空間として使う)
         0x07 | 0x17 | 0x1F => {
-            let v = pop16(m);
-            m.cpu.sregs[(op >> 3) as usize & 3] = v;
+            let v = pop_w(m, d.opsize32) as u16;
+            // 保護モードでは記述子を読み直して隠しレジスタも更新する
+            load_seg(m, (op >> 3) as usize & 3, v);
         }
 
         // --- PUSHA/POPA (186)。オペランドサイズ32ならPUSHAD/POPAD ---
@@ -697,21 +719,39 @@ pub fn step(m: &mut Machine) {
         }
 
         // --- IMUL r16, r/m16, imm (186) ---
-        // 3オペランドの乗算。CF/OFは「結果が16bitに収まらなかったか」だけを表し、
-        // SF/ZF/AF/PF は未定義
+        // 3オペランドの乗算。CF/OFは「結果が幅に収まらなかったか」だけを表し、
+        // SF/ZF/AF/PF は未定義。**即値の幅もオペランドサイズ** —
+        // 0x69 は32bitコードで6バイト命令になる (16bit読みしてEIPがずれ、
+        // 即値の中を命令として食い始める事故を実際に踏んだ)
         0x69 | 0x6B => {
+            let w = d.opsize32;
             let (reg, rm) = modrm(m, &d);
-            let a = read_op16(m, &rm) as i16 as i32;
-            let b = if op == 0x69 {
-                fetch16(m) as i16 as i32
+            let a = if w {
+                read_op_w(m, &rm, true) as i32 as i64
             } else {
-                fetch8(m) as i8 as i32
+                read_op16(m, &rm) as i16 as i64
+            };
+            let b = if op == 0x69 {
+                if w {
+                    fetch32(m) as i32 as i64
+                } else {
+                    fetch16(m) as i16 as i64
+                }
+            } else {
+                fetch8(m) as i8 as i64
             };
             let r = a * b;
-            m.cpu.set_reg16(reg, r as u16);
-            let ext = (r as i16 as i32) != r;
-            m.cpu.set_flag(CF, ext);
-            m.cpu.set_flag(OF, ext);
+            if w {
+                m.cpu.set_reg32(reg, r as u32);
+                let ext = (r as i32 as i64) != r;
+                m.cpu.set_flag(CF, ext);
+                m.cpu.set_flag(OF, ext);
+            } else {
+                m.cpu.set_reg16(reg, r as u16);
+                let ext = (r as i16 as i64) != r;
+                m.cpu.set_flag(CF, ext);
+                m.cpu.set_flag(OF, ext);
+            }
         }
 
         // --- ENTER/LEAVE (186): スタックフレームの作成と破棄 ---
@@ -774,8 +814,13 @@ pub fn step(m: &mut Machine) {
         // 256バイトの変換テーブルを1命令で引く。文字コード変換のための命令
         0xD7 => {
             let seg = d.seg_override.unwrap_or(DS);
-            let off = m.cpu.reg16(BX).wrapping_add(m.cpu.reg8(0) as u16);
-            let v = m.read8(m.cpu.lin(seg, off as u32));
+            // 基底の幅はアドレスサイズ (32bitでは EBX+AL)
+            let off = if d.addrsize32 {
+                m.cpu.regs[BX].wrapping_add(m.cpu.reg8(0) as u32)
+            } else {
+                m.cpu.reg16(BX).wrapping_add(m.cpu.reg8(0) as u16) as u32
+            };
+            let v = m.read8(m.cpu.lin(seg, off));
             m.cpu.set_reg8(0, v);
         }
 
@@ -790,22 +835,34 @@ pub fn step(m: &mut Machine) {
             };
             let wide = op & 1 != 0;
             let out = op & 2 != 0;
+            // 幅つき (bit0=1) はオペランドサイズで 16/32 が割れる。
+            // inl/outl はPCIコンフィグ (0xCF8/0xCFC) が32bitで叩いてくる
             match (out, wide) {
                 (false, false) => {
                     let v = m.io_read8(port);
                     m.cpu.set_reg8(0, v);
                 }
                 (false, true) => {
-                    let v = m.io_read16(port);
-                    m.cpu.set_reg16(AX, v);
+                    if d.opsize32 {
+                        let v = m.io_read32(port);
+                        m.cpu.set_reg32(AX, v);
+                    } else {
+                        let v = m.io_read16(port);
+                        m.cpu.set_reg16(AX, v);
+                    }
                 }
                 (true, false) => {
                     let v = m.cpu.reg8(0);
                     m.io_write8(port, v);
                 }
                 (true, true) => {
-                    let v = m.cpu.reg16(AX);
-                    m.io_write16(port, v);
+                    if d.opsize32 {
+                        let v = m.cpu.reg32(AX);
+                        m.io_write32(port, v);
+                    } else {
+                        let v = m.cpu.reg16(AX);
+                        m.io_write16(port, v);
+                    }
                 }
             }
         }
@@ -884,10 +941,12 @@ pub fn step(m: &mut Machine) {
         // 割り込み中に変わったIF/DFを呼び出し前の値へ戻すのが要点。
         0xCF => iret(m),
         0xE2 => {
-            // LOOP
+            // LOOP。カウンタの幅は**アドレスサイズ** (32bitではECX)
             let rel = fetch8(m) as i8;
-            let cx = m.cpu.reg16(CX).wrapping_sub(1);
-            m.cpu.set_reg16(CX, cx);
+            let a32 = d.addrsize32;
+            let cx = m.cpu.reg_w(CX, a32).wrapping_sub(1);
+            m.cpu.set_reg_w(CX, cx, a32);
+            let cx = if a32 { cx } else { cx & 0xFFFF };
             if cx != 0 {
                 let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
                 m.cpu.set_ip(ip);
@@ -945,11 +1004,14 @@ pub fn step(m: &mut Machine) {
             m.cpu.set_reg8(reg, a);
         }
         0x87 => {
+            // XCHG r/m, r。カーネルのアトミック交換 (xchgl) の正体なので
+            // 幅を間違えると同期構造が静かに腐る
+            let w = d.opsize32;
             let (reg, rm) = modrm(m, &d);
-            let a = read_op16(m, &rm);
-            let b = m.cpu.reg16(reg);
-            write_op16(m, &rm, b);
-            m.cpu.set_reg16(reg, a);
+            let a = read_op_w(m, &rm, w);
+            let b = m.cpu.reg_w(reg, w);
+            write_op_w(m, &rm, b, w);
+            m.cpu.set_reg_w(reg, a, w);
         }
         0x8D => {
             // LEA: セグメントを適用しない実効オフセットを取る
@@ -961,28 +1023,50 @@ pub fn step(m: &mut Machine) {
             }
         }
         0x8F => {
+            // POP r/m。幅はオペランドサイズ (16bit固定にしていて、
+            // Linuxの popl がESPを+2しかせず整列が壊れた)
+            let v = pop_w(m, d.opsize32);
             let (_, rm) = modrm(m, &d);
-            let v = pop16(m);
-            write_op16(m, &rm, v);
+            write_op_w(m, &rm, v, d.opsize32);
         }
+        // XCHG (E)AX, reg。0x90 は xchg (e)ax,(e)ax = NOP
         0x90..=0x97 => {
             let r = (op & 7) as usize;
-            let a = m.cpu.reg16(AX);
-            let b = m.cpu.reg16(r);
-            m.cpu.set_reg16(AX, b);
-            m.cpu.set_reg16(r, a);
+            let w = d.opsize32;
+            let a = m.cpu.reg_w(AX, w);
+            let b = m.cpu.reg_w(r, w);
+            m.cpu.set_reg_w(AX, b, w);
+            m.cpu.set_reg_w(r, a, w);
         }
+        // CBW/CWDE (0x98)・CWD/CDQ (0x99)。**幅で別の命令になる**:
+        // 16bitでは AL→AX / AX→DX:AX、32bitでは AX→EAX / EAX→EDX:EAX。
+        // ここが16bit固定だと cdq がEDX上位を残し、直後の idiv が
+        // ゴミ被除数で #DE を起こす (Linuxの register_refined_jiffies で実際に鳴った)
         0x98 => {
-            let v = m.cpu.reg8(0) as i8 as i16 as u16;
-            m.cpu.set_reg16(AX, v);
+            if d.opsize32 {
+                let v = m.cpu.reg16(AX) as i16 as i32 as u32;
+                m.cpu.set_reg32(AX, v);
+            } else {
+                let v = m.cpu.reg8(0) as i8 as i16 as u16;
+                m.cpu.set_reg16(AX, v);
+            }
         }
         0x99 => {
-            let v = if m.cpu.reg16(AX) & 0x8000 != 0 {
-                0xFFFF
+            if d.opsize32 {
+                let v = if m.cpu.reg32(AX) & 0x8000_0000 != 0 {
+                    0xFFFF_FFFF
+                } else {
+                    0
+                };
+                m.cpu.set_reg32(DX, v);
             } else {
-                0
-            };
-            m.cpu.set_reg16(DX, v);
+                let v = if m.cpu.reg16(AX) & 0x8000 != 0 {
+                    0xFFFF
+                } else {
+                    0
+                };
+                m.cpu.set_reg16(DX, v);
+            }
         }
         // PUSHF / PUSHFD。**FreeDOSの386判定はここから始まる** (`66 9C`)。
         //
