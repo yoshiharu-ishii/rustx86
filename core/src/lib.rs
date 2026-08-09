@@ -1219,7 +1219,16 @@ impl Machine {
                 self.pic_service = false;
             }
         }
-        // 2. 装置を進める。毎命令ではなくまとめて進め、ホットパスの負担を抑える
+        // 2. 時計を進める。**HLT中も進める**のが要点。
+        //
+        // TSCを「実行した命令数」にしていたため、アイドル (HLT) の間だけ
+        // ゲストの時間が止まっていた。カーネルは較正した周波数から
+        // 「TSCがNカウント進んだら120ms」と数えるので、nanosleep で寝た
+        // プロセスは**二度と起きなかった** (snakeの蛇が1歩も動かなかった)。
+        // 実機のTSCはHLT中もクロックで進む — 止まるのはCPUであって時計ではない
+        self.cpu.tsc = self.cpu.tsc.wrapping_add(1);
+
+        // 装置を進める。毎命令ではなくまとめて進め、ホットパスの負担を抑える
         self.tick_countdown -= 1;
         if self.tick_countdown == 0 {
             self.tick_countdown = INSTRUCTIONS_PER_TICK;
