@@ -390,7 +390,6 @@ fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
 
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
-    m.cpu.tsc = m.cpu.tsc.wrapping_add(1); // RDTSC用: 1命令=1カウント
                                            // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
                                            // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
     let cs32 = m.cpu.seg_is32(CS);
