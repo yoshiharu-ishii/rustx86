@@ -24,7 +24,9 @@ fn main() {
     let mut uc = Unicorn::new(Arch::X86, Mode::MODE_32).expect("unicorn init");
     uc.mem_map(0, RAM_MB << 20, Prot::ALL).expect("map");
     // メモリ全体をコピー (カーネル・zero page・GDT が含まれる)
-    let ram: Vec<u8> = (0..(RAM_MB << 20) as u32).map(|a| m.read_phys8(a)).collect();
+    let ram: Vec<u8> = (0..(RAM_MB << 20) as u32)
+        .map(|a| m.read_phys8(a))
+        .collect();
     uc.mem_write(0, &ram).expect("ram copy");
 
     let gpr = [
@@ -68,7 +70,10 @@ fn main() {
     let mut last = String::new();
     for i in 0u64..2_000_000 {
         if m.halted || m.trap.is_some() {
-            println!("rustx86 stopped @ {i}: halted={} trap={:?}", m.halted, m.trap);
+            println!(
+                "rustx86 stopped @ {i}: halted={} trap={:?}",
+                m.halted, m.trap
+            );
             break;
         }
         let ip = m.cpu.ip;
@@ -103,7 +108,10 @@ fn main() {
             }
         }
         if m.cpu.ip != u_eip {
-            println!("DIVERGE @ {i}: EIP ours={:08x} unicorn={u_eip:08x}", m.cpu.ip);
+            println!(
+                "DIVERGE @ {i}: EIP ours={:08x} unicorn={u_eip:08x}",
+                m.cpu.ip
+            );
             println!("  last executed: {last}");
             dump(&m, &mut uc);
             break;
@@ -119,14 +127,14 @@ fn main() {
         for (ur, gi) in gpr {
             let uv = uc.reg_read(ur).unwrap() as u32;
             if m.cpu.regs[gi] != uv {
-                bad.push(format!(
-                    "{:?} ours={:08x} uc={uv:08x}",
-                    ur, m.cpu.regs[gi]
-                ));
+                bad.push(format!("{:?} ours={:08x} uc={uv:08x}", ur, m.cpu.regs[gi]));
             }
         }
         if !bad.is_empty() {
-            println!("DIVERGE @ {i} at instr ip={ip:08x} (next eip={:08x}):", m.cpu.ip);
+            println!(
+                "DIVERGE @ {i} at instr ip={ip:08x} (next eip={:08x}):",
+                m.cpu.ip
+            );
             for b in &bad {
                 println!("  {b}");
             }

@@ -5,9 +5,7 @@
 //! 「オペコードのビットで演算が決まる」実CPUのデコード構造そのもの。
 //! (GRP1 = 0x80-0x83 のALU r/m,imm は ALU 族の隣に置いたまま)
 
-use super::operand::{
-    fetch16, fetch8, modrm, push16, read_op16, read_op8, read_op_w, write_op16, write_op8, Operand,
-};
+use super::operand::{fetch8, modrm, read_op8, read_op_w, write_op8, Operand};
 use super::*;
 use crate::Machine;
 
@@ -158,7 +156,11 @@ pub(crate) fn grp3_word(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 return divide_error(m, start_ip);
             }
             let q = n / b;
-            let (lo, hi) = if w { (i32::MIN as i64, i32::MAX as i64) } else { (-32768, 32767) };
+            let (lo, hi) = if w {
+                (i32::MIN as i64, i32::MAX as i64)
+            } else {
+                (-32768, 32767)
+            };
             if !(lo..=hi).contains(&q) {
                 return divide_error(m, start_ip);
             }
