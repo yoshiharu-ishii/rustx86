@@ -82,6 +82,33 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.tr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
                     m.cpu.tr_limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
                 }
+                // VERR/VERW: そのセレクタを読める/書けるか (ZFで答える)。
+                // 現代カーネルはMDS緩和の「CPUバッファ掃除」としてVERWを撃つ —
+                // 副作用の方が本体になった珍しい命令
+                4 | 5 => {
+                    let sel = read_op16(m, &rm);
+                    let ok = if sel & !0x7 == 0 {
+                        false // ヌルセレクタは常に不成立
+                    } else {
+                        let off = (sel & !0x7) as u32;
+                        let a = m.cpu.gdtr_base.wrapping_add(off);
+                        let prev_sys = m.sys_access.replace(true);
+                        let hi = m.read32(a.wrapping_add(4));
+                        m.sys_access.set(prev_sys);
+                        let access = ((hi >> 8) & 0xFF) as u8;
+                        let present = access & 0x80 != 0;
+                        let is_data = access & 0x18 == 0x10;
+                        if reg == 5 {
+                            // VERW: 書けるのは data かつ writable
+                            present && is_data && access & 0x02 != 0
+                        } else {
+                            // VERR: data は常に読める、code は readable ビット
+                            present
+                                && (is_data || (access & 0x18 == 0x18 && access & 0x02 != 0))
+                        }
+                    };
+                    m.cpu.set_flag(super::ZF, ok);
+                }
                 _ => {
                     m.cpu.ip = start_ip; // 巻き戻して現場を保存
                     m.trap(format!("unimplemented 0f 00 /{reg}"));
@@ -161,6 +188,17 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 }
             }
         }
+        // CMOVcc (P6/i686〜): 条件が真ならmov。**読みは条件に関わらず行う**
+        // (偽でもメモリオペランドのフォールトは起きる、が実機の仕様)。
+        // Alpineのユーザーランドはi686ビルドで、CPUIDを見ずにこれを使う
+        0x40..=0x4F => {
+            let w = d.opsize32;
+            let (reg, rm) = modrm(m, d);
+            let v = read_op_w(m, &rm, w);
+            if super::alu::condition(&m.cpu, op2 & 0xF) {
+                m.cpu.set_reg_w(reg, v, w);
+            }
+        }
         // Jcc near (386〜): 0F 80..0F 8F。短いJcc (0x70..) の32bit変位版。
         // 変位はオペランドサイズで rel16/rel32。条件は下位4bitで同じ表を引く
         0x80..=0x8F => {
@@ -209,12 +247,14 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.regs[CX] = 0x6c65_746e; // "ntel"
                 }
                 1 => {
-                    // family 5 (Pentium)。機能は FPU + TSC + CX8 だけ名乗る —
-                    // 名乗った分は全部実装が要る (MSR/APIC/PSE は名乗らない)
-                    m.cpu.regs[AX] = 0x0521;
+                    // family 6 (i686/PentiumPro相当)。機能は FPU + TSC + CX8 + CMOV
+                    // だけ名乗る — 名乗った分は全部実装が要る (MSR/APIC/PSEは名乗らない)。
+                    // i686を名乗るのはユーザーランド (Alpine) がi686ビルドだから
+                    m.cpu.regs[AX] = 0x0633;
                     m.cpu.regs[BX] = 0;
                     m.cpu.regs[CX] = 0;
-                    m.cpu.regs[DX] = (1 << 0) | (1 << 4) | (1 << 8); // FPU|TSC|CX8
+                    // FPU|TSC|CX8|CMOV
+                    m.cpu.regs[DX] = (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15);
                 }
                 _ => {
                     m.cpu.regs[AX] = 0;

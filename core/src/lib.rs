@@ -123,6 +123,9 @@ pub struct Machine {
     /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
     /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
     pub prefixed_ops: std::collections::BTreeSet<u8>,
+    /// ユーザー空間で #UD にした未実装命令の理由 (観測用)。
+    /// 機械は止めない — OSがSIGILLで裁く。実装すべきものの一覧になる
+    pub ud_user: std::collections::BTreeSet<String>,
     /// ゲストが設定しようとしたビデオモード。
     ///
     /// **テキスト以外は黙って無視している**ので、グラフィックスを要求された
@@ -209,6 +212,7 @@ impl Machine {
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
             video_modes: std::collections::BTreeSet::new(),
+            ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             console: Vec::new(),
             disk: None,
@@ -1096,6 +1100,21 @@ impl Machine {
         // #PF を配送する。ハンドラがページを直して iret すれば、同じ命令が
         // 白紙からやり直される (メモリ側は: フォールトした書き込み自体は
         // 捨ててあり、それ以外の同一命令内の書き込みは再実行が上書きする)
+        // ユーザー空間 (CPL=3) の未実装命令は、機械を止めずに #UD として
+        // OSへ裁かせる — 実CPUの挙動そのもので、カーネルはそのプロセスだけ
+        // SIGILL で殺して先へ進む (Alpineのnlplug-findfsがSSEを使い、
+        // マシンごと止まってシェルに届かなかった)。
+        // 何が来たかは ud_user に控える — 開発の観測は失わない
+        if let Some(t) = &self.trap {
+            if self.cpu.cpl() == 3 && self.pending_fault.get().is_none() {
+                self.ud_user.insert(t.reason.clone());
+                self.trap = None;
+                self.cpu = saved;
+                cpu::interrupt(self, 6);
+                return;
+            }
+        }
+
         if let Some(f) = self.pending_fault.take() {
             // フェッチがフォールトすると 0xFF (未マップの器) を命令として
             // デコードし、偽の「未実装」トラップが立つことがある。
