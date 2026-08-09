@@ -105,7 +105,7 @@ pub fn run_ours(tc: &TestCase) -> State {
         regs: std::array::from_fn(|i| m.cpu.regs[i] as u16),
         sregs: std::array::from_fn(|i| m.cpu.sregs[i]),
         flags: m.cpu.flags as u16 & FLAG_MASK_ALL,
-        ip: m.cpu.ip,
+        ip: m.cpu.ip as u16,
         data,
         stack,
     }
