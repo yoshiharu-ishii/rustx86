@@ -179,8 +179,56 @@ impl Machine {
         Ok(())
     }
 
+    /// 線形アドレスから読む。**ページングが有効ならここで物理へ変換する**。
+    /// CPUが触るのはこちら (呼び出し側は線形アドレスを渡す)
     pub fn read8(&self, addr: u32) -> u8 {
-        self.mem[(addr as usize) & (MEM_SIZE - 1)]
+        self.read_phys8(self.translate(addr))
+    }
+
+    /// 物理アドレスから読む (変換しない)。ページテーブルの歩きと、
+    /// 物理番地で語る装置・テストが使う
+    pub fn read_phys8(&self, pa: u32) -> u8 {
+        // マスクは「物理RAMの大きさ」。Tier 4 でLinuxを迎えるとき広げる
+        self.mem[(pa as usize) & (MEM_SIZE - 1)]
+    }
+
+    pub fn read_phys32(&self, pa: u32) -> u32 {
+        u32::from_le_bytes([
+            self.read_phys8(pa),
+            self.read_phys8(pa.wrapping_add(1)),
+            self.read_phys8(pa.wrapping_add(2)),
+            self.read_phys8(pa.wrapping_add(3)),
+        ])
+    }
+
+    /// 線形アドレスを物理アドレスへ。
+    ///
+    /// **ここがページングの正体**である。CR0.PGが立っていなければ線形=物理。
+    /// 立っていれば、上位20bitで2段の表を引く:
+    ///   線形 [31:22]=ディレクトリ番号 [21:12]=テーブル番号 [11:0]=ページ内オフセット
+    ///
+    /// TLB (変換の写し) はまだ持たない。決定的なので**毎回歩いても結果は同じ**で、
+    /// 速度が問題になるまで足さない (「測ってから足す」— docs/ci.md と同じ流儀)。
+    /// 未マップは即panic — #PF配送はまだ無く、正体 (どの線形番地か) を報告する
+    pub fn translate(&self, la: u32) -> u32 {
+        if self.cpu.cr0 & 0x8000_0000 == 0 {
+            return la; // PG off: 線形がそのまま物理
+        }
+        let dir = (la >> 22) & 0x3FF;
+        let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
+        if pde & 1 == 0 {
+            panic!("page fault: {la:#010x} — PDE not present (まだ#PF配送は無い)");
+        }
+        if pde & 0x80 != 0 {
+            // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる
+            return (pde & 0xFFC0_0000) | (la & 0x003F_FFFF);
+        }
+        let tbl = (la >> 12) & 0x3FF;
+        let pte = self.read_phys32((pde & !0xFFF) + tbl * 4);
+        if pte & 1 == 0 {
+            panic!("page fault: {la:#010x} — PTE not present (まだ#PF配送は無い)");
+        }
+        (pte & !0xFFF) | (la & 0xFFF)
     }
 
     /// メモリ書き込み。
@@ -193,7 +241,10 @@ impl Machine {
     /// メモリアクセスは最も回数の多い経路なので、**書き込み側だけで済む
     /// 仕掛けなら書き込み側に寄せる**。
     pub fn write8(&mut self, addr: u32, val: u8) {
-        let a = (addr as usize) & (MEM_SIZE - 1);
+        // 線形→物理。以後の VRAM 判定もデバッガも**物理番地**で語る
+        // (VRAMは物理アドレス空間の窓なので、そこに写像された線形から書いても
+        //  正しく dirty が立つ)
+        let a = (self.translate(addr) as usize) & (MEM_SIZE - 1);
         // デバッガを切っていれば真偽値1つで抜ける。**最も回数の多い経路**なので
         // 見張る番地の集合を引く前に元締めで落とす
         if self.dbg.on && self.dbg.mem_write.contains(&(a as u32)) {
@@ -418,6 +469,8 @@ impl Machine {
         w.u16(self.cpu.tr_sel);
         w.u32(self.cpu.tr_base);
         w.u32(self.cpu.tr_limit);
+        w.u32(self.cpu.cr2);
+        w.u32(self.cpu.cr3);
         for h in self.cpu.hidden {
             w.u32(h.base);
             w.u32(h.limit);
@@ -476,6 +529,8 @@ impl Machine {
         m.cpu.tr_sel = r.u16()?;
         m.cpu.tr_base = r.u32()?;
         m.cpu.tr_limit = r.u32()?;
+        m.cpu.cr2 = r.u32()?;
+        m.cpu.cr3 = r.u32()?;
         for i in 0..6 {
             m.cpu.hidden[i] = cpu::SegHidden {
                 base: r.u32()?,

@@ -69,8 +69,12 @@ pub struct Cpu {
     /// (regsをu32で持っているのと同じ判断)
     pub ip: u32,
     pub flags: u32,
-    /// CR0。bit0 = PE (Protection Enable)。これが立つと sregs の意味が変わる
+    /// CR0。bit0 = PE (Protection Enable) / bit31 = PG (Paging)
     pub cr0: u32,
+    /// CR2。**フォールトした線形アドレス** (まだ#PF配送はしないので観測用)
+    pub cr2: u32,
+    /// CR3。ページディレクトリの物理番地 (下位12bitはフラグ)
+    pub cr3: u32,
     /// GDTR (LGDTで積む)。記述子表の場所と大きさ
     pub gdtr_base: u32,
     pub gdtr_limit: u16,
@@ -129,6 +133,8 @@ impl Cpu {
             ip: 0,
             flags: 0x0002, // bit1は常に1
             cr0: 0,
+            cr2: 0,
+            cr3: 0,
             gdtr_base: 0,
             gdtr_limit: 0,
             idtr_base: 0,
@@ -391,6 +397,15 @@ pub(crate) fn load_seg_raw(m: &mut Machine, idx: usize, sel: u16) {
     };
 }
 
+/// moffs のオフセットを読む。アドレスサイズが幅を決める (符号なし)
+fn fetch_addr(m: &mut Machine, wide: bool) -> u32 {
+    if wide {
+        fetch32(m)
+    } else {
+        fetch16(m) as u32
+    }
+}
+
 /// 相対分岐の飛び幅を読む。16bitなら符号拡張して32bitへ
 fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
     if wide {
@@ -584,30 +599,34 @@ pub fn step(m: &mut Machine) {
             let v = fetch_w(m, w);
             write_op_w(m, &rm, v, w);
         }
+        // MOV AL/AX/EAX <-> moffs。**オフセットの幅はアドレスサイズが決める**。
+        // 16bit固定にしていたため、32bitコードで moffs32 を2バイトしか読まず、
+        // 以降がずれた (ページングのテストで露見。pm_hello では直後がHLTで
+        // 結果が偶然合い、見逃していた)
         0xA0 => {
-            let off = fetch16(m);
+            let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let v = m.read8(m.cpu.lin(seg, off as u32));
+            let v = m.read8(m.cpu.lin(seg, off));
             m.cpu.set_reg8(0, v);
         }
         0xA1 => {
-            let off = fetch16(m);
+            let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let a = m.cpu.lin(seg, off as u32);
+            let a = m.cpu.lin(seg, off);
             let w = d.opsize32;
             let v = if w { m.read32(a) } else { m.read16(a) as u32 };
             m.cpu.set_reg_w(AX, v, w);
         }
         0xA2 => {
-            let off = fetch16(m);
+            let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
             let v = m.cpu.reg8(0);
-            m.write8(m.cpu.lin(seg, off as u32), v);
+            m.write8(m.cpu.lin(seg, off), v);
         }
         0xA3 => {
-            let off = fetch16(m);
+            let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let a = m.cpu.lin(seg, off as u32);
+            let a = m.cpu.lin(seg, off);
             let w = d.opsize32;
             let v = m.cpu.reg_w(AX, w);
             if w {
@@ -1354,24 +1373,31 @@ pub fn step(m: &mut Machine) {
                     let mrm = fetch8(m);
                     let cr = ((mrm >> 3) & 7) as usize;
                     let r = (mrm & 7) as usize;
-                    if cr != 0 {
-                        panic!("unimplemented control register CR{cr}");
-                    }
+                    // MOV r32,CRn (0x20) と MOV CRn,r32 (0x22)。CR0/CR2/CR3を扱う
                     if op2 == 0x20 {
-                        m.cpu.regs[r] = m.cpu.cr0;
+                        m.cpu.regs[r] = match cr {
+                            0 => m.cpu.cr0,
+                            2 => m.cpu.cr2,
+                            3 => m.cpu.cr3,
+                            _ => panic!("unimplemented read of CR{cr}"),
+                        };
                     } else {
-                        let was_pe = m.cpu.pe();
-                        m.cpu.cr0 = m.cpu.regs[r];
-                        if m.cpu.cr0 & 0x8000_0000 != 0 {
-                            panic!("CR0.PG (paging) is not implemented yet");
-                        }
-                        // PEが立った瞬間、写しを「今のリアルモードの姿」で初期化する。
-                        // 実機ではロード時から写しがあるので何も起きない場面だが、
-                        // こちらはリアルモードで写しを持たない (遅延) ため、境界で作る
-                        if !was_pe && m.cpu.pe() {
-                            for i in 0..6 {
-                                m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
+                        let v = m.cpu.regs[r];
+                        match cr {
+                            0 => {
+                                let was_pe = m.cpu.pe();
+                                m.cpu.cr0 = v;
+                                // PEが立った瞬間、隠しレジスタを今のリアルモードの姿で
+                                // 初期化する (リアルモードは写しを遅延評価しているため)
+                                if !was_pe && m.cpu.pe() {
+                                    for i in 0..6 {
+                                        m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
+                                    }
+                                }
                             }
+                            2 => m.cpu.cr2 = v,
+                            3 => m.cpu.cr3 = v, // ページテーブルが替わる。TLBは持たないので何もしない
+                            _ => panic!("unimplemented write of CR{cr}"),
                         }
                     }
                 }

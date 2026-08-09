@@ -24,7 +24,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v3: IDTR を追加
 /// v4: IP を32bit (EIP) にした
 /// v5: TR (タスクレジスタ) を追加
-pub const VERSION: u16 = 5;
+/// v6: CR2/CR3 (ページング) を追加
+pub const VERSION: u16 = 6;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
