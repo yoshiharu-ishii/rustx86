@@ -13,6 +13,7 @@ import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountBench } from './bench.js';
+import { mountLinux } from './linux-machine.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -93,14 +94,24 @@ function syncControls() {
   const on = !!machine;
   // ベンチには端末が無いので、端末向けの操作は伏せる。
   // デバッガだけは**どちらでも使える**
-  for (const id of ['boot', 'pause', 'snap', 'restore', 'snapfile', 'save']) {
-    $(id).hidden = !!bench;
+  for (const id of ['boot', 'pause']) $(id).hidden = !!bench;
+  // スナップショットとログはVGA端末のもの。Linuxでは再起動と一時停止だけ残す
+  // (シリアル端末には履歴が無く、ワーカー越しのスナップショットはまだ無い)
+  for (const id of ['snap', 'restore', 'snapfile', 'save']) {
+    $(id).hidden = !!bench || !!linux;
   }
-  // 配列の選択と MIPS の表示も端末のもの
-  $('layout').closest('.sel').hidden = !!bench;
+  // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
+  $('layout').closest('.sel').hidden = !!bench || !!linux;
   $('gauge').hidden = !!bench;
-  $('debug').disabled = !on && !bench;
+  // デバッガはメインスレッドの機械を覗く道具。Linuxはワーカーの中なので覗けない
+  $('debug').disabled = (!on && !bench) || !!linux;
   if (bench) return;
+  if (linux) {
+    $('boot').disabled = linux.busy;
+    $('pause').disabled = !linux.booted;
+    $('pause').textContent = linux.paused ? '再開' : '一時停止';
+    return;
+  }
   $('pause').disabled = !on;
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
@@ -115,6 +126,13 @@ let lastLabel = '';
 function boot(image, label) {
   lastLabel = label;
   machine?.stop();
+  // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
+  if (linux) {
+    linux.destroy();
+    linux = null;
+    $('linuxScreen').hidden = true;
+    $('screen').hidden = false;
+  }
   try {
     machine = new Machine(image);
   } catch (e) {
@@ -153,6 +171,10 @@ function boot(image, label) {
 
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
 setInterval(() => {
+  if (linux) {
+    $('gauge').textContent = linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '';
+    return;
+  }
   if (!machine) return;
   const parts = [];
   parts.push(machine.paused ? '停止中' : `${machine.mips.toFixed(0)} MIPS`);
@@ -185,6 +207,8 @@ layoutSel.addEventListener('change', () => {
 // 握らせると再起動後に古い機械を覗き続けることになる
 /** ベンチを選んでいるときの取っ手 (選んでいなければ null) */
 let bench = null;
+/** Linuxを選んでいるときの取っ手 (選んでいなければ null) */
+let linux = null;
 
 // **いま動いている機械**を見せる。OSとベンチで持ち主が違うので、
 // 参照を握らず毎回聞く
@@ -207,6 +231,7 @@ const dbg = new Debugger({
       await bench.restartDebugMachine();
       return;
     }
+    if (linux) return; // Linuxはワーカーの中なのでデバッガの相手にならない
     if (!current) return;
     await bootFromUrl(current);
     startScript(current.script);
@@ -221,6 +246,12 @@ $('debug').addEventListener('click', async () => {
 });
 
 $('pause').addEventListener('click', () => {
+  if (linux) {
+    linux.setPaused(!linux.paused);
+    syncControls();
+    $('linuxScreen').focus();
+    return;
+  }
   if (!machine) return;
   if (machine.paused) machine.start();
   else machine.stop();
@@ -229,6 +260,10 @@ $('pause').addEventListener('click', () => {
 });
 
 $('boot').addEventListener('click', () => {
+  if (linux) {
+    linux.boot();
+    return;
+  }
   if (lastImage) boot(lastImage, 'ディスク');
 });
 
@@ -432,12 +467,33 @@ async function select(m) {
   machine?.stop();
   bench?.destroy();
   bench = null;
+  linux?.destroy();
+  linux = null;
   $('benchPane').hidden = true;
+  $('linuxScreen').hidden = true;
   $('screen').hidden = false;
 
   current = m;
   markCurrent(m.id);
   showNote(m);
+
+  if (m.kind === 'linux') {
+    machine = null;
+    lastImage = null;
+    term.reset();
+    $('screen').hidden = true;
+    $('linuxScreen').hidden = false;
+    linux = mountLinux($('linuxScreen'), {
+      onStatus: setStatus,
+      onState: syncControls,
+    });
+    dbg.reset();
+    syncControls();
+    // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)
+    await linux.boot();
+    syncControls();
+    return;
+  }
 
   if (m.kind === 'bench') {
     machine = null;

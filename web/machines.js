@@ -70,14 +70,18 @@ export const MACHINES = [
     id: 'linux',
     label: 'Linux 6.18',
     sub: 'bzImage + initramfs',
-    // **別ページに住む。** Linuxのコンソールはシリアル (ttyS0) で、
-    // このページのVGAテキスト端末とは描画の作法が丸ごと違う。
-    // 無理に同居させず、独立ページ (linux.html) へリンクで飛ぶ。
-    href: './linux.html',
+    // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
+    // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
+    // linux-machine.js (ワーカー)。**選び方と見た目はELKSと同じ**にする。
+    kind: 'linux',
     status: 'ok',
     note:
       'BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。' +
-      'コンソールはシリアルなので独立ページで動く。起動には1〜2分かかる。',
+      'コンソールはシリアル (ttyS0)。シェルまで1〜2分かかる — デコンプレッサ・' +
+      'ページング・ドライバ初期化を全部ソフトウェアでやっているため。' +
+      'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
+    // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
+    // 無いときの案内は linux-machine.js が fetch 失敗時に出す
   },
   {
     group: 'その他',
