@@ -132,8 +132,8 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     let base = m.read32(addr.wrapping_add(2));
                     m.cpu.idtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
                 }
-                // INVLPG: TLBの1エントリを無効化。TLBを持たないので何もしない
-                (7, Operand::Mem { .. }) => {}
+                // INVLPG: TLBの1エントリを無効化する
+                (7, Operand::Mem { addr, .. }) => m.tlb_flush_page(*addr),
                 _ => panic!(
                     "unimplemented 0f 01 /{reg} at {:04x}:{:04x}",
                     m.cpu.sregs[CS], start_ip
@@ -172,6 +172,8 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     0 => {
                         let was_pe = m.cpu.pe();
                         m.cpu.cr0 = v;
+                        // PG/WP の変更は変換と権限判定を変える。写しを捨てる
+                        m.tlb_flush();
                         // PEが立った瞬間、隠しレジスタを今のリアルモードの姿で
                         // 初期化する (リアルモードは写しを遅延評価しているため)
                         if !was_pe && m.cpu.pe() {
@@ -181,7 +183,12 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                         }
                     }
                     2 => m.cpu.cr2 = v,
-                    3 => m.cpu.cr3 = v, // ページテーブルが替わる。TLBは持たないので何もしない
+                    3 => {
+                        // ページディレクトリが替わる = アドレス空間の切り替え。
+                        // 古い写しは全部捨てる (プロセス切り替えの心臓部)
+                        m.cpu.cr3 = v;
+                        m.tlb_flush();
+                    }
                     4 => m.cpu.cr4 = v,
                     _ => panic!("unimplemented write of CR{cr}"),
                 }
