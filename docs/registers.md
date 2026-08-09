@@ -17,6 +17,55 @@ CPUの部品は8本の汎用レジスタから始まって、プロテクトモ�
 3. **新しい状態には覗き窓を同じPRで付ける** — デバッガ (CLI `info` /
    ブラウザのMode欄) に出ないレジスタを作らない
 
+## 関係図 — レジスタは3本の道でメモリに繋がる
+
+一覧の前に配線を見る。**すべてのレジスタは「メモリに触るための3本の道」の
+どこかに居る**。そして隠しレジスタが3本全部に base を配っている —
+これがセグメント機構の骨格である。
+
+```mermaid
+flowchart TB
+    CR0["CR0.PE<br>(モードの大元)"] -. "セレクタの解釈を切り替える" .-> SEL
+
+    subgraph LOAD["表の道 — セグメントロードの瞬間だけ通る"]
+        SEL["セレクタ (見える部分)<br>sregs"] -- "保護: GDTの行番号" --> GDT[("GDT<br>(GDTRが場所を知る)")]
+        GDT -- "写し取り (load_seg)" --> HID
+        SEL -- "リアル: ×16 を写す" --> HID["隠しレジスタ<br>base / limit / access / D"]
+    end
+
+    subgraph RUN["実行の道 — 毎命令通る"]
+        EIP --> F["フェッチ番地 = CS.base + EIP"]
+        HID -- "CSのbase" --> F
+        F --> MEM[("メモリ")]
+        MEM -- "命令バイト" --> DEC["デコーダ"]
+        HID -- "CSのDビット = 既定幅16/32" --> DEC
+    end
+
+    subgraph DATA["データの道 — メモリを触る命令だけ"]
+        GPR["汎用レジスタ<br>EAX..EDI"] --> EA["実効アドレス<br>base + index×scale + disp"]
+        EA --> L2["線形番地 = DS.base + EA"]
+        HID -- "DSのbase" --> L2
+        L2 --> MEM
+    end
+
+    subgraph STK["スタックの道 — PUSH/POP/CALL/割り込み"]
+        ESP --> L3["線形番地 = SS.base + ESP"]
+        HID -- "SSのbase" --> L3
+        L3 --> MEM
+    end
+
+    IDTR -. "割り込みのときだけ:<br>ゲートを引いて CS:EIP を差し替える" .-> F
+    DEC --> GPR
+```
+
+読みどころ:
+
+- **表の道は細い** — GDTを通るのはセグメントロードの瞬間だけ。以後は写し
+  (隠しレジスタ) しか見ない。だからGDTを書き換えても走行中のコードは気づかない
+- **CR0.PE が変えるのは1箇所だけ** — セレクタの解釈 (×16か、行番号か)。
+  他の配線は両モードで同じ。「リアルモードは保護モードの特殊ケース」の図示
+- IDTRは平時は遊んでいて、割り込みの瞬間だけ CS:EIP を差し替えに来る
+
 ## 汎用レジスタ (`Cpu::regs: [u32; 8]`)
 
 | 名前 | 由来 | 暗黙の役割 (命令が勝手に使う) |
@@ -117,6 +166,49 @@ ACを**restore時に必ず落とす** (`& 0x0FD5`) のには前科がある: POP
   ウォッチポイント) の方が強い。ゲストOSが触りに来たら考える
 - **x87 FPU** — 命令はno-opで受けている。ELKSもFreeDOSも要求しなかった。
   Linuxが要求した時点で判断する
+
+## 1命令が何本のレジスタに触るか
+
+配線図は「ありうる道」を全部描くので、**1本の命令が実際に歩く道**も
+1つ置く。題材は抽象的なMOVではなく、IDT実装 (PR #26) で**実際にIPずれ
+事故を起こした命令**にする — 正常系と事故が同じ図で語れるからである。
+
+```mermaid
+sequenceDiagram
+    participant DEC as デコーダ
+    participant EIP
+    participant CS as CS隠し
+    participant DS as DS隠し
+    participant MEM as メモリ
+    participant EAX
+
+    Note over DEC,EAX: mov dword [0x504], eax (C7 05 04 05 00 00 34 12 F7 50)
+
+    DEC->>CS: Dビットは?
+    CS-->>DEC: D=1 → 既定幅は32bit
+
+    loop 1バイトずつ10回
+        DEC->>MEM: read8(CS.base + EIP)
+        MEM-->>DEC: 次のバイト
+        DEC->>EIP: advance_ip(1) — 折り返しはここが知る
+    end
+
+    Note over DEC: 32bitの表: mod=00 rm=101 は「disp32直接」<br>→ 0x504 と読み、続く4バイトが即値
+
+    DEC->>DS: baseは?
+    DS-->>DEC: base=0 (隠しレジスタの写し)
+    DEC->>EAX: 値は?
+    EAX-->>DEC: 0x50F71234
+    DEC->>MEM: write32(DS.base + 0x504, 0x50F71234)
+
+    Note over DEC,MEM: 【事故の再現】16bitの表で読むと mod=00 rm=101 は「[DI]」。<br>disp32を読まず2バイトで命令を終え、残り8バイトを次の命令として<br>実行 → EIPがずれてGDTの中へ滑落 (PR #26 で実際に起きた事故)
+```
+
+たった1本のメモリ書き込みが、CS隠し (幅の決定) → EIP (10回の歩進) →
+DS隠し (baseの写し) → EAX → メモリ、と**5つの部品に触っている**。
+そして最後の注記が要点で、デコーダが引く「表」が16bitと32bitで違うため、
+幅を間違えた瞬間に**命令の切れ目そのものがずれる**。倒れた場所が
+犯行現場ではなくなる仕組みが、この図の中にある。
 
 ## 覗き窓
 
