@@ -204,3 +204,72 @@ fn リアルモードのipは64kで折り返す() {
     m.step();
     assert_eq!(m.cpu.ip, 0, "リアルモードで64Kを越えてしまった");
 }
+
+// ---- 特権リング (asm/pm_ring.asm) ----
+
+const RING_IMAGE: &[u8] = include_bytes!("../../asm/pm_ring.bin");
+
+fn boot_ring() -> Machine {
+    let mut m = Machine::new();
+    m.load_boot_sector(RING_IMAGE).unwrap();
+    m
+}
+
+#[test]
+fn リング3へ降りて0へ落ちて3へ帰る() {
+    let mut m = boot_ring();
+    run(&mut m, 10_000);
+    assert!(m.halted, "HLTに到達していない");
+    assert_eq!(m.read32(0x500), 0x0000_3333, "リング3に降りられていない");
+    assert_eq!(
+        m.read32(0x504),
+        0x0000_C0DE,
+        "int 0x30 がリング0に届いていない"
+    );
+    assert_eq!(
+        m.read32(0x508),
+        0x00BA_C703,
+        "iretd でリング3へ帰れていない"
+    );
+}
+
+#[test]
+fn リング3ではcplが3になる() {
+    let mut m = boot_ring();
+    // 0x500 に目印が書かれた瞬間 = リング3で走っている
+    m.dbg.watch_mem(0x500);
+    for _ in 0..10_000 {
+        if m.dbg.stop.is_some() || m.halted {
+            break;
+        }
+        m.step();
+    }
+    assert!(m.dbg.take_stop().is_some(), "リング3に到達していない");
+    assert_eq!(m.cpu.cpl(), 3, "CPLが3でない");
+    assert_eq!(m.cpu.sregs[cpu::CS], 0x1B, "CSのRPLが3でない");
+}
+
+#[test]
+fn リング0の受け手ではスタックがtssのものに差し替わる() {
+    let mut m = boot_ring();
+    // 0x504 の目印 = svc_handler の中 (リング0)
+    m.dbg.watch_mem(0x504);
+    for _ in 0..10_000 {
+        if m.dbg.stop.is_some() || m.halted {
+            break;
+        }
+        m.step();
+    }
+    assert!(
+        m.dbg.take_stop().is_some(),
+        "リング0の受け手に到達していない"
+    );
+    assert_eq!(m.cpu.cpl(), 0);
+    assert_eq!(m.cpu.sregs[cpu::SS] & !3, 0x10, "SSがTSSのSS0でない");
+    // ESP0=0x6000 から [EIP,CS,EFLAGS,ESP,SS] の5つ (20バイト) が積まれた状態
+    assert_eq!(
+        m.cpu.regs[cpu::SP] as u16,
+        0x6000 - 20,
+        "ESPがTSSのESP0基準でない"
+    );
+}

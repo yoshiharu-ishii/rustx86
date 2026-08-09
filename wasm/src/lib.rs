@@ -232,7 +232,7 @@ impl Emulator {
         format!(
             r#"{{"regs":[{}],"sregs":[{}],"ip":{},"flags":{},"flagNames":"{}",
                "bytes":"{}","instr":{},"executed":{},"halted":{},"lin":{},
-               "pe":{},"cr0":{},"gdtrBase":{},"gdtrLimit":{},"idtrBase":{},"idtrLimit":{},
+               "pe":{},"cr0":{},"cpl":{},"gdtrBase":{},"gdtrLimit":{},"idtrBase":{},"idtrLimit":{},"trSel":{},
                "cs":{},"ds":{},"ss":{}}}"#,
             c.regs
                 .iter()
@@ -254,10 +254,12 @@ impl Emulator {
             lin,
             c.pe(),
             c.cr0,
+            c.cpl(),
             c.gdtr_base,
             c.gdtr_limit,
             c.idtr_base,
             c.idtr_limit,
+            c.tr_sel,
             seg(CS),
             seg(DS),
             seg(SS),

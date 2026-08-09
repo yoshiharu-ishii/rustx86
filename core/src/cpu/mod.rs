@@ -77,6 +77,11 @@ pub struct Cpu {
     /// IDTR (LIDTで積む)。保護モードの割り込みはIVTではなくこの表を引く
     pub idtr_base: u32,
     pub idtr_limit: u16,
+    /// TR (LTRで積む)。TSSの場所 — リング3→0の瞬間に使うスタックの置き場。
+    /// **リングで唯一、本当に新しい部品** (docs/registers.md)
+    pub tr_sel: u16,
+    pub tr_base: u32,
+    pub tr_limit: u32,
     /// セグメントの**隠しレジスタ** (実機と同じ構造)。
     ///
     /// 実機の386は、セグメントレジスタをロードした瞬間に記述子の中身
@@ -128,6 +133,9 @@ impl Cpu {
             gdtr_limit: 0,
             idtr_base: 0,
             idtr_limit: 0,
+            tr_sel: 0,
+            tr_base: 0,
+            tr_limit: 0,
             hidden: [SegHidden::real(0); 6],
         }
     }
@@ -135,6 +143,17 @@ impl Cpu {
     /// プロテクトモードか (CR0.PE)
     pub fn pe(&self) -> bool {
         self.cr0 & 1 != 0
+    }
+
+    /// CPL (現在特権レベル)。独立したレジスタではない —
+    /// **いま走っているCSセレクタの下位2bit**がそのまま現在特権である。
+    /// リアルモードは常に0 (全能)
+    pub fn cpl(&self) -> u8 {
+        if self.pe() {
+            (self.sregs[CS] & 3) as u8
+        } else {
+            0
+        }
     }
 
     /// セグメントのbase。
@@ -293,7 +312,35 @@ pub struct Decoder {
 /// 特権チェック (DPL/RPL/CPL) はまだ実装しない。リング0だけの世界では
 /// 全部 0=0 で恒真になるためで、リング3を作るときに一緒に入れる。
 /// **黙って通す場合とは違い、チェックすべき材料 (access) は写してある**
+/// **明示的な** セグメントロード (MOV Sreg / POP Sreg / far転送)。
+/// ソフトウェアがやる操作なので特権チェックを受ける。
+/// CPU内部のロード (ゲート・リング遷移・iret) は [`load_seg_raw`] を直に呼ぶ
 pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) {
+    // データ/スタックの特権チェックは、GDTを引く前に「持てるか」を見る。
+    // **DPL >= max(CPL, RPL)** — リング3がリング0のデータを覗くのを防ぐ、
+    // 保護の一丁目。コードセグメント (CS) は far転送側の責任なのでここでは見ない
+    if m.cpu.pe() && idx != CS && sel & !0x7 != 0 {
+        let off = (sel & !0x7) as u32;
+        let a = m.cpu.gdtr_base.wrapping_add(off);
+        let access = ((m.read32(a.wrapping_add(4)) >> 8) & 0xFF) as u8;
+        if access & 0x10 != 0 && access & 0x08 == 0 {
+            // コード以外 = データ/スタック
+            let dpl = (access >> 5) & 3;
+            let rpl = (sel & 3) as u8;
+            let cpl = m.cpu.cpl();
+            if dpl < cpl.max(rpl) {
+                panic!(
+                    "selector {sel:#06x}: DPL={dpl} < max(CPL={cpl}, RPL={rpl}) —                      general protection (まだ#GP配送は無いのでpanic)"
+                );
+            }
+        }
+    }
+    load_seg_raw(m, idx, sel);
+}
+
+/// セグメントレジスタへ記述子を写す (**特権チェック無し**)。
+/// CPUが内部でやるロード — ゲートのCS、リング遷移のSS0、iretの復帰 — 用。
+pub(crate) fn load_seg_raw(m: &mut Machine, idx: usize, sel: u16) {
     if !m.cpu.pe() {
         m.cpu.sregs[idx] = sel;
         m.cpu.hidden[idx] = SegHidden::real(sel);
@@ -654,13 +701,17 @@ pub fn step(m: &mut Machine) {
         }
 
         // --- PUSH imm (186) ---
+        // PUSH imm — 積む幅はオペランドサイズに従う。
+        // 16bit固定にしていたため、32bitコードで `push dword` が2バイトしか
+        // 積まず、スタックが1語ずつずれて iretd が化けた (特権リングのテストで
+        // 発覚。**倒れた場所は犯行現場ではない**を、間接分岐の谷で再演した)
         0x68 => {
-            let v = fetch16(m);
-            push16(m, v);
+            let v = fetch_w(m, d.opsize32);
+            push_w(m, v, d.opsize32);
         }
         0x6A => {
-            let v = fetch8(m) as i8 as u16;
-            push16(m, v);
+            let v = fetch8(m) as i8 as i32 as u32;
+            push_w(m, v, d.opsize32);
         }
 
         // --- IMUL r16, r/m16, imm (186) ---
@@ -860,9 +911,9 @@ pub fn step(m: &mut Machine) {
         // ホスト関数へ横流しする今の方式ではOSが動かない。
         0xCD => {
             let n = fetch8(m);
-            interrupt(m, n);
+            software_int(m, n);
         }
-        0xCC => interrupt(m, 3), // INT3 (デバッガのブレークポイント)
+        0xCC => software_int(m, 3), // INT3 (デバッガのブレークポイント)
         0xCE => {
             // INTO: OFが立っているときだけ割り込み4。立っていなければ何もしない
             if m.cpu.flag(OF) {
@@ -1249,7 +1300,32 @@ pub fn step(m: &mut Machine) {
         0x0F => {
             let op2 = fetch8(m);
             match op2 {
-                // システム表の操作。ModRMのreg欄が「何をするか」を選ぶ
+                // LLDT/LTR系。ModRMのreg欄が「何をするか」を選ぶ
+                0x00 => {
+                    let (reg, rm) = modrm(m, &d);
+                    match reg {
+                        // LTR: TSSの場所をTRへ。記述子はGDTから読む
+                        3 => {
+                            let sel = read_op16(m, &rm);
+                            let off = (sel & !0x7) as u32;
+                            let a = m.cpu.gdtr_base.wrapping_add(off);
+                            let lo = m.read32(a);
+                            let hi = m.read32(a.wrapping_add(4));
+                            let ty = ((hi >> 8) & 0x1F) as u8;
+                            if ty != 0x09 {
+                                panic!("LTR: not an available 32bit TSS (type {ty:#04x})");
+                            }
+                            m.cpu.tr_sel = sel;
+                            m.cpu.tr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
+                            m.cpu.tr_limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
+                        }
+                        _ => panic!(
+                            "unimplemented 0f 00 /{reg} at {:04x}:{:04x}",
+                            m.cpu.sregs[CS], start_ip
+                        ),
+                    }
+                }
+                // システム表の操作
                 0x01 => {
                     let (reg, rm) = modrm(m, &d);
                     match (reg, &rm) {
@@ -1363,6 +1439,26 @@ pub fn interrupt(m: &mut Machine, n: u8) {
     m.cpu.sregs[CS] = m.read16(vec + 2);
 }
 
+/// ソフトウェア INT n の入口。**門のDPLがCPLより浅ければ通さない** —
+/// リング3が好きなベクタを叩けたら、保護は成立しない。
+/// ハードウェア割り込みと例外はこのチェックを受けない (CPU自身が起こすため)
+pub(crate) fn software_int(m: &mut Machine, n: u8) {
+    if m.cpu.pe() {
+        let off = n as u32 * 8;
+        if off + 7 <= m.cpu.idtr_limit as u32 {
+            let hi = m.read32(m.cpu.idtr_base.wrapping_add(off).wrapping_add(4));
+            let gate_dpl = ((hi >> 13) & 3) as u8;
+            if gate_dpl < m.cpu.cpl() {
+                panic!(
+                    "int {n:#04x} from CPL{}: gate DPL={gate_dpl} —                      general protection (まだ#GP配送は無いのでpanic)",
+                    m.cpu.cpl()
+                );
+            }
+        }
+    }
+    interrupt(m, n);
+}
+
 /// 保護モードの割り込み配送。IVTではなく**IDTのゲート記述子**を引く。
 ///
 /// ゲートは「どのセグメントの、どこへ、どの作法で」を全部言う8バイト:
@@ -1398,6 +1494,32 @@ fn interrupt_protected(m: &mut Machine, n: u8) {
         _ => panic!("vector {n:#04x}: unimplemented gate type {ty:#04x}"),
     }
 
+    // 受け手のコードセグメントのDPLが、いまより深ければ**リングが変わる**
+    let old_cpl = m.cpu.cpl();
+    let target_dpl = {
+        let off = (sel & !0x7) as u32;
+        let a = m.cpu.gdtr_base.wrapping_add(off);
+        ((m.read32(a.wrapping_add(4)) >> 13) & 3) as u8
+    };
+
+    if target_dpl < old_cpl {
+        // ---- リング遷移 (3→0など): スタックを差し替えてから積む ----
+        //
+        // ここが**TSSの存在理由のすべて**である。リング3のスタックを
+        // カーネルが信用するわけにはいかない (ユーザーが好きな場所を
+        // 指させられる) ので、落ちた瞬間に使うスタックはTSSが決めておく。
+        // 元の SS:ESP は新しいスタックに積んで、帰り道 (iretd) が拾う
+        let old_ss = m.cpu.sregs[SS] as u32;
+        let old_esp = m.cpu.regs[SP];
+        // 32bit TSS: +4 = ESP0, +8 = SS0 (リング0に落ちる場合)
+        let esp0 = m.read32(m.cpu.tr_base.wrapping_add(4));
+        let ss0 = m.read16(m.cpu.tr_base.wrapping_add(8));
+        load_seg_raw(m, SS, ss0);
+        m.cpu.regs[SP] = esp0;
+        push32(m, old_ss);
+        push32(m, old_esp);
+    }
+
     // EFLAGS, CS, EIP を32bitで積む (32bitゲート)
     push32(m, m.cpu.flags);
     push32(m, m.cpu.sregs[CS] as u32);
@@ -1407,7 +1529,7 @@ fn interrupt_protected(m: &mut Machine, n: u8) {
         m.cpu.set_flag(IF, false);
     }
     m.cpu.set_flag(TF, false);
-    load_seg(m, CS, sel);
+    load_seg_raw(m, CS, sel);
     m.cpu.set_ip(dest);
 }
 
@@ -1419,10 +1541,20 @@ pub fn iret(m: &mut Machine) {
         let ip = pop32(m);
         let sel = pop32(m) as u16;
         let f = pop32(m);
-        load_seg(m, CS, sel);
+        // 戻り先のRPLがいまのCPLより浅い (数字が大きい) なら**外側リングへの
+        // 復帰**で、ESPとSSもスタックから取り出す。積む側 (リング遷移) と対。
+        // 「行ったことのない場所へ戻る」— リング3への降下もこの経路を使う
+        let to_outer = ((sel & 3) as u8) > m.cpu.cpl();
+        load_seg_raw(m, CS, sel);
         m.cpu.set_ip(ip);
         // 復元するフラグの範囲はリアルモードと同じ (AC等の上位はまだ持たない)
         m.cpu.flags = (f & 0x0FD5) | 0x0002;
+        if to_outer {
+            let esp = pop32(m);
+            let ss = pop32(m) as u16;
+            load_seg_raw(m, SS, ss);
+            m.cpu.regs[SP] = esp;
+        }
         return;
     }
     m.cpu.ip = pop16(m) as u32;
