@@ -25,7 +25,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v4: IP を32bit (EIP) にした
 /// v5: TR (タスクレジスタ) を追加
 /// v6: CR2/CR3 (ページング) を追加
-pub const VERSION: u16 = 6;
+/// v7: x87の制御語 (fpu_cw) を追加
+pub const VERSION: u16 = 7;
 
 /// 順番に書いていくだけの器
 pub struct Writer {

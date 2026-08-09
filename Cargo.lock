@@ -264,6 +264,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rustx86-core"
 version = "0.1.0"
+dependencies = [
+ "rustx86-disasm",
+]
 
 [[package]]
 name = "rustx86-cosim"

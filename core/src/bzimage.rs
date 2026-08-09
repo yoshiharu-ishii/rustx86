@@ -123,6 +123,16 @@ mod zp {
     pub const E820_TABLE: usize = 0x2D0; // エントリの並び (各20バイト)
     pub const HDR_START: usize = 0x1F1; // setupヘッダのコピー先 (bzImage先頭0x1F1から)
     pub const HDR_END: usize = 0x268; // ヘッダの終わり (このくらい写せば足りる)
+
+    // screen_info (先頭 0x00..0x40)。カーネル (とデコンプレッサ) は
+    // **ここを見て画面に書く**。空のままだと桁数0の画面に書こうとして
+    // 何も出ない — エラーメッセージすら読めなくなる (実際に困った)
+    pub const ORIG_VIDEO_PAGE: usize = 0x04;
+    pub const ORIG_VIDEO_MODE: usize = 0x06;
+    pub const ORIG_VIDEO_COLS: usize = 0x07;
+    pub const ORIG_VIDEO_LINES: usize = 0x0E;
+    pub const ORIG_VIDEO_ISVGA: usize = 0x0F;
+    pub const ORIG_VIDEO_POINTS: usize = 0x10;
 }
 
 /// zero page を組んで返す (4KB)。`ram_bytes` は MachineProfile の RAM
@@ -133,6 +143,15 @@ pub fn build_zero_page(img: &[u8], ram_bytes: u64, cmdline_ptr: u32) -> Vec<u8> 
     //    ここから読み返すので、bzImage の 0x1F1.. をコピーしておく
     let n = (zp::HDR_END - zp::HDR_START).min(img.len().saturating_sub(zp::HDR_START));
     zp[zp::HDR_START..zp::HDR_START + n].copy_from_slice(&img[zp::HDR_START..zp::HDR_START + n]);
+
+    // 1.5. screen_info: 80x25 のVGAテキスト画面 (mode 3) がある、と申告する。
+    //      このマシンのCRTC/テキストVRAM構成と同じもの
+    zp[zp::ORIG_VIDEO_PAGE] = 0;
+    zp[zp::ORIG_VIDEO_MODE] = 0x03;
+    zp[zp::ORIG_VIDEO_COLS] = 80;
+    zp[zp::ORIG_VIDEO_LINES] = 25;
+    zp[zp::ORIG_VIDEO_ISVGA] = 1;
+    zp[zp::ORIG_VIDEO_POINTS] = 16;
 
     // 2. コマンドラインのポインタ
     zp[zp::CMDLINE_PTR..zp::CMDLINE_PTR + 4].copy_from_slice(&cmdline_ptr.to_le_bytes());
