@@ -16,7 +16,7 @@ pub enum Operand {
     /// addr = セグメント適用後のリニアアドレス、off = セグメント内オフセット (LEA用)
     Mem {
         addr: u32,
-        off: u16,
+        off: u32,
     },
 }
 
@@ -40,6 +40,13 @@ pub fn modrm(m: &mut Machine, d: &Decoder) -> (usize, Operand) {
     let rm = (b & 7) as usize;
     if md == 3 {
         return (reg, Operand::Reg(rm));
+    }
+    // アドレスサイズで表が丸ごと入れ替わる。16bitの表は「BX+SI」のような
+    // 決まった組み合わせしか無いが、32bitでは**どのレジスタでも基底になれる**。
+    // 8086の表が狭かったのはModRMの3bitに組み合わせを詰め込んだためで、
+    // 386はSIBバイトを1枚足して自由を買った
+    if d.addrsize32 {
+        return modrm32(m, d, md, reg, rm);
     }
     let c = &m.cpu;
     // 16bit実効アドレスの基底 (rm=6かつmod=0はdisp16直接)
@@ -70,12 +77,65 @@ pub fn modrm(m: &mut Machine, d: &Decoder) -> (usize, Operand) {
         1 => fetch8(m) as i8 as u16,
         _ => fetch16(m),
     };
+    let off = base.wrapping_add(disp) as u32;
+    let seg = d.seg_override.unwrap_or(default_seg);
+    (
+        reg,
+        Operand::Mem {
+            addr: m.cpu.lin(seg, off),
+            off,
+        },
+    )
+}
+
+/// 32bitアドレッシングの実効アドレス (mod!=3)。
+///
+/// - rm=4 は**SIBバイト**がもう1枚続く: scale(2bit) × index(3bit) + base(3bit)
+/// - rm=5 かつ mod=0 は disp32 直接 (16bitの「rm=6かつmod=0」と同じ役割)
+/// - index=4 (ESP) は「indexなし」— ESPは添字になれない
+fn modrm32(m: &mut Machine, d: &Decoder, md: u8, reg: usize, rm: usize) -> (usize, Operand) {
+    let mut default_seg = DS;
+    let base: u32 = if rm == 4 {
+        // SIB
+        let sib = fetch8(m);
+        let scale = sib >> 6;
+        let index = ((sib >> 3) & 7) as usize;
+        let b = (sib & 7) as usize;
+        let idx = if index == 4 {
+            0
+        } else {
+            m.cpu.regs[index] << scale
+        };
+        let base = if b == 5 && md == 0 {
+            // base無し、disp32が続く
+            fetch32(m)
+        } else {
+            if b == SP || b == BP {
+                default_seg = SS;
+            }
+            m.cpu.regs[b]
+        };
+        base.wrapping_add(idx)
+    } else if rm == 5 && md == 0 {
+        // [disp32]
+        fetch32(m)
+    } else {
+        if rm == BP {
+            default_seg = SS;
+        }
+        m.cpu.regs[rm]
+    };
+    let disp: u32 = match md {
+        0 => 0,
+        1 => fetch8(m) as i8 as i32 as u32,
+        _ => fetch32(m),
+    };
     let off = base.wrapping_add(disp);
     let seg = d.seg_override.unwrap_or(default_seg);
     (
         reg,
         Operand::Mem {
-            addr: m.cpu.lin(seg, off as u32),
+            addr: m.cpu.lin(seg, off),
             off,
         },
     )
