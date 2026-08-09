@@ -316,16 +316,24 @@ fn info(m: &Machine) {
     );
     // モードと、その根拠。保護モードで死ぬときの手掛かりは大抵ここにある
     if c.pe() {
+        let pg = c.cr0 & 0x8000_0000 != 0;
         println!(
-            "mode=protected (CPL={})  CR0={:08x}  GDTR={:08x}+{:04x}  IDTR={:08x}+{:04x}  TR={:04x}",
+            "mode=protected (CPL={})  CR0={:08x}  paging={}  CR3={:08x}  TR={:04x}",
             c.cpl(),
             c.cr0,
-            c.gdtr_base,
-            c.gdtr_limit,
-            c.idtr_base,
-            c.idtr_limit,
+            if pg { "on" } else { "off" },
+            c.cr3,
             c.tr_sel
         );
+        println!(
+            "  GDTR={:08x}+{:04x}  IDTR={:08x}+{:04x}  CR2={:08x}",
+            c.gdtr_base, c.gdtr_limit, c.idtr_base, c.idtr_limit, c.cr2
+        );
+        if pg {
+            // いまのEIPが実際どの物理番地へ写っているか — ページングの一番の疑問
+            let lin = c.lin(rustx86_core::cpu::CS, c.ip);
+            println!("  EIP {lin:08x} (線形) -> {:08x} (物理)", m.translate(lin));
+        }
         for (name, i) in [("CS", CS), ("DS", DS), ("SS", SS)] {
             let h = &c.hidden[i];
             println!(

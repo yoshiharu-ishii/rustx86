@@ -443,8 +443,9 @@ export class Debugger {
       `${n}=${hex16(s.sel)}→base=${hex32(s.base)} ${s.big ? '32' : '16'}bit`;
     this.$('rxMode').innerHTML = c.pe
       ? `<span class="changed">protected</span> (CPL${c.cpl}) CR0=${hex32(c.cr0)} ` +
+        `paging=${c.pg ? '<span class="changed">on</span>' : 'off'} CR3=${hex32(c.cr3)}<br>` +
         `GDTR=${hex32(c.gdtrBase)}+${hex16(c.gdtrLimit)} ` +
-        `IDTR=${hex32(c.idtrBase)}+${hex16(c.idtrLimit)}<br>` +
+        `IDTR=${hex32(c.idtrBase)}+${hex16(c.idtrLimit)} CR2=${hex32(c.cr2)}<br>` +
         `${segFmt('CS', c.cs)}  ${segFmt('DS', c.ds)}  ${segFmt('SS', c.ss)}`
       : `real  CR0=${hex32(c.cr0)}`;
 
