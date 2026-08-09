@@ -103,8 +103,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                             present && is_data && access & 0x02 != 0
                         } else {
                             // VERR: data は常に読める、code は readable ビット
-                            present
-                                && (is_data || (access & 0x18 == 0x18 && access & 0x02 != 0))
+                            present && (is_data || (access & 0x18 == 0x18 && access & 0x02 != 0))
                         }
                     };
                     m.cpu.set_flag(super::ZF, ok);
