@@ -50,7 +50,10 @@ pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) {
     if m.cpu.pe() && idx != CS && sel & !0x7 != 0 {
         let off = (sel & !0x7) as u32;
         let a = m.cpu.gdtr_base.wrapping_add(off);
+        // 記述子表の読みは暗黙のスーパーバイザアクセス (CPL=3でもU/S検査を受けない)
+        let prev_sys = m.sys_access.replace(true);
         let access = ((m.read32(a.wrapping_add(4)) >> 8) & 0xFF) as u8;
+        m.sys_access.set(prev_sys);
         if access & 0x10 != 0 && access & 0x08 == 0 {
             // コード以外 = データ/スタック
             let dpl = (access >> 5) & 3;
@@ -98,8 +101,10 @@ pub(crate) fn load_seg_raw(m: &mut Machine, idx: usize, sel: u16) {
     // 記述子8バイト。baseとlimitが細切れなのは、286の6バイト記述子に
     // 後方互換の形で32bit分の桁を継ぎ足したため (ここにも地層がある)
     let a = m.cpu.gdtr_base.wrapping_add(off);
+    let prev_sys = m.sys_access.replace(true);
     let lo = m.read32(a);
     let hi = m.read32(a.wrapping_add(4));
+    m.sys_access.set(prev_sys);
     let base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
     let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
     let access = ((hi >> 8) & 0xFF) as u8;

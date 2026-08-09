@@ -59,7 +59,10 @@ pub(crate) fn software_int(m: &mut Machine, n: u8) {
     if m.cpu.pe() {
         let off = n as u32 * 8;
         if off + 7 <= m.cpu.idtr_limit as u32 {
+            // ゲート記述子の読みは暗黙のスーパーバイザアクセス
+            let prev_sys = m.sys_access.replace(true);
             let hi = m.read32(m.cpu.idtr_base.wrapping_add(off).wrapping_add(4));
+            m.sys_access.set(prev_sys);
             let gate_dpl = ((hi >> 13) & 3) as u8;
             if gate_dpl < m.cpu.cpl() {
                 panic!(
@@ -87,6 +90,20 @@ pub(crate) fn software_int(m: &mut Machine, n: u8) {
 /// まだやらないこと (リング0だけの世界なので恒真):
 /// DPLチェック、スタック切り替え (TSS)、エラーコードのpush
 pub(crate) fn interrupt_protected(m: &mut Machine, n: u8) {
+    interrupt_protected_err(m, n, None)
+}
+
+/// エラーコード付きの配送 (#PF/#GP等)。エラーコードは **EIPの後に** 積まれ、
+/// ハンドラの `add $4, %esp` (またはpop) が引き取る約束
+pub(crate) fn interrupt_protected_err(m: &mut Machine, n: u8, err: Option<u32>) {
+    // 配送はCPUの内部動作 — IDT/GDT/TSSの読みも、切り替えた先の
+    // カーネルスタックへのpushも、CPL=3のさなかでもスーパーバイザ権限で行う
+    let prev_sys = m.sys_access.replace(true);
+    interrupt_protected_inner(m, n, err);
+    m.sys_access.set(prev_sys);
+}
+
+fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
     let off = n as u32 * 8;
     if off + 7 > m.cpu.idtr_limit as u32 {
         panic!(
@@ -137,6 +154,9 @@ pub(crate) fn interrupt_protected(m: &mut Machine, n: u8) {
     push32(m, m.cpu.flags);
     push32(m, m.cpu.sregs[CS] as u32);
     push32(m, m.cpu.ip);
+    if let Some(e) = err {
+        push32(m, e);
+    }
     if ty == 0x0E {
         // 割り込みゲートだけがIFを落とす
         m.cpu.set_flag(IF, false);
@@ -158,13 +178,22 @@ pub fn iret(m: &mut Machine) {
         // 復帰**で、ESPとSSもスタックから取り出す。積む側 (リング遷移) と対。
         // 「行ったことのない場所へ戻る」— リング3への降下もこの経路を使う
         let to_outer = ((sel & 3) as u8) > m.cpu.cpl();
-        load_seg_raw(m, CS, sel);
-        m.cpu.set_ip(ip);
-        // 復元するフラグの範囲はリアルモードと同じ (AC等の上位はまだ持たない)
-        m.cpu.flags = (f & 0x0FD5) | 0x0002;
-        if to_outer {
+        // **popは全部、旧特権のうちに済ませる。** 実機のリング遷移は命令の
+        // 最後に一括で完成する — CSを先に積むと、その瞬間CPL=3になり、
+        // 残りのpop (カーネルスタック=US=0のページ) がU/S検査で弾かれて
+        // ゴミを拾う (Linuxの最初のユーザー空間復帰がこれで死んだ)
+        let outer = if to_outer {
             let esp = pop32(m);
             let ss = pop32(m) as u16;
+            Some((esp, ss))
+        } else {
+            None
+        };
+        load_seg_raw(m, CS, sel);
+        m.cpu.set_ip(ip);
+        // 復元するフラグの範囲は POPFD と同じ (IOPL/NT/AC/ID まで)
+        m.cpu.flags = (f & 0x0024_7FD5) | 0x0002;
+        if let Some((esp, ss)) = outer {
             load_seg_raw(m, SS, ss);
             m.cpu.regs[SP] = esp;
         }
@@ -174,6 +203,24 @@ pub fn iret(m: &mut Machine) {
     m.cpu.sregs[CS] = pop16(m);
     let f = pop16(m);
     m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
+}
+
+/// ページフォールト (#PF, vector 14) の配送。
+///
+/// **フォールトは命令の先頭IPで配る** (呼び出し側が巻き戻してから来る)。
+/// CR2 には失敗した線形アドレスが既に入っている。
+/// エラーコード: bit0=P (保護違反=1/不在=0) bit1=W (書き込み) bit2=U (ユーザー)
+pub fn page_fault(m: &mut Machine, err: u32) {
+    let (cs, ip) = (m.cpu.sregs[CS], m.cpu.ip);
+    if m.first_fault.is_none() {
+        m.first_fault = Some((14, cs, ip));
+    }
+    m.int_counts[14] += 1;
+    if m.int_recent.len() == 32 {
+        m.int_recent.pop_front();
+    }
+    m.int_recent.push_back((14, cs, ip));
+    interrupt_protected_err(m, 14, Some(err));
 }
 
 /// ゼロ除算・商オーバーフローで上がる #DE (INT 0)。

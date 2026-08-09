@@ -5,9 +5,7 @@
 //! 「オペコードのビットで演算が決まる」実CPUのデコード構造そのもの。
 //! (GRP1 = 0x80-0x83 のALU r/m,imm は ALU 族の隣に置いたまま)
 
-use super::operand::{
-    fetch16, fetch8, modrm, push16, read_op16, read_op8, read_op_w, write_op16, write_op8, Operand,
-};
+use super::operand::{fetch8, modrm, read_op8, read_op_w, write_op8, Operand};
 use super::*;
 use crate::Machine;
 
@@ -24,9 +22,10 @@ pub(crate) fn grp2(m: &mut Machine, d: &Decoder, op: u8) {
         let r = shift_rot(&mut m.cpu, kind as u8, a, count, 8);
         write_op8(m, &rm, r as u8);
     } else {
-        let a = read_op16(m, &rm) as u32;
-        let r = shift_rot(&mut m.cpu, kind as u8, a, count, 16);
-        write_op16(m, &rm, r as u16);
+        let w = d.opsize32;
+        let a = read_op_w(m, &rm, w);
+        let r = shift_rot(&mut m.cpu, kind as u8, a, count, if w { 32 } else { 16 });
+        write_op_w(m, &rm, r, w);
     }
 }
 
@@ -87,61 +86,86 @@ pub(crate) fn grp3_byte(m: &mut Machine, d: &Decoder, start_ip: u32) {
     }
 }
 
-/// GRP: ModRMのreg欄が演算を選ぶ命令群
+/// GRP: ModRMのreg欄が演算を選ぶ命令群。
+/// 幅はオペランドサイズ — 32bitでは積も被除数も **DX:AXではなくEDX:EAX** になる
 pub(crate) fn grp3_word(m: &mut Machine, d: &Decoder, start_ip: u32) {
+    let w = d.opsize32;
     let (kind, rm) = modrm(m, d);
-    let a = read_op16(m, &rm);
+    let a = read_op_w(m, &rm, w);
     match kind {
         0 | 1 => {
-            let b = fetch16(m);
-            alu16(&mut m.cpu, 4, a, b);
+            let b = fetch_w(m, w);
+            alu_w(&mut m.cpu, 4, a, b, w);
         }
-        2 => write_op16(m, &rm, !a),
+        2 => {
+            let r = if w { !a } else { (!a) & 0xFFFF };
+            write_op_w(m, &rm, r, w);
+        }
         3 => {
-            let r = alu16(&mut m.cpu, 5, 0, a);
+            let r = alu_w(&mut m.cpu, 5, 0, a, w);
             m.cpu.set_flag(CF, a != 0);
-            write_op16(m, &rm, r);
+            write_op_w(m, &rm, r, w);
         }
         4 => {
-            let r = m.cpu.reg16(AX) as u32 * a as u32;
-            m.cpu.set_reg16(AX, r as u16);
-            m.cpu.set_reg16(DX, (r >> 16) as u16);
-            let hi = r >> 16 != 0;
+            // MUL: (E)AX × r/m → 上位は (E)DX へ
+            let r = m.cpu.reg_w(AX, w) as u64 * a as u64;
+            let bits = if w { 32 } else { 16 };
+            m.cpu.set_reg_w(AX, r as u32, w);
+            m.cpu.set_reg_w(DX, (r >> bits) as u32, w);
+            let hi = r >> bits != 0;
             m.cpu.set_flag(CF, hi);
             m.cpu.set_flag(OF, hi);
         }
         5 => {
-            let r = (m.cpu.reg16(AX) as i16 as i32) * (a as i16 as i32);
-            m.cpu.set_reg16(AX, r as u16);
-            m.cpu.set_reg16(DX, (r >> 16) as u16);
-            let ext = (r as i16 as i32) != r;
+            // IMUL (1オペランド形)
+            let (r, ext) = if w {
+                let r = (m.cpu.reg_w(AX, true) as i32 as i64) * (a as i32 as i64);
+                (r as u64, (r as i32 as i64) != r)
+            } else {
+                let r = (m.cpu.reg16(AX) as i16 as i32) * (a as i16 as i32);
+                (r as u32 as u64, (r as i16 as i32) != r)
+            };
+            let bits = if w { 32 } else { 16 };
+            m.cpu.set_reg_w(AX, r as u32, w);
+            m.cpu.set_reg_w(DX, (r >> bits) as u32, w);
             m.cpu.set_flag(CF, ext);
             m.cpu.set_flag(OF, ext);
         }
         6 => {
-            let n = ((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32;
+            // DIV: (E)DX:(E)AX ÷ r/m
+            let bits = if w { 32 } else { 16 };
+            let n = ((m.cpu.reg_w(DX, w) as u64) << bits) | m.cpu.reg_w(AX, w) as u64;
             if a == 0 {
                 return divide_error(m, start_ip);
             }
-            let q = n / a as u32;
-            if q > 0xFFFF {
+            let q = n / a as u64;
+            let max = if w { 0xFFFF_FFFF } else { 0xFFFF };
+            if q > max {
                 return divide_error(m, start_ip);
             }
-            m.cpu.set_reg16(AX, q as u16);
-            m.cpu.set_reg16(DX, (n % a as u32) as u16);
+            m.cpu.set_reg_w(AX, q as u32, w);
+            m.cpu.set_reg_w(DX, (n % a as u64) as u32, w);
         }
         _ => {
-            let n = (((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32) as i32;
-            let b = a as i16 as i32;
+            // IDIV
+            let bits = if w { 32 } else { 16 };
+            let n = (((m.cpu.reg_w(DX, w) as u64) << bits) | m.cpu.reg_w(AX, w) as u64) as i64;
+            let n = if w { n } else { n as i32 as i64 };
+            let b = if w { a as i32 as i64 } else { a as i16 as i64 };
             if b == 0 {
                 return divide_error(m, start_ip);
             }
             let q = n / b;
-            if !(-32768..=32767).contains(&q) {
+            let (lo, hi) = if w {
+                (i32::MIN as i64, i32::MAX as i64)
+            } else {
+                (-32768, 32767)
+            };
+            if !(lo..=hi).contains(&q) {
                 return divide_error(m, start_ip);
             }
-            m.cpu.set_reg16(AX, q as u16);
-            m.cpu.set_reg16(DX, (n % b) as u16);
+            m.cpu.set_reg_w(AX, q as u32, w);
+            m.cpu.set_reg_w(DX, (n % b) as u32, w);
         }
     }
 }
@@ -159,48 +183,56 @@ pub(crate) fn grp4(m: &mut Machine, d: &Decoder) {
 /// GRP: ModRMのreg欄が演算を選ぶ命令群
 pub(crate) fn grp5(m: &mut Machine, d: &Decoder, start_ip: u32) {
     let (kind, rm) = modrm(m, d);
+    let w = d.opsize32;
     match kind {
         0 | 1 => {
-            let a = read_op16(m, &rm);
+            let a = read_op_w(m, &rm, w);
             let cf = m.cpu.flag(CF);
-            let r = alu16(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1);
+            let r = alu_w(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1, w);
             m.cpu.set_flag(CF, cf);
-            write_op16(m, &rm, r);
+            write_op_w(m, &rm, r, w);
         }
         2 => {
-            let t = read_op_w(m, &rm, d.opsize32);
+            let t = read_op_w(m, &rm, w);
             let ret = m.cpu.ip;
-            push_w(m, ret, d.opsize32);
+            push_w(m, ret, w);
             m.cpu.set_ip(t);
         }
         4 => {
-            let t = read_op_w(m, &rm, d.opsize32);
+            let t = read_op_w(m, &rm, w);
             m.cpu.set_ip(t);
         }
         6 => {
-            let v = read_op16(m, &rm);
-            push16(m, v);
+            let v = read_op_w(m, &rm, w);
+            push_w(m, v, w);
         }
-        // /3 CALL far、/5 JMP far: メモリ上の4バイト far ポインタを読んで飛ぶ
+        // /3 CALL far、/5 JMP far: メモリ上の far ポインタを読んで飛ぶ。
+        // オフセットの幅はオペランドサイズ (16bit=4バイト、32bit=6バイト)
         3 | 5 => {
             let addr = match rm {
                 Operand::Mem { addr, .. } => addr,
-                Operand::Reg(_) => panic!("far call/jmp with register operand"),
+                Operand::Reg(_) => {
+                    m.trap("far call/jmp with register operand".into());
+                    return;
+                }
             };
-            let off = m.read16(addr);
-            let seg = m.read16(addr.wrapping_add(2));
+            let (off, seg) = if w {
+                (m.read32(addr), m.read16(addr.wrapping_add(4)))
+            } else {
+                (m.read16(addr) as u32, m.read16(addr.wrapping_add(2)))
+            };
             if kind == 3 {
                 let cs = m.cpu.sregs[CS];
-                push16(m, cs);
-                let ret = m.cpu.ip as u16;
-                push16(m, ret);
+                push_w(m, cs as u32, w);
+                let ret = m.cpu.ip;
+                push_w(m, ret, w);
             }
-            m.cpu.sregs[CS] = seg;
-            m.cpu.set_ip(off as u32);
+            super::load_seg(m, CS, seg);
+            m.cpu.set_ip(off);
         }
-        _ => panic!(
-            "GRP5 /{kind} not implemented at {:04x}:{:04x}",
-            m.cpu.sregs[CS], start_ip
-        ),
+        _ => {
+            let _ = start_ip;
+            m.trap(format!("GRP5 /{kind} (undefined encoding)"));
+        }
     }
 }

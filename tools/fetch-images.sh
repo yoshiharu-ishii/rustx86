@@ -50,6 +50,8 @@ trap 'rm -rf "$WORK"' EXIT
 ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
+# Alpine の netboot 配布物 (32bit x86)。カーネルと initramfs の2つで起動できる
+ALPINE_BASE=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86/netboot
 
 # 入れるゲーム。形式は「パッケージ名:イメージへ入れるファイル…」
 #
@@ -103,6 +105,13 @@ build_elks() {
   say "ELKS 完了 (tetris / invaders / ttypong / sl / matrix が最初から入っている)"
 }
 
+build_linux() {
+  mkdir -p "$IMAGES"
+  fetch "$ALPINE_BASE/vmlinuz-lts" "$IMAGES/vmlinuz-lts"
+  fetch "$ALPINE_BASE/initramfs-lts" "$IMAGES/initramfs-lts"
+  say "Linux (Alpine lts カーネル + initramfs) 完了"
+}
+
 build_freedos() {
   mkdir -p "$IMAGES" "$WORK/games"
   fetch "$FREEDOS_URL" "$WORK/fd14flop.zip"
@@ -134,14 +143,17 @@ publish_to_web() {
   # ブラウザ版はゲーム入りの方を使う。**素の起動ディスクだと
   # プロンプトに着いても何も入っていない**ので、それでは動かないのと同じである
   [ -f "$IMAGES/fd14games.img" ] && cp "$IMAGES/fd14games.img" "$WEB/fd14boot.img"
+  [ -f "$IMAGES/vmlinuz-lts" ] && cp "$IMAGES/vmlinuz-lts" "$WEB/vmlinuz-lts"
+  [ -f "$IMAGES/initramfs-lts" ] && cp "$IMAGES/initramfs-lts" "$WEB/initramfs-lts"
   say "web/ へ複製した"
 }
 
 case "${1:-all}" in
   elks) build_elks ;;
   freedos) build_freedos ;;
-  all) build_elks; build_freedos ;;
-  *) echo "使い方: $0 [all|elks|freedos]" >&2; exit 1 ;;
+  linux) build_linux ;;
+  all) build_elks; build_freedos; build_linux ;;
+  *) echo "使い方: $0 [all|elks|freedos|linux]" >&2; exit 1 ;;
 esac
 publish_to_web
 

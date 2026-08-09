@@ -221,17 +221,61 @@ pub fn fetch32(m: &mut Machine) -> u32 {
 ///
 /// **SP自体は16bitのまま**である。`0x66` はオペランドの幅を変えるだけで、
 /// スタックポインタの幅はセグメントのBフラグ (プロテクトモード) が決める。
-/// リアルモードではBが立たないので、SPは16bitで回り続ける
+/// リアルモードではBが立たないので、SPは16bitで回り続ける。
+///
+/// **オペランドサイズとは別の軸**であることに注意 — 「何バイト積むか」は
+/// オペランドサイズ、「ESPをどの幅で動かすか」はSSのBフラグ。
+/// ここを16bit固定にしていたせいで、ESP=0x02380108 のつもりが物理0x108
+/// (IVTのど真ん中) にスタックが伸びて、Linuxが静かに壊れた
+pub(crate) fn sp_read(m: &Machine) -> u32 {
+    if m.cpu.hidden[SS].big {
+        m.cpu.regs[SP]
+    } else {
+        m.cpu.reg16(SP) as u32
+    }
+}
+
+pub(crate) fn sp_write(m: &mut Machine, v: u32) {
+    if m.cpu.hidden[SS].big {
+        m.cpu.regs[SP] = v;
+    } else {
+        m.cpu.set_reg16(SP, v as u16);
+    }
+}
+
+/// SPの加減算をスタック幅で折り返す。**u32で素朴に引くと 0-2 が
+/// 0xFFFFFFFE になり、16bitスタックの折り返し (0xFFFE) を突き抜ける** —
+/// 折り返した値をlinに渡すために、幅に合わせて必ず刈り込む
+fn sp_wrap(m: &Machine, v: u32) -> u32 {
+    if m.cpu.hidden[SS].big {
+        v
+    } else {
+        v & 0xFFFF
+    }
+}
+
+/// PUSH/POP は**書き込み (読み出し) が成功したときだけ** SP を確定する。
+///
+/// 書いてからSPを引く順にしていたところ、スタック伸長の #PF で
+/// 「ESPは減ったが書けていない」状態が残り、ハンドラ復帰後の再実行で
+/// ESPが二重に減った (Linuxのftrace初期化後、ret が4ズレの野良番地へ飛んだ)。
+/// フォールトした命令は巻き戻して再実行される — だから**途中の状態を残さない**
 pub fn push32(m: &mut Machine, v: u32) {
-    let sp = m.cpu.reg16(SP).wrapping_sub(4);
-    m.cpu.set_reg16(SP, sp);
-    m.write32(m.cpu.lin(SS, sp as u32), v);
+    let sp = sp_wrap(m, sp_read(m).wrapping_sub(4));
+    m.write32(m.cpu.lin(SS, sp), v);
+    if m.pending_fault.get().is_some() {
+        return;
+    }
+    sp_write(m, sp);
 }
 
 pub fn pop32(m: &mut Machine) -> u32 {
-    let sp = m.cpu.reg16(SP);
-    let v = m.read32(m.cpu.lin(SS, sp as u32));
-    m.cpu.set_reg16(SP, sp.wrapping_add(4));
+    let sp = sp_read(m);
+    let v = m.read32(m.cpu.lin(SS, sp));
+    if m.pending_fault.get().is_some() {
+        return v;
+    }
+    sp_write(m, sp.wrapping_add(4));
     v
 }
 
@@ -254,15 +298,21 @@ pub fn pop_w(m: &mut Machine, wide: bool) -> u32 {
 }
 
 pub fn push16(m: &mut Machine, v: u16) {
-    let sp = m.cpu.reg16(SP).wrapping_sub(2);
-    m.cpu.set_reg16(SP, sp);
-    let addr = m.cpu.lin(SS, sp as u32);
+    let sp = sp_wrap(m, sp_read(m).wrapping_sub(2));
+    let addr = m.cpu.lin(SS, sp);
     m.write16(addr, v);
+    if m.pending_fault.get().is_some() {
+        return;
+    }
+    sp_write(m, sp);
 }
 
 pub fn pop16(m: &mut Machine) -> u16 {
-    let sp = m.cpu.reg16(SP);
-    let v = m.read16(m.cpu.lin(SS, sp as u32));
-    m.cpu.set_reg16(SP, sp.wrapping_add(2));
+    let sp = sp_read(m);
+    let v = m.read16(m.cpu.lin(SS, sp));
+    if m.pending_fault.get().is_some() {
+        return v;
+    }
+    sp_write(m, sp.wrapping_add(2));
     v
 }

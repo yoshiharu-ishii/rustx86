@@ -1,0 +1,5 @@
+# macOSからのクロスビルド + SSEを吐かせない。
+# rustx86のCPUはx87まで (i586相当) なので、SSE2を使うとSIGILLになる。
+[target.i586-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=-sse,-sse2,-mmx"]

@@ -326,10 +326,11 @@ fn ページングが有効になっている() {
 
 #[test]
 fn 未実装命令は機械を生かしたまま止める() {
-    // MOV AX,0x1234 / RDTSC (0F 31、未実装) をブートセクタに置く
+    // MOV AX,0x1234 / UD0 (0F FF、未実装) をブートセクタに置く。
+    // (かつてはRDTSCを使っていたが、i586化で実装済みになった)
     let mut m = Machine::new();
     let mut sector = vec![0u8; 512];
-    sector[..5].copy_from_slice(&[0xB8, 0x34, 0x12, 0x0F, 0x31]);
+    sector[..5].copy_from_slice(&[0xB8, 0x34, 0x12, 0x0F, 0xFF]);
     sector[510] = 0x55;
     sector[511] = 0xAA;
     m.load_boot_sector(&sector).unwrap();
@@ -344,7 +345,7 @@ fn 未実装命令は機械を生かしたまま止める() {
         .as_ref()
         .expect("トラップしていない (panicか、素通りした)");
     assert!(
-        t.reason.contains("0f 0x31"),
+        t.reason.contains("0f 0xff"),
         "理由に命令名が無い: {}",
         t.reason
     );

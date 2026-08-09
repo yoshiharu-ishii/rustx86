@@ -44,6 +44,11 @@ pub struct Uart16550 {
     pub rx: std::collections::VecDeque<u8>,
     /// 割り込み要求中か
     pub irq_pending: bool,
+    /// THRE (送信保持レジスタ空) 割り込みの保留。
+    /// うちのTHRは書いた瞬間に空くので、**THRへの書き込みと
+    /// IER_TXの有効化が「空きました」の合図になる**。
+    /// IIRを読むと下がる (16550の作法)
+    thre_pending: bool,
 }
 
 impl Uart16550 {
@@ -68,10 +73,25 @@ impl Uart16550 {
             1 => self.ier,
             2 => {
                 // IIR: 割り込み要因。読むと要因が下がる。
-                // bit0が立っていると「割り込みは無い」の意味 — 論理が反転している
-                let v = if self.rx.is_empty() { 0x01 } else { 0x04 };
-                self.irq_pending = false;
-                v
+                // bit0が立っていると「割り込みは無い」の意味 — 論理が反転している。
+                // 要因の優先順位: 受信データ (0x04) > 送信空き (0x02)。
+                //
+                // **上位2bit (0xC0) はFIFO有効の印。** ここを立てないと
+                // ドライバは「FIFOなしの素の8250」と判定し、送信を
+                // **1バイトごとに割り込み1回**で行う — 画面1フレームで
+                // 数千回の割り込みになり、体感速度を支配していた。
+                // 16550Aと名乗れば16バイトずつ流してくれる
+                let fifo = if self.fcr & 1 != 0 { 0xC0 } else { 0 };
+                let v = if !self.rx.is_empty() {
+                    0x04
+                } else if self.thre_pending && self.ier & IER_TX != 0 {
+                    self.thre_pending = false; // 読まれたら下がる
+                    0x02
+                } else {
+                    0x01
+                };
+                self.update_irq();
+                v | fifo
             }
             3 => self.lcr,
             4 => self.mcr,
@@ -92,10 +112,23 @@ impl Uart16550 {
     pub fn write(&mut self, off: u16, val: u8) {
         match off {
             0 if self.dlab() => self.divisor = (self.divisor & 0xFF00) | val as u16,
-            0 => self.tx.push(val), // THR: 書いたバイトがそのまま外へ出る
+            0 => {
+                // THR: 書いたバイトがそのまま外へ出る。
+                // 出た瞬間また空になるので、THRE割り込みを立て直す
+                self.tx.push(val);
+                self.thre_pending = true;
+                self.update_irq();
+            }
             1 if self.dlab() => self.divisor = (self.divisor & 0x00FF) | (val as u16) << 8,
             1 => {
+                // THRE割り込みを**有効化した瞬間にTHRが空なら即発火** (16550の仕様)。
+                // 8250ドライバはこの合図で送信キューを流し始める —
+                // これが無いと、カーネルログは出るのにユーザー空間のwriteだけが
+                // 永遠に沈黙する (printkはポーリング、ttyは割り込み駆動のため)
                 self.ier = val;
+                if self.ier & IER_TX != 0 {
+                    self.thre_pending = true;
+                }
                 self.update_irq();
             }
             2 => self.fcr = val,
@@ -112,7 +145,9 @@ impl Uart16550 {
     }
 
     fn update_irq(&mut self) {
-        self.irq_pending = self.ier & IER_RX != 0 && !self.rx.is_empty();
+        let rx = self.ier & IER_RX != 0 && !self.rx.is_empty();
+        let tx = self.ier & IER_TX != 0 && self.thre_pending;
+        self.irq_pending = rx || tx;
     }
 
     /// 通信速度 (bps)。分周値から逆算する。基準は 115200 bps

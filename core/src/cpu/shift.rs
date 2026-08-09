@@ -1,6 +1,6 @@
-//! シフトと回転 (GRP2)。8bit/16bit共通の実装。
+//! シフトと回転 (GRP2)。8bit/16bit/32bit共通の実装。
 
-use super::alu::{set_szp16, set_szp8};
+use super::alu::{set_szp16, set_szp32, set_szp8};
 use super::{Cpu, CF, OF};
 
 // --- シフト/回転 (GRP2) ---
@@ -8,7 +8,11 @@ use super::{Cpu, CF, OF};
 // 最終目標が32bit Linuxなので186以降の挙動に合わせる。
 // カウント0のときはフラグを一切変更しない。AFは常に未定義。
 pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 {
-    let mask: u32 = if w == 8 { 0xFF } else { 0xFFFF };
+    let mask: u32 = match w {
+        8 => 0xFF,
+        16 => 0xFFFF,
+        _ => 0xFFFF_FFFF,
+    };
     let count = (count_raw & 0x1F) as u32;
     if count == 0 {
         return val & mask;
@@ -71,10 +75,10 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
         }
         _ => {
             // SAR (符号を保つ)
-            let sval = if w == 8 {
-                val as u8 as i8 as i32
-            } else {
-                val as u16 as i16 as i32
+            let sval = match w {
+                8 => val as u8 as i8 as i32,
+                16 => val as u16 as i16 as i32,
+                _ => val as i32,
             };
             let n = count.min(w - 1);
             cf = ((sval >> (count - 1).min(w - 1)) & 1) as u32;
@@ -95,10 +99,10 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
     }
     // 回転命令はSZPを変更しない
     if kind >= 4 {
-        if w == 8 {
-            set_szp8(c, r as u8);
-        } else {
-            set_szp16(c, r as u16);
+        match w {
+            8 => set_szp8(c, r as u8),
+            16 => set_szp16(c, r as u16),
+            _ => set_szp32(c, r),
         }
     }
     r
