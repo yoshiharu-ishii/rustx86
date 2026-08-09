@@ -30,6 +30,17 @@ pub struct MachineProfile {
     /// (実機でRAMを超えた番地がチップセットに落ちるのと同じ)。8086の1MB折り返しは
     /// これとは別で、`cpu::lin` がリアルモードのアドレスを 0xF_FFFF に丸めている
     pub ram_bytes: usize,
+    /// x87 FPU を挿しているか。
+    /// 16bit機は**挿していない** — FNSTSWで書き換わらないことを見て不在を知る
+    /// 検出コードがあり、気を利かせて書くと誤認させる。
+    /// 32bit機は**挿している** — 現代のカーネルはFPU前提で、無いと起動しない
+    pub has_fpu: bool,
+    /// CPUID世代 (i586相当) を名乗るか。
+    /// EFLAGSのID (bit21)・AC (bit18) が書き換え可能になり、CPUID命令が生える。
+    /// 16bit機では**名乗らない** — ACを一度通しただけでFreeDOSが486と判断して
+    /// CMOVを使い始めた事故がある。名乗るものを1ビット間違えるだけで、
+    /// 相手は別の道を歩き出す
+    pub has_cpuid: bool,
 }
 
 impl MachineProfile {
@@ -37,6 +48,8 @@ impl MachineProfile {
     pub const PC_16BIT: Self = Self {
         name: "16bit PC",
         ram_bytes: MEM_SIZE,
+        has_fpu: false,
+        has_cpuid: false,
     };
 
     /// 32bit PC (Linux用)。`mb` MB。任意のMB数を取れる (物理は折り返さず、
@@ -45,6 +58,8 @@ impl MachineProfile {
         Self {
             name: "32bit PC",
             ram_bytes: mb << 20,
+            has_fpu: true,
+            has_cpuid: true,
         }
     }
 }
@@ -306,23 +321,37 @@ impl Machine {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }
 
-        // --- フラットな32bit protected mode を直接作る ---
+        // --- 実機のブートローダが作る GDT を、物理メモリに組む ---
+        //
+        // 隠しレジスタに直接書くショートカットは、**カーネルがセグメントを
+        // 再ロードするまでしか保たない**。カーネルは起動直後に mov ds,ax 等で
+        // セグメントを触り、そのとき GDTR の指す表を読み直す。表が無いと
+        // ゴミを記述子として読んで base が壊れ、墜落する (実際に踏んだ)。
+        //
+        // Linux boot protocol の要求どおり、flat な GDT を用意する:
+        //   index 2 (selector 0x10) = flat 32bit code
+        //   index 3 (selector 0x18) = flat 32bit data
+        const GDT_ADDR: u32 = 0x0000_0800;
+        // 8バイトの記述子。base=0, limit=0xFFFFF(4Kページ単位で4GB), access, flags
+        let desc = |access: u8| -> [u8; 8] {
+            [0xFF, 0xFF, 0, 0, 0, access, 0xCF, 0]
+        };
+        let mut gdt = [0u8; 32]; // 4エントリ
+        gdt[16..24].copy_from_slice(&desc(0x9A)); // 0x10: code (P,DPL0,code,readable)
+        gdt[24..32].copy_from_slice(&desc(0x92)); // 0x18: data (P,DPL0,data,writable)
+        for (i, b) in gdt.iter().enumerate() {
+            self.write_phys8(GDT_ADDR + i as u32, *b);
+        }
+        self.cpu.gdtr_base = GDT_ADDR;
+        self.cpu.gdtr_limit = 31;
+
+        // PE を立ててから、GDT経由でセグメントをロードする。
+        // load_seg が GDT から隠しレジスタへ写すので、以後カーネルが
+        // 同じセレクタを mov し直しても同じ記述子が読める
         self.cpu.cr0 |= 1; // PE (PG は立てない)
-        let flat = cpu::SegHidden {
-            base: 0,
-            limit: 0xFFFF_FFFF,
-            access: 0x9B, // present, code, 32bit のつもり
-            big: true,    // Dビット = 32bit
-        };
-        let flat_data = cpu::SegHidden {
-            access: 0x93, // present, data
-            ..flat
-        };
-        self.cpu.sregs[CS] = 0x10; // 何かしらのセレクタ (フラットなので値は表示用)
-        self.cpu.hidden[CS] = flat;
+        cpu::load_seg_pub(self, CS, 0x10);
         for s in [DS, ES, FS, GS, SS] {
-            self.cpu.sregs[s] = 0x18;
-            self.cpu.hidden[s] = flat_data;
+            cpu::load_seg_pub(self, s, 0x18);
         }
 
         // 規約: %esi = zero page、エントリへ
@@ -639,6 +668,9 @@ impl Machine {
         w.u32(self.cpu.tr_limit);
         w.u32(self.cpu.cr2);
         w.u32(self.cpu.cr3);
+        w.u16(self.cpu.fpu_cw); // v7
+        w.u32(self.cpu.tsc as u32); // v7 (下位のみ。较正はやり直せるので十分)
+        w.u32((self.cpu.tsc >> 32) as u32);
         for h in self.cpu.hidden {
             w.u32(h.base);
             w.u32(h.limit);
@@ -699,6 +731,8 @@ impl Machine {
         m.cpu.tr_limit = r.u32()?;
         m.cpu.cr2 = r.u32()?;
         m.cpu.cr3 = r.u32()?;
+        m.cpu.fpu_cw = r.u16()?; // v7
+        m.cpu.tsc = r.u32()? as u64 | ((r.u32()? as u64) << 32);
         for i in 0..6 {
             m.cpu.hidden[i] = cpu::SegHidden {
                 base: r.u32()?,
@@ -733,6 +767,8 @@ impl Machine {
             MachineProfile {
                 name: "32bit PC",
                 ram_bytes: mem.len(),
+                has_fpu: true,
+                has_cpuid: true,
             }
         };
         m.mem = mem;

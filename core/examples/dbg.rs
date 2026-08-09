@@ -27,12 +27,22 @@ use std::io::{BufRead, Write};
 
 fn main() {
     let img = std::env::args().nth(1);
+    // bzImage は setup ヘッダのマジック "HdrS" (0x202) で見分ける
+    fn is_bzimage(d: &[u8]) -> bool {
+        d.len() > 0x206 && &d[0x202..0x206] == b"HdrS"
+    }
+
     let mut m = Machine::new();
     let mut disk: Option<Vec<u8>> = None;
     if let Some(path) = &img {
         let data = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-        // 512バイトならブートセクタ単体 (asm/*.bin)、それ以外はディスクイメージ
-        if data.len() == 512 {
+        if is_bzimage(&data) {
+            // Linux bzImage。128MBの32bit機で直接ロードする
+            m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(128));
+            let cmdline = std::env::var("CMDLINE")
+                .unwrap_or_else(|_| "console=ttyS0 console=tty0".into());
+            m.boot_bzimage(&data, &cmdline).expect("bzImage");
+        } else if data.len() == 512 {
             m.load_boot_sector(&data).expect("boot sector");
         } else {
             m.boot_from_disk(data.clone()).expect("boot");
