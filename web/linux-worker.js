@@ -55,10 +55,14 @@ self.onmessage = (e) => {
   }
 };
 
-// 1スライスの命令数。**大きすぎると出力の反応が鈍り、小さすぎると
-// ループのオーバーヘッドが効く**。ワーカーなのでメインの60fpsに縛られず、
-// 出力を細かく流すため 20ms 相当を狙って動的に調整する
-let sliceSize = 2_000_000;
+// 1スライスの命令数。
+//
+// **大きすぎると入力の反応が鈍る。** run_slice はwasmの中でブロックするので、
+// 走っている間に来たキーは次のスライスまで届かない。しかもアイドル (HLT) 中は
+// 命令を実行しないぶんスライスが速く終わり、動的調整が上限まで膨らむ —
+// 上限を50Mにしていたら、キーを打ってからエコーが返るまで数秒かかった。
+// 目標8ms・上限5Mに抑えて、応答性を優先する
+let sliceSize = 1_000_000;
 
 function loop() {
   if (!running || !emu) return;
@@ -90,8 +94,8 @@ function loop() {
   // スライス時間を測って ~20ms に寄せる
   const dt = performance.now() - t0;
   if (dt > 0) {
-    const target = 20;
-    sliceSize = Math.max(200_000, Math.min(50_000_000, Math.round((sliceSize * target) / dt)));
+    const target = 8;
+    sliceSize = Math.max(100_000, Math.min(5_000_000, Math.round((sliceSize * target) / dt)));
   }
 
   // 定期的に状態を報告 (MIPS)
