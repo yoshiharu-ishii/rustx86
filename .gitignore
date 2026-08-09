@@ -3,3 +3,7 @@
 /images
 /web/*.img
 *.lst
+# webに置いたLinuxイメージ (配布物なのでコミットしない。tools/fetch-images.sh で取得)
+web/vmlinuz-lts
+web/initramfs-mini
+web/initramfs-lts
