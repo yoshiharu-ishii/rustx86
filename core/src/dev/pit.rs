@@ -71,6 +71,14 @@ impl Counter {
             return 0;
         }
         let rest = n - cur;
+        // モード0 (ワンショット): 0に達したら1回だけ鳴って止まる。
+        // 周期扱いのままだと鳴り続け、ワンショット前提のOS (hres tick) が
+        // 「腕を上げた覚えのない割り込み」を延々受けることになる
+        if self.mode == 0 {
+            self.running = false;
+            self.count = 0;
+            return 1;
+        }
         let pulses = 1 + rest / period;
         self.count = (period - rest % period) as u16;
         pulses

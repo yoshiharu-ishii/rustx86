@@ -25,3 +25,17 @@ pub fn one(bytes: &[u8], bits: u32, ip: u64) -> String {
     GasFormatter::new().format(&insn, &mut out);
     out
 }
+
+/// 先頭1命令のバイト数。デコードできなければ 0
+pub fn len(bytes: &[u8], bits: u32) -> usize {
+    let mut dec = Decoder::new(bits, bytes, DecoderOptions::NONE);
+    if !dec.can_decode() {
+        return 0;
+    }
+    let insn = dec.decode();
+    if insn.is_invalid() {
+        0
+    } else {
+        insn.len()
+    }
+}
