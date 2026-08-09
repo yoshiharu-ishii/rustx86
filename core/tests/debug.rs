@@ -195,7 +195,7 @@ fn 足跡は直近だけを残す() {
     }
     assert_eq!(m.dbg.trace.len(), 4);
     // 最後の4命令が、順に並んでいる
-    let ips: Vec<u16> = m.dbg.trace.iter().map(|s| s.ip).collect();
+    let ips: Vec<u32> = m.dbg.trace.iter().map(|s| s.ip).collect();
     assert_eq!(ips, vec![0x7C06, 0x7C07, 0x7C08, 0x7C09]);
     assert_eq!(m.dbg.trace.back().unwrap().bytes[0], 0x90);
 }

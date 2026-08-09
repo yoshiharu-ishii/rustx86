@@ -22,8 +22,8 @@ pub mod string;
 
 use alu::{alu16, alu8, alu_w, condition};
 use operand::{
-    fetch16, fetch8, fetch_w, modrm, pop16, pop32, pop_w, push16, push32, push_w, read_op16,
-    read_op8, read_op_w, write_op16, write_op8, write_op_w, Operand,
+    fetch16, fetch32, fetch8, fetch_w, modrm, pop16, pop32, pop_w, push16, push32, push_w,
+    read_op16, read_op8, read_op_w, write_op16, write_op8, write_op_w, Operand,
 };
 use shift::shift_rot;
 
@@ -64,7 +64,10 @@ pub struct Cpu {
     /// ES CS SS DS FS GS — **見える部分 (セレクタ)**。
     /// 保護モードでは番地の材料ではなく、GDTの行番号になる
     pub sregs: [u16; 6],
-    pub ip: u16,
+    /// EIP。**16bitコードでは下位16bitだけが意味を持ち、64Kで折り返す**。
+    /// 幅を決めるのはモードとCSのDビットで、レジスタ自体は最初から32bit
+    /// (regsをu32で持っているのと同じ判断)
+    pub ip: u32,
     pub flags: u32,
     /// CR0。bit0 = PE (Protection Enable)。これが立つと sregs の意味が変わる
     pub cr0: u32,
@@ -153,6 +156,27 @@ impl Cpu {
         self.pe() && self.hidden[i].big
     }
 
+    /// いまのコードの「IPの幅」。16bitコードでは64Kで折り返す。
+    /// 折り返しの判断を呼び出し側に散らばらせない — **ここだけが幅を知る**
+    pub fn ip_mask(&self) -> u32 {
+        if self.seg_is32(CS) {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        }
+    }
+
+    /// IPを据える (幅で折り返す)
+    pub fn set_ip(&mut self, v: u32) {
+        self.ip = v & self.ip_mask();
+    }
+
+    /// IPを進める (幅で折り返す)。フェッチの1バイトごとに呼ばれる熱い経路だが、
+    /// ANDが1個増えるだけである
+    pub fn advance_ip(&mut self, n: u32) {
+        self.ip = self.ip.wrapping_add(n) & self.ip_mask();
+    }
+
     /// セグメント適用後のリニアアドレス。
     /// リアルモードは1MBで折り返す (8086のアドレスバスが20本だったため)
     pub fn lin(&self, seg: usize, off: u32) -> u32 {
@@ -166,7 +190,7 @@ impl Cpu {
 
     pub fn set_cs_ip(&mut self, cs: u16, ip: u16) {
         self.sregs[CS] = cs;
-        self.ip = ip;
+        self.ip = ip as u32;
     }
 
     fn reg16(&self, r: usize) -> u16 {
@@ -318,6 +342,15 @@ pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) {
         access,
         big: hi & 0x0040_0000 != 0, // Dビット
     };
+}
+
+/// 相対分岐の飛び幅を読む。16bitなら符号拡張して32bitへ
+fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
+    if wide {
+        fetch32(m)
+    } else {
+        fetch16(m) as i16 as i32 as u32
+    }
 }
 
 pub fn step(m: &mut Machine) {
@@ -744,25 +777,31 @@ pub fn step(m: &mut Machine) {
         0x70..=0x7F => {
             let rel = fetch8(m) as i8;
             if condition(&m.cpu, op & 0xF) {
-                m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16);
+                // rel8はIPの幅へ符号拡張。折り返しは set_ip が知っている
+                let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
+                m.cpu.set_ip(ip);
             }
         }
         0xE8 => {
-            let rel = fetch16(m);
+            // 相対値の幅はオペランドサイズ。16bitのrelは符号拡張して足す
+            let rel = fetch_rel_w(m, d.opsize32);
             let ret = m.cpu.ip;
-            push16(m, ret);
-            m.cpu.ip = ret.wrapping_add(rel);
+            push_w(m, ret, d.opsize32);
+            m.cpu.set_ip(ret.wrapping_add(rel));
         }
         0xE9 => {
-            let rel = fetch16(m);
-            m.cpu.ip = m.cpu.ip.wrapping_add(rel);
+            let rel = fetch_rel_w(m, d.opsize32);
+            let ip = m.cpu.ip.wrapping_add(rel);
+            m.cpu.set_ip(ip);
         }
         0xEB => {
             let rel = fetch8(m) as i8;
-            m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16);
+            let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
+            m.cpu.set_ip(ip);
         }
         0xC3 => {
-            m.cpu.ip = pop16(m);
+            let ip = pop_w(m, d.opsize32);
+            m.cpu.set_ip(ip);
         }
 
         // --- far転送: CSごと移る ---
@@ -776,26 +815,28 @@ pub fn step(m: &mut Machine) {
             // PE=1にしただけではまだ16bitのまま走っていて、CSに記述子が
             // 積まれて初めて32bitコードが始まる
             load_seg(m, CS, seg);
-            m.cpu.ip = off as u16;
+            m.cpu.set_ip(off);
         }
         0x9A => {
             let off = fetch16(m);
             let seg = fetch16(m);
             let cs = m.cpu.sregs[CS];
             push16(m, cs);
-            let ret = m.cpu.ip;
+            let ret = m.cpu.ip as u16;
             push16(m, ret);
             m.cpu.sregs[CS] = seg;
-            m.cpu.ip = off;
+            m.cpu.set_ip(off as u32);
         }
         0xCB => {
-            m.cpu.ip = pop16(m);
+            let ip = pop16(m) as u32;
             m.cpu.sregs[CS] = pop16(m);
+            m.cpu.set_ip(ip);
         }
         0xCA => {
             let n = fetch16(m);
-            m.cpu.ip = pop16(m);
+            let ip = pop16(m) as u32;
             m.cpu.sregs[CS] = pop16(m);
+            m.cpu.set_ip(ip);
             let sp = m.cpu.reg16(SP).wrapping_add(n);
             m.cpu.set_reg16(SP, sp);
         }
@@ -808,7 +849,8 @@ pub fn step(m: &mut Machine) {
             let cx = m.cpu.reg16(CX).wrapping_sub(1);
             m.cpu.set_reg16(CX, cx);
             if cx != 0 {
-                m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16);
+                let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
+                m.cpu.set_ip(ip);
             }
         }
 
@@ -1107,14 +1149,14 @@ pub fn step(m: &mut Machine) {
                     write_op16(m, &rm, r);
                 }
                 2 => {
-                    let t = read_op16(m, &rm);
+                    let t = read_op_w(m, &rm, d.opsize32);
                     let ret = m.cpu.ip;
-                    push16(m, ret);
-                    m.cpu.ip = t;
+                    push_w(m, ret, d.opsize32);
+                    m.cpu.set_ip(t);
                 }
                 4 => {
-                    let t = read_op16(m, &rm);
-                    m.cpu.ip = t;
+                    let t = read_op_w(m, &rm, d.opsize32);
+                    m.cpu.set_ip(t);
                 }
                 6 => {
                     let v = read_op16(m, &rm);
@@ -1131,11 +1173,11 @@ pub fn step(m: &mut Machine) {
                     if kind == 3 {
                         let cs = m.cpu.sregs[CS];
                         push16(m, cs);
-                        let ret = m.cpu.ip;
+                        let ret = m.cpu.ip as u16;
                         push16(m, ret);
                     }
                     m.cpu.sregs[CS] = seg;
-                    m.cpu.ip = off;
+                    m.cpu.set_ip(off as u32);
                 }
                 _ => panic!(
                     "GRP5 /{kind} not implemented at {:04x}:{:04x}",
@@ -1161,18 +1203,21 @@ pub fn step(m: &mut Machine) {
                 !m.cpu.flag(ZF)
             };
             if cx != 0 && zcond {
-                m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16);
+                let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
+                m.cpu.set_ip(ip);
             }
         }
         0xE3 => {
             let rel = fetch8(m) as i8;
             if m.cpu.reg16(CX) == 0 {
-                m.cpu.ip = m.cpu.ip.wrapping_add(rel as u16);
+                let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
+                m.cpu.set_ip(ip);
             }
         }
         0xC2 => {
             let n = fetch16(m);
-            m.cpu.ip = pop16(m);
+            let ip = pop_w(m, d.opsize32);
+            m.cpu.set_ip(ip);
             let sp = m.cpu.reg16(SP).wrapping_add(n);
             m.cpu.set_reg16(SP, sp);
         }
@@ -1309,12 +1354,12 @@ pub fn interrupt(m: &mut Machine, n: u8) {
     m.cpu.set_flag(TF, false);
     let cs = m.cpu.sregs[CS];
     push16(m, cs);
-    let ip = m.cpu.ip;
+    let ip = m.cpu.ip as u16;
     push16(m, ip);
     // IVTは 0x0000 から 4バイト × 256個。n番目に [オフセット, セグメント] が並ぶ。
     // **OSはここを自分のハンドラで書き換えて割り込みを乗っ取る**
     let vec = n as u32 * 4;
-    m.cpu.ip = m.read16(vec);
+    m.cpu.ip = m.read16(vec) as u32;
     m.cpu.sregs[CS] = m.read16(vec + 2);
 }
 
@@ -1356,14 +1401,14 @@ fn interrupt_protected(m: &mut Machine, n: u8) {
     // EFLAGS, CS, EIP を32bitで積む (32bitゲート)
     push32(m, m.cpu.flags);
     push32(m, m.cpu.sregs[CS] as u32);
-    push32(m, m.cpu.ip as u32);
+    push32(m, m.cpu.ip);
     if ty == 0x0E {
         // 割り込みゲートだけがIFを落とす
         m.cpu.set_flag(IF, false);
     }
     m.cpu.set_flag(TF, false);
     load_seg(m, CS, sel);
-    m.cpu.ip = dest as u16;
+    m.cpu.set_ip(dest);
 }
 
 /// 割り込みからの復帰。IP・CS・FLAGS をこの順で取り出す
@@ -1375,12 +1420,12 @@ pub fn iret(m: &mut Machine) {
         let sel = pop32(m) as u16;
         let f = pop32(m);
         load_seg(m, CS, sel);
-        m.cpu.ip = ip as u16;
+        m.cpu.set_ip(ip);
         // 復元するフラグの範囲はリアルモードと同じ (AC等の上位はまだ持たない)
         m.cpu.flags = (f & 0x0FD5) | 0x0002;
         return;
     }
-    m.cpu.ip = pop16(m);
+    m.cpu.ip = pop16(m) as u32;
     m.cpu.sregs[CS] = pop16(m);
     let f = pop16(m);
     m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
@@ -1391,7 +1436,7 @@ pub fn iret(m: &mut Machine) {
 /// **フォールトなので、積むのは「失敗した命令の先頭」**である。次の命令ではない。
 /// ハンドラが原因を直して `IRET` すれば同じ除算をやり直せる、という設計。
 /// (8086は次の命令を積む実装だったが、286以降で今の形に直された)
-fn divide_error(m: &mut Machine, start_ip: u16) {
+fn divide_error(m: &mut Machine, start_ip: u32) {
     m.cpu.ip = start_ip;
     if m.first_fault.is_none() {
         m.first_fault = Some((0, m.cpu.sregs[CS], start_ip));

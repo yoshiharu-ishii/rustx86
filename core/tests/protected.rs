@@ -54,7 +54,7 @@ fn far_jumpの前はまだ16bitで動いている() {
         if m.halted {
             panic!("far jumpに着く前にHLTした");
         }
-        let lin = (m.cpu.sregs[cpu::CS] as u32) << 4 | m.cpu.ip as u32;
+        let lin = (m.cpu.sregs[cpu::CS] as u32) << 4 | m.cpu.ip;
         if m.read8(lin) == 0xEA {
             // ここが境界。PEはもう立っている
             assert_eq!(m.cpu.cr0 & 1, 1, "far jump時点でPEが立っていない");
@@ -160,4 +160,47 @@ fn 保護モードの割り込みはidtrを見る() {
     assert!(m.cpu.pe());
     assert_ne!(m.cpu.idtr_base, 0, "LIDTが積まれていない");
     assert_eq!(m.cpu.idtr_limit, 8 * 8 - 1);
+}
+
+#[test]
+fn eipは64kを越えて歩ける() {
+    // これまでの全テストは偶然64K以下で走っていた。ip:u16 の名残が
+    // どこかに残っていれば、ここで 0x1_0000 に折り返して発覚する
+    let mut m = boot();
+    run(&mut m, 10_000);
+    assert!(m.cpu.pe() && m.cpu.seg_is32(cpu::CS));
+
+    // 64Kの向こうにコードを置く: mov eax, 0xCAFE; hlt
+    m.write8(0x2_0000, 0xB8);
+    m.write32(0x2_0001, 0x0000_CAFE);
+    m.write8(0x2_0005, 0xF4);
+    m.halted = false;
+    m.cpu.set_ip(0x2_0000);
+    for _ in 0..10 {
+        if m.halted {
+            break;
+        }
+        m.step();
+    }
+    assert!(m.halted);
+    assert_eq!(
+        m.cpu.regs[cpu::AX],
+        0xCAFE,
+        "64K越えのコードが実行されていない"
+    );
+    assert_eq!(m.cpu.ip, 0x2_0006, "EIPが64Kで折り返している");
+}
+
+#[test]
+fn リアルモードのipは64kで折り返す() {
+    // 8086の挙動。EIPを32bitにしても、16bitコードでは64Kの環で回り続ける
+    let mut m = Machine::new();
+    let mut sector = vec![0u8; 512];
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+    m.load_boot_sector(&sector).unwrap();
+    m.write8(0xFFFF, 0x90); // CS=0 の末尾に NOP
+    m.cpu.set_cs_ip(0, 0xFFFF);
+    m.step();
+    assert_eq!(m.cpu.ip, 0, "リアルモードで64Kを越えてしまった");
 }

@@ -21,8 +21,9 @@ pub enum Operand {
 }
 
 pub fn fetch8(m: &mut Machine) -> u8 {
-    let v = m.read8(m.cpu.lin(CS, m.cpu.ip as u32));
-    m.cpu.ip = m.cpu.ip.wrapping_add(1);
+    let v = m.read8(m.cpu.lin(CS, m.cpu.ip));
+    // 折り返し (16bitコードでは64K) は advance_ip が知っている
+    m.cpu.advance_ip(1);
     v
 }
 

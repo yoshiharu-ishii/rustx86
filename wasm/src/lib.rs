@@ -202,7 +202,7 @@ impl Emulator {
         use rustx86_core::cpu::*;
         let c = &self.m.cpu;
         // 保護モードでは sel<<4 は嘘の番地になる。隠しレジスタ経由で引く
-        let lin = c.lin(CS, c.ip as u32);
+        let lin = c.lin(CS, c.ip);
         let bytes: Vec<String> = (0..8)
             .map(|i| format!("{:02x}", self.m.read8(lin.wrapping_add(i))))
             .collect();

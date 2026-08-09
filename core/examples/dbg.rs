@@ -277,7 +277,7 @@ fn why(m: &Machine, s: &Stop) -> String {
 
 fn show_where(m: &Machine) {
     let cpu = &m.cpu;
-    let lin = cpu.lin(rustx86_core::cpu::CS, cpu.ip as u32);
+    let lin = cpu.lin(rustx86_core::cpu::CS, cpu.ip);
     let mut b = String::new();
     for i in 0..8 {
         b.push_str(&format!("{:02x} ", m.read8(lin.wrapping_add(i))));
