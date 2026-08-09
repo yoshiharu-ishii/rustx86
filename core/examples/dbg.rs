@@ -294,6 +294,11 @@ fn show_where(m: &Machine) {
 
 fn info(m: &Machine) {
     use rustx86_core::cpu::*;
+    println!(
+        "machine: {} / RAM {} MB",
+        m.profile.name,
+        m.ram_bytes() / (1 << 20)
+    );
     let c = &m.cpu;
     let n = ["AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"];
     let mut s = String::new();
