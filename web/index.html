@@ -53,6 +53,15 @@
     max-width: calc((100vh - 15rem) * 730 / 400);
   }
   #screen:focus { outline: none; }
+  /* Linux のシリアル端末。作法は #screen と同じで、格子の比率だけ違う —
+     (80桁 x 9px) : (24行 x 16px) = 720 : 384。スクロールバーは無い */
+  #linuxScreen {
+    display: block; cursor: text; margin: 0 auto;
+    width: 100%; height: auto;
+    aspect-ratio: 720 / 384;
+    max-width: calc((100vh - 15rem) * 720 / 384);
+  }
+  #linuxScreen:focus { outline: none; }
   /* **hidden 属性を効かせる。** 上の #screen が display を指定しているので、
      UAスタイルの [hidden]{display:none} が負ける。ベンチに切り替えたときに
      端末が残り続けて実際に踏んだ */
@@ -94,14 +103,13 @@
     margin: 1rem 0 .35rem; text-transform: none;
   }
   .machines h2:first-child { margin-top: 0; }
-  /* 別ページに住むマシン (Linux) は <a> で並ぶので、ボタンと見た目を揃える */
-  .machines button, .machines a {
+  .machines button {
     display: block; width: 100%; text-align: left; font: inherit;
     padding: .4rem .6rem; margin-bottom: .25rem; border-radius: .4rem;
     border: 1px solid var(--line); background: transparent; color: inherit;
-    cursor: pointer; line-height: 1.35; text-decoration: none;
+    cursor: pointer; line-height: 1.35;
   }
-  .machines button:hover:not(:disabled), .machines a:hover { background: rgba(128,128,128,.12); }
+  .machines button:hover:not(:disabled) { background: rgba(128,128,128,.12); }
   .machines button[aria-current="true"] { border-color: #2563eb; background: rgba(37,99,235,.12); }
   .machines button:disabled { opacity: .4; cursor: default; }
   .machines .name { font-size: .88rem; }
@@ -150,6 +158,9 @@
       <span class="gauge" id="gauge"></span>
     </div>
     <canvas id="screen" tabindex="0"></canvas>
+    <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
+         違うので canvas を分け、選ばれている方だけを見せる -->
+    <canvas id="linuxScreen" tabindex="0" hidden></canvas>
     <!-- ベンチもここに出る。**OSと同じ扱い**にするため、画面と同じ場所を使う -->
     <div id="benchPane" hidden></div>
     <p id="status">読み込み中…</p>
