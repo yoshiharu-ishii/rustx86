@@ -48,6 +48,10 @@ const CSS = `
                letter-spacing: .04em; }
   .rx-dbg header { position: sticky; top: 0; background: #0b0e14; padding: 10px 12px 6px;
                    border-bottom: 1px solid #1f2733; z-index: 1; }
+  /* ヘッダを掴んで動かせる。ボタンや入力の上では掴ませない */
+  .rx-dbg.panel header { cursor: move; }
+  .rx-dbg.panel header button, .rx-dbg.panel header input { cursor: pointer; }
+  .rx-dbg.dragging { user-select: none; }
   .rx-dbg .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .rx-dbg button { background: #1f2733; color: #c9d1d9; border: 1px solid #30363d;
                    border-radius: 5px; padding: 4px 10px; font: inherit; cursor: pointer; }
@@ -342,6 +346,36 @@ export class Debugger {
   setupPanelControls() {
     // 最小化: ヘッダだけ残して畳む。裏の画面を覗きたいとき。
     // 操作ボタンはヘッダに残るので、畳んだまま Step も打てる
+    // ヘッダのドラッグで移動。右固定 (right:12px) のままだと動かせないので、
+    // ドラッグを始めた瞬間に left/top 固定へ切り替える
+    const header = this.root.querySelector('header');
+    header.addEventListener('mousedown', (e) => {
+      // ボタン・入力の上なら掴まない (最小化やStepを潰さない)
+      if (e.target.closest('button, input, select')) return;
+      e.preventDefault();
+      const r = this.root.getBoundingClientRect();
+      this.root.style.left = r.left + 'px';
+      this.root.style.top = r.top + 'px';
+      this.root.style.right = 'auto';
+      this.root.classList.add('dragging');
+      const dx = e.clientX - r.left;
+      const dy = e.clientY - r.top;
+      const move = (ev) => {
+        // 画面からはみ出さないよう軽く留める (掴んだ帯は残す)
+        const x = Math.max(-r.width + 60, Math.min(window.innerWidth - 60, ev.clientX - dx));
+        const y = Math.max(0, Math.min(window.innerHeight - 30, ev.clientY - dy));
+        this.root.style.left = x + 'px';
+        this.root.style.top = y + 'px';
+      };
+      const up = () => {
+        this.root.classList.remove('dragging');
+        this.doc.removeEventListener('mousemove', move);
+        this.doc.removeEventListener('mouseup', up);
+      };
+      this.doc.addEventListener('mousemove', move);
+      this.doc.addEventListener('mouseup', up);
+    });
+
     const min = this.$('rxMin');
     min.onclick = () => {
       const on = this.root.classList.toggle('min');
