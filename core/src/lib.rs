@@ -165,7 +165,33 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// TLB — 線形→物理の変換の写し。**ページングの最大のボトルネックを消す。**
+    ///
+    /// ページング有効時、変換1回は2段の表 (PDE→PTE) を読む = 物理メモリ2回。
+    /// これを毎バイトやると、4バイト読むのに変換4回×表2回=8回の余計な読み。
+    /// 実CPUと同じく、一度歩いた結果を控えて次から表を引かない。
+    /// 決定的なので写しても結果は同じ — 無効化は mov cr3 / invlpg / cr0 で行う。
+    /// `Cell` なのは読み経路 (&self) からも埋めるため
+    tlb: Vec<std::cell::Cell<TlbEntry>>,
 }
+
+/// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
+/// 権限 (書ける/ユーザーで触れる) はここに持ち、CPLとWPは引くたびに新しく見る
+#[derive(Clone, Copy)]
+struct TlbEntry {
+    /// 仮想ページ番号 (la >> 12)。`INVALID` は空きスロット
+    tag: u32,
+    /// 物理ページの4K境界の先頭
+    base: u32,
+    /// このページは書けるか (PDEとPTEのR/Wが両方立っている)
+    writable: bool,
+    /// ユーザー (リング3) が触れるか (PDEとPTEのU/Sが両方立っている)
+    user_ok: bool,
+}
+
+const TLB_INVALID: u32 = 0xFFFF_FFFF;
+/// TLBのスロット数 (直接マップ)。4096で16MB分のホットページを覆える
+const TLB_SLOTS: usize = 4096;
 
 /// ページ変換の失敗。#PF として配送される
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +251,37 @@ impl Machine {
             trap_ip: 0,
             trap: None,
             halted: false,
+            tlb: (0..TLB_SLOTS)
+                .map(|_| {
+                    std::cell::Cell::new(TlbEntry {
+                        tag: TLB_INVALID,
+                        base: 0,
+                        writable: false,
+                        user_ok: false,
+                    })
+                })
+                .collect(),
         }
+    }
+
+    /// TLBを全部空にする。mov cr3 (アドレス空間の切り替え) や CR0 の変更、
+    /// スナップショット復元の後に呼ぶ。**表を書き換えたのに写しが古いと
+    /// 幽霊のページが見え続ける**ので、切り替えの合図で必ず捨てる
+    pub fn tlb_flush(&self) {
+        for slot in &self.tlb {
+            let mut e = slot.get();
+            e.tag = TLB_INVALID;
+            slot.set(e);
+        }
+    }
+
+    /// TLBの1ページだけ無効化する (INVLPG)。ページテーブルの1エントリを
+    /// 書き換えたカーネルは、この命令でそのページの写しだけを捨てる
+    pub fn tlb_flush_page(&self, la: u32) {
+        let slot = ((la >> 12) as usize) & (TLB_SLOTS - 1);
+        let mut e = self.tlb[slot].get();
+        e.tag = TLB_INVALID;
+        self.tlb[slot].set(e);
     }
 
     /// RAMのバイト数 (= 実際の確保量)
@@ -459,12 +515,18 @@ impl Machine {
     }
 
     pub fn read_phys32(&self, pa: u32) -> u32 {
-        u32::from_le_bytes([
-            self.read_phys8(pa),
-            self.read_phys8(pa.wrapping_add(1)),
-            self.read_phys8(pa.wrapping_add(2)),
-            self.read_phys8(pa.wrapping_add(3)),
-        ])
+        // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
+        let a = pa as usize;
+        if a + 4 <= self.mem.len() {
+            u32::from_le_bytes([self.mem[a], self.mem[a + 1], self.mem[a + 2], self.mem[a + 3]])
+        } else {
+            u32::from_le_bytes([
+                self.read_phys8(pa),
+                self.read_phys8(pa.wrapping_add(1)),
+                self.read_phys8(pa.wrapping_add(2)),
+                self.read_phys8(pa.wrapping_add(3)),
+            ])
+        }
     }
 
     /// 線形アドレスを物理アドレスへ。
@@ -492,37 +554,61 @@ impl Machine {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
             return Ok(la); // PG off: 線形がそのまま物理
         }
+        // --- TLBを引く。当たれば表を歩かない ---
+        let vpn = la >> 12;
+        let slot = (vpn as usize) & (TLB_SLOTS - 1);
+        let e = self.tlb[slot].get();
+        let (base, writable, user_ok) = if e.tag == vpn {
+            (e.base, e.writable, e.user_ok)
+        } else {
+            // ミス: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
+            // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る
+            let (base, writable, user_ok) = self.walk_page(la)?;
+            self.tlb[slot].set(TlbEntry {
+                tag: vpn,
+                base,
+                writable,
+                user_ok,
+            });
+            (base, writable, user_ok)
+        };
+        // --- 権限チェック。CPLとWPは引くたびに新しく (sys_accessも) ---
         let user = self.cpu.cpl() == 3 && !self.sys_access.get();
         let wp = self.cpu.cr0 & 0x0001_0000 != 0;
-        let fault = |present: bool| PageFault { la, write, present };
+        if write && !writable && (user || wp) {
+            return Err(PageFault { la, write, present: true });
+        }
+        if user && !user_ok {
+            return Err(PageFault { la, write, present: true });
+        }
+        Ok(base | (la & 0xFFF))
+    }
+
+    /// 2段の表を歩いて、ページの物理先頭と権限ビットを返す (TLBミス時のみ)。
+    /// 返すのは (4K境界の物理先頭, 書けるか, ユーザーで触れるか)。
+    /// **不在は Err(present:false)** — これは TLB に載せない (次回また歩く)
+    fn walk_page(&self, la: u32) -> Result<(u32, bool, bool), PageFault> {
+        let notp = || PageFault { la, write: false, present: false };
         let dir = (la >> 22) & 0x3FF;
         let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
         if pde & 1 == 0 {
-            return Err(fault(false));
+            return Err(notp());
         }
         if pde & 0x80 != 0 {
-            // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる
-            if write && pde & 2 == 0 && (user || wp) {
-                return Err(fault(true));
-            }
-            if user && pde & 4 == 0 {
-                return Err(fault(true));
-            }
-            return Ok((pde & 0xFFC0_0000) | (la & 0x003F_FFFF));
+            // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる。
+            // TLBは4K単位なので、この4Kぶんの物理先頭を作る
+            let base = (pde & 0xFFC0_0000) | (la & 0x003F_F000);
+            return Ok((base, pde & 2 != 0, pde & 4 != 0));
         }
         let tbl = (la >> 12) & 0x3FF;
         let pte = self.read_phys32((pde & !0xFFF) + tbl * 4);
         if pte & 1 == 0 {
-            return Err(fault(false));
+            return Err(notp());
         }
-        // R/W・U/S は2段の**厳しい方**が効く
-        if write && (pde & 2 == 0 || pte & 2 == 0) && (user || wp) {
-            return Err(fault(true));
-        }
-        if user && (pde & 4 == 0 || pte & 4 == 0) {
-            return Err(fault(true));
-        }
-        Ok((pte & !0xFFF) | (la & 0xFFF))
+        // R/W・U/S は2段の**厳しい方**が効く (両方立って初めて許す)
+        let writable = pde & 2 != 0 && pte & 2 != 0;
+        let user_ok = pde & 4 != 0 && pte & 4 != 0;
+        Ok((pte & !0xFFF, writable, user_ok))
     }
 
     /// 変換失敗を記録する (最初の1件だけ)。命令の終わりで #PF になる
@@ -530,6 +616,36 @@ impl Machine {
         if self.pending_fault.get().is_none() {
             self.pending_fault.set(Some(f));
         }
+    }
+
+    /// REPの一括処理用: 線形アドレス `la` から、**同じページ内で連続して
+    /// 触れる物理範囲**を返す。`write` は書き込みか。
+    /// 返り値は (物理先頭, そのページで残るバイト数)。フォールトなら None
+    /// (呼び出し側が note_fault 済みのつもりで巻き戻す)。
+    /// RAMを超える範囲は None (遅い道に落とす)
+    pub(crate) fn phys_span(&self, la: u32, write: bool) -> Option<(usize, usize)> {
+        let pa = match self.translate_for(la, write) {
+            Ok(pa) => pa,
+            Err(f) => {
+                self.note_fault(f);
+                return None;
+            }
+        };
+        let page_remain = 0x1000 - (la & 0xFFF) as usize;
+        let a = pa as usize;
+        if a + page_remain > self.mem.len() {
+            return None;
+        }
+        Some((a, page_remain))
+    }
+
+    /// 生のメモリスライスへの参照 (REP一括処理の宛先)。
+    /// VRAMやデバッガの都合は呼び出し側が事前に外す
+    pub(crate) fn mem_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.mem
+    }
+    pub(crate) fn mem_slice(&self) -> &[u8] {
+        &self.mem
     }
 
     /// メモリ書き込み。
@@ -572,21 +688,82 @@ impl Machine {
     }
 
     pub fn read16(&self, addr: u32) -> u16 {
-        self.read8(addr) as u16 | (self.read8(addr.wrapping_add(1)) as u16) << 8
+        // ページ内に収まるなら**1回の変換で2バイト**読む。
+        // ページ跨ぎ (稀) のときだけバイトごとに落とす
+        if addr & 0xFFF <= 0xFFE {
+            match self.translate_for(addr, false) {
+                Ok(pa) => {
+                    let a = pa as usize;
+                    if a + 2 <= self.mem.len() {
+                        return self.mem[a] as u16 | (self.mem[a + 1] as u16) << 8;
+                    }
+                    0xFFFF
+                }
+                Err(f) => {
+                    self.note_fault(f);
+                    0xFFFF
+                }
+            }
+        } else {
+            self.read8(addr) as u16 | (self.read8(addr.wrapping_add(1)) as u16) << 8
+        }
     }
 
     pub fn read32(&self, addr: u32) -> u32 {
-        self.read16(addr) as u32 | (self.read16(addr.wrapping_add(2)) as u32) << 16
+        // ページ内に収まるなら**1回の変換で4バイト**読む
+        if addr & 0xFFF <= 0xFFC {
+            match self.translate_for(addr, false) {
+                Ok(pa) => self.read_phys32(pa),
+                Err(f) => {
+                    self.note_fault(f);
+                    0xFFFF_FFFF
+                }
+            }
+        } else {
+            self.read16(addr) as u32 | (self.read16(addr.wrapping_add(2)) as u32) << 16
+        }
     }
 
     pub fn write32(&mut self, addr: u32, val: u32) {
+        if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
+            return;
+        }
         self.write16(addr, val as u16);
         self.write16(addr.wrapping_add(2), (val >> 16) as u16);
     }
 
     pub fn write16(&mut self, addr: u32, val: u16) {
+        if addr & 0xFFF <= 0xFFE && self.write_wide(addr, val as u32, 2) {
+            return;
+        }
         self.write8(addr, val as u8);
         self.write8(addr.wrapping_add(1), (val >> 8) as u8);
+    }
+
+    /// ページ内に収まる2/4バイト書き込みを**1回の変換**で行う。
+    /// 成功したら true。フォールト・跨ぎ・見張り対象などで速い道を使えないときは
+    /// false を返し、呼び出し側がバイトごとの道へ落とす
+    fn write_wide(&mut self, addr: u32, val: u32, width: u32) -> bool {
+        let pa = match self.translate_for(addr, true) {
+            Ok(pa) => pa,
+            Err(f) => {
+                self.note_fault(f);
+                return true; // フォールトは「書かない」で完了 (再実行が改めて書く)
+            }
+        };
+        let a = pa as usize;
+        if a + width as usize > self.mem.len() {
+            return true; // RAM超えは捨てる (完了扱い)
+        }
+        // デバッガが見張っている、または VRAM に落ちるなら、遅い道で
+        // バイトごとの合図を出す (ここは熱くない)
+        if self.dbg.on || (bus::VRAM_TEXT_BASE..=bus::VRAM_TEXT_END).contains(&(a as u32)) {
+            return false;
+        }
+        for i in 0..width as usize {
+            self.mem[a + i] = (val >> (i * 8)) as u8;
+        }
+        true
     }
 
     // --- I/Oポート空間の振り分け ---
@@ -911,6 +1088,7 @@ impl Machine {
             }
         };
         m.pic_service = m.devices.pic[0].has_pending();
+        m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
         m.mem = mem;
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)
@@ -1131,6 +1309,13 @@ impl Machine {
         }
 
         if let Some(f) = self.pending_fault.take() {
+            // **フォールトしたページの写しを捨てる。**
+            //
+            // Linuxは「PTEはもう直したのに#PFが来た」(spurious fault) を想定して
+            // いて、ハンドラは何もせず iret し、再実行が通ることを期待する。
+            // 古い写しが残っていると同じ#PFが延々と繰り返され、起動が進まなく
+            // なる (実際にここで止まった)。実機も #PF のページは無効化する
+            self.tlb_flush_page(f.la);
             // フェッチがフォールトすると 0xFF (未マップの器) を命令として
             // デコードし、偽の「未実装」トラップが立つことがある。
             // 本当の事件は #PF の方 — トラップは取り消して配送する
