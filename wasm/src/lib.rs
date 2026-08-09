@@ -120,6 +120,41 @@ impl Emulator {
         Ok(Emulator { m })
     }
 
+    /// bzImage (+ initramfs) から 32bit Linux を起動する。
+    /// `ram_mb` はRAMサイズ (MB)、`cmdline` はカーネルコマンドライン。
+    /// コンソールはシリアル (ttyS0) — `serial_out` / `serial_in` で読み書きする
+    pub fn from_bzimage(
+        kernel: &[u8],
+        initrd: Option<Vec<u8>>,
+        cmdline: &str,
+        ram_mb: usize,
+    ) -> Result<Emulator, JsError> {
+        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
+        m.boot_bzimage_with_initrd(kernel, cmdline, initrd.as_deref())
+            .map_err(|e| JsError::new(&e))?;
+        Ok(Emulator { m })
+    }
+
+    /// シリアル (UART) に溜まった出力を取り出して返す。**読むと消える** —
+    /// 端末は差分だけ受け取ればよい。Linuxのコンソールはここに出る
+    pub fn serial_out(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.m.devices.uart.tx)
+    }
+
+    /// シリアルへ入力を1バイト以上流す (キーボード → ttyS0)
+    pub fn serial_in(&mut self, bytes: &[u8]) {
+        self.m.devices.uart.feed(bytes);
+    }
+
+    /// 未実装命令などで機械が止まった理由 (無ければ空文字列)
+    pub fn trap_reason(&self) -> String {
+        self.m
+            .trap
+            .as_ref()
+            .map(|t| format!("{} @ {:04x}:{:08x}", t.reason, t.cs, t.ip))
+            .unwrap_or_default()
+    }
+
     /// 指定した命令数だけ進める。**1フレーム分の仕事**として呼ぶ。
     ///
     /// HLTで止まっていても抜けない — タイマ割り込みで起きるのを待つ必要があるため。

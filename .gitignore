@@ -3,3 +3,9 @@
 /images
 /web/*.img
 *.lst
+# webに置いたLinuxイメージ (配布物なのでコミットしない。tools/fetch-images.sh で取得)
+web/vmlinuz-lts
+web/initramfs-mini
+web/initramfs-lts
+# セッション間の引き継ぎメモ (内部文書。積み上げず、片付いたら消す)
+HANDOFF.md
