@@ -70,8 +70,10 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     let sel = read_op16(m, &rm);
                     let off = (sel & !0x7) as u32;
                     let a = m.cpu.gdtr_base.wrapping_add(off);
+                    let prev_sys = m.sys_access.replace(true);
                     let lo = m.read32(a);
                     let hi = m.read32(a.wrapping_add(4));
+                    m.sys_access.set(prev_sys);
                     let ty = ((hi >> 8) & 0x1F) as u8;
                     if ty != 0x09 {
                         panic!("LTR: not an available 32bit TSS (type {ty:#04x})");

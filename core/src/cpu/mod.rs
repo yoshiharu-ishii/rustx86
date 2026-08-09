@@ -109,6 +109,7 @@ pub const OF: u32 = 1 << 11;
 /// デバッガのシングルステップはこれで実現されている
 pub const TF: u32 = 1 << 8;
 
+#[derive(Clone)]
 pub struct Cpu {
     /// AX CX DX BX SP BP SI DI (将来の32bit拡張を見据えてu32で保持)
     pub regs: [u32; 8],

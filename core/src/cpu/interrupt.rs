@@ -59,7 +59,10 @@ pub(crate) fn software_int(m: &mut Machine, n: u8) {
     if m.cpu.pe() {
         let off = n as u32 * 8;
         if off + 7 <= m.cpu.idtr_limit as u32 {
+            // ゲート記述子の読みは暗黙のスーパーバイザアクセス
+            let prev_sys = m.sys_access.replace(true);
             let hi = m.read32(m.cpu.idtr_base.wrapping_add(off).wrapping_add(4));
+            m.sys_access.set(prev_sys);
             let gate_dpl = ((hi >> 13) & 3) as u8;
             if gate_dpl < m.cpu.cpl() {
                 panic!(
@@ -93,6 +96,14 @@ pub(crate) fn interrupt_protected(m: &mut Machine, n: u8) {
 /// エラーコード付きの配送 (#PF/#GP等)。エラーコードは **EIPの後に** 積まれ、
 /// ハンドラの `add $4, %esp` (またはpop) が引き取る約束
 pub(crate) fn interrupt_protected_err(m: &mut Machine, n: u8, err: Option<u32>) {
+    // 配送はCPUの内部動作 — IDT/GDT/TSSの読みも、切り替えた先の
+    // カーネルスタックへのpushも、CPL=3のさなかでもスーパーバイザ権限で行う
+    let prev_sys = m.sys_access.replace(true);
+    interrupt_protected_inner(m, n, err);
+    m.sys_access.set(prev_sys);
+}
+
+fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
     let off = n as u32 * 8;
     if off + 7 > m.cpu.idtr_limit as u32 {
         panic!(
