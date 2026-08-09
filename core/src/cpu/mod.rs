@@ -37,7 +37,7 @@ pub mod shift;
 pub mod string;
 pub mod twobyte;
 
-use alu::{alu16, alu8, alu_w, condition};
+use alu::{alu8, alu_w, condition};
 use operand::{
     fetch16, fetch32, fetch8, fetch_w, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
     read_op_w, sp_read, sp_write, write_op16, write_op8, write_op_w, Operand,
@@ -382,8 +382,8 @@ fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
     m.cpu.tsc = m.cpu.tsc.wrapping_add(1); // RDTSC用: 1命令=1カウント
-    // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
-    // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
+                                           // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
+                                           // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
     let cs32 = m.cpu.seg_is32(CS);
     let mut d = Decoder {
         seg_override: None,

@@ -319,6 +319,18 @@ impl Machine {
     /// カーネルは早々にこの状態を捨てて自前のGDT/ページテーブルを作るので、
     /// ここで渡すのは「最初の一歩を踏み出せる姿勢」だけでよい
     pub fn boot_bzimage(&mut self, image: &[u8], cmdline: &str) -> Result<(), String> {
+        self.boot_bzimage_with_initrd(image, cmdline, None)
+    }
+
+    /// initrd (initramfs) 付きの bzImage 起動。
+    /// initrd は**RAMの高い方**に置く — カーネル本体 (1MB〜) と展開作業域から
+    /// 遠ざけるのが慣習で、実ブートローダも同じことをする
+    pub fn boot_bzimage_with_initrd(
+        &mut self,
+        image: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+    ) -> Result<(), String> {
         use cpu::{CS, DS, ES, FS, GS, SS};
         let hdr = bzimage::SetupHeader::parse(image)?;
         if !hdr.loaded_high() {
@@ -341,9 +353,28 @@ impl Machine {
         }
         self.write_phys8(CMDLINE_ADDR + cmdline.len() as u32, 0);
 
+        // initrd をRAM上端寄り (1MBの余白を残してページ整列) に置く
+        let initrd_loc = match initrd {
+            Some(data) => {
+                let size = data.len() as u32;
+                let top = self.mem.len() as u32;
+                if size + 0x0100_0000 > top {
+                    return Err(format!(
+                        "initrd ({size} バイト) がRAM ({top} バイト) に収まらない"
+                    ));
+                }
+                let addr = (top - size - 0x0010_0000) & !0xFFF;
+                for (i, b) in data.iter().enumerate() {
+                    self.write_phys8(addr + i as u32, *b);
+                }
+                Some((addr, size))
+            }
+            None => None,
+        };
+
         // zero page を組んで低位に置く (慣習の 0x1_0000)
         const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(image, self.mem.len() as u64, CMDLINE_ADDR);
+        let zp = bzimage::build_zero_page(image, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }
@@ -360,9 +391,7 @@ impl Machine {
         //   index 3 (selector 0x18) = flat 32bit data
         const GDT_ADDR: u32 = 0x0000_0800;
         // 8バイトの記述子。base=0, limit=0xFFFFF(4Kページ単位で4GB), access, flags
-        let desc = |access: u8| -> [u8; 8] {
-            [0xFF, 0xFF, 0, 0, 0, access, 0xCF, 0]
-        };
+        let desc = |access: u8| -> [u8; 8] { [0xFF, 0xFF, 0, 0, 0, access, 0xCF, 0] };
         let mut gdt = [0u8; 32]; // 4エントリ
         gdt[16..24].copy_from_slice(&desc(0x9A)); // 0x10: code (P,DPL0,code,readable)
         gdt[24..32].copy_from_slice(&desc(0x92)); // 0x18: data (P,DPL0,data,writable)

@@ -118,6 +118,9 @@ struct E820 {
 }
 
 mod zp {
+    pub const TYPE_OF_LOADER: usize = 0x210; // どのブートローダか (0xFF=その他)
+    pub const RAMDISK_IMAGE: usize = 0x218; // initrd の物理アドレス
+    pub const RAMDISK_SIZE: usize = 0x21C; // initrd のバイト数
     pub const CMDLINE_PTR: usize = 0x228;
     pub const E820_ENTRIES: usize = 0x1E8; // エントリ数 (u8)
     pub const E820_TABLE: usize = 0x2D0; // エントリの並び (各20バイト)
@@ -135,8 +138,14 @@ mod zp {
     pub const ORIG_VIDEO_POINTS: usize = 0x10;
 }
 
-/// zero page を組んで返す (4KB)。`ram_bytes` は MachineProfile の RAM
-pub fn build_zero_page(img: &[u8], ram_bytes: u64, cmdline_ptr: u32) -> Vec<u8> {
+/// zero page を組んで返す (4KB)。`ram_bytes` は MachineProfile の RAM。
+/// `initrd` は (物理アドレス, バイト数) — カーネルはこの2欄だけで initrd を見つける
+pub fn build_zero_page(
+    img: &[u8],
+    ram_bytes: u64,
+    cmdline_ptr: u32,
+    initrd: Option<(u32, u32)>,
+) -> Vec<u8> {
     let mut zp = vec![0u8; 4096];
 
     // 1. setupヘッダをそのまま写す。カーネルは起動直後に自分のヘッダを
@@ -152,6 +161,18 @@ pub fn build_zero_page(img: &[u8], ram_bytes: u64, cmdline_ptr: u32) -> Vec<u8> 
     zp[zp::ORIG_VIDEO_LINES] = 25;
     zp[zp::ORIG_VIDEO_ISVGA] = 1;
     zp[zp::ORIG_VIDEO_POINTS] = 16;
+
+    // 1.6. 「ブートローダが居る」と名乗る。**0のままだと、カーネルは
+    //      ブートローダ不在とみなして ramdisk 欄ごと無視する** (実際に
+    //      initrd が黙って捨てられた)。0xFF = 一覧に無いその他のローダ
+    zp[zp::TYPE_OF_LOADER] = 0xFF;
+
+    // 1.7. initrd の場所と大きさ。ブートローダの義務はこの2欄を埋めるだけで、
+    //      中身の解釈 (cpio+gzip) は全部カーネルがやる
+    if let Some((addr, size)) = initrd {
+        zp[zp::RAMDISK_IMAGE..zp::RAMDISK_IMAGE + 4].copy_from_slice(&addr.to_le_bytes());
+        zp[zp::RAMDISK_SIZE..zp::RAMDISK_SIZE + 4].copy_from_slice(&size.to_le_bytes());
+    }
 
     // 2. コマンドラインのポインタ
     zp[zp::CMDLINE_PTR..zp::CMDLINE_PTR + 4].copy_from_slice(&cmdline_ptr.to_le_bytes());

@@ -66,7 +66,7 @@ use rustx86_core::bzimage::{build_zero_page, zero_page_e820, zero_page_e820_coun
 fn e820はramサイズから作られる() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 128MB の機械
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None);
     // 640K + EBDA + VGA窓 + 1MB以降 = 4エントリ
     assert_eq!(zero_page_e820_count(&zp), 4);
     // 最後のエントリ = 1MB から (128MB - 1MB) の使えるRAM
@@ -80,14 +80,14 @@ fn e820はramサイズから作られる() {
 fn 小さいramでは1mb以降のエントリが無い() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 1MB ちょうど → 1MB以降のRAMが無いので3エントリ
-    let zp = build_zero_page(&img, 1 << 20, 0x9_0000);
+    let zp = build_zero_page(&img, 1 << 20, 0x9_0000, None);
     assert_eq!(zero_page_e820_count(&zp), 3);
 }
 
 #[test]
 fn zero_pageにヘッダとcmdlineが入る() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None);
     // setupヘッダのマジックが zero page にも写っている
     assert_eq!(&zp[0x202..0x206], b"HdrS");
     // cmdline ポインタ
