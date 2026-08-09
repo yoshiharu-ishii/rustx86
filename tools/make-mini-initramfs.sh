@@ -28,9 +28,13 @@ cat > "$work/root/init" <<'INIT'
 /bin/busybox mount -t sysfs sys /sys
 /bin/busybox mount -t devtmpfs dev /dev 2>/dev/null
 /bin/busybox --install -s /bin
+# シリアルコンソールにはTERMが無い。viやlessがフルスクリーン描画の
+# 作法を選べるように、素直なxtermを名乗っておく
+export TERM=xterm
+/bin/busybox stty rows 24 cols 80
 echo
 echo "  rustx86 mini initramfs — busybox shell"
-echo "  ゲーム: snake"
+echo "  ゲーム: snake   エディタ: vi"
 echo
 exec /bin/busybox sh
 INIT
