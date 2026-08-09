@@ -38,7 +38,9 @@ fn main() {
     eprintln!(
         "rustx86: {path} ({}MB, initrd {}) — Ctrl-] で終了",
         mb,
-        initrd.as_ref().map_or("なし".into(), |d| format!("{}K", d.len() / 1024)),
+        initrd
+            .as_ref()
+            .map_or("なし".into(), |d| format!("{}K", d.len() / 1024)),
     );
 
     // 標準入力を生モードに。終了時に戻す

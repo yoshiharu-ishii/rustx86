@@ -60,11 +60,10 @@ pub(crate) fn pfx(d: &Decoder) -> Pfx {
 // ---- XMMとメモリの出し入れ ----
 
 fn read_m128(m: &Machine, a: u32) -> u128 {
-    let lo = m.read32(a) as u128
+    m.read32(a) as u128
         | (m.read32(a.wrapping_add(4)) as u128) << 32
         | (m.read32(a.wrapping_add(8)) as u128) << 64
-        | (m.read32(a.wrapping_add(12)) as u128) << 96;
-    lo
+        | (m.read32(a.wrapping_add(12)) as u128) << 96
 }
 
 fn write_m128(m: &mut Machine, a: u32, v: u128) {
@@ -151,7 +150,12 @@ fn fromf64(a: [f64; 2]) -> u128 {
 
 /// 浮動小数点の2項演算をプレフィクスに従って適用する。
 /// packed は全レーン、scalar は最下位レーンだけ (残りはdst据え置き)
-fn fp_binop(m: &mut Machine, d: &Decoder, f32op: impl Fn(f32, f32) -> f32, f64op: impl Fn(f64, f64) -> f64) {
+fn fp_binop(
+    m: &mut Machine,
+    d: &Decoder,
+    f32op: impl Fn(f32, f32) -> f32,
+    f64op: impl Fn(f64, f64) -> f64,
+) {
     let p = pfx(d);
     let (reg, rm) = modrm(m, d);
     let dst = m.cpu.xmm[reg];
@@ -242,7 +246,9 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 Pfx::F3 => match rm {
                     // メモリからのmovssは上位96bitをゼロに、レジスタ間は下位だけ
                     Operand::Mem { addr, .. } => m.read32(addr) as u128,
-                    Operand::Reg(r) => (m.cpu.xmm[reg] & !0xFFFF_FFFF) | (m.cpu.xmm[r] & 0xFFFF_FFFF),
+                    Operand::Reg(r) => {
+                        (m.cpu.xmm[reg] & !0xFFFF_FFFF) | (m.cpu.xmm[r] & 0xFFFF_FFFF)
+                    }
                 },
                 Pfx::F2 => match rm {
                     Operand::Mem { addr, .. } => read_m64(m, addr) as u128,
@@ -362,14 +368,14 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         }
 
         // ---- ビット演算 (ps/pd/整数で同じ動き) ----
-        0x54 => int_binop(m, d, |a, b| a & b),          // andps/pand相当
-        0x55 => int_binop(m, d, |a, b| !a & b),         // andnps
-        0x56 => int_binop(m, d, |a, b| a | b),          // orps
-        0x57 => int_binop(m, d, |a, b| a ^ b),          // xorps
-        0xDB => int_binop(m, d, |a, b| a & b),          // pand
-        0xDF => int_binop(m, d, |a, b| !a & b),         // pandn
-        0xEB => int_binop(m, d, |a, b| a | b),          // por
-        0xEF => int_binop(m, d, |a, b| a ^ b),          // pxor
+        0x54 => int_binop(m, d, |a, b| a & b), // andps/pand相当
+        0x55 => int_binop(m, d, |a, b| !a & b), // andnps
+        0x56 => int_binop(m, d, |a, b| a | b), // orps
+        0x57 => int_binop(m, d, |a, b| a ^ b), // xorps
+        0xDB => int_binop(m, d, |a, b| a & b), // pand
+        0xDF => int_binop(m, d, |a, b| !a & b), // pandn
+        0xEB => int_binop(m, d, |a, b| a | b), // por
+        0xEF => int_binop(m, d, |a, b| a ^ b), // pxor
 
         // ---- 整数の加減算 ----
         0xFC => int_binop(m, d, lanes8(u8::wrapping_add)),
@@ -390,11 +396,27 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         0x74 => int_binop(m, d, lanes8(|a, b| if a == b { 0xFF } else { 0 })),
         0x75 => int_binop(m, d, lanes16(|a, b| if a == b { 0xFFFF } else { 0 })),
         0x76 => int_binop(m, d, lanes32(|a, b| if a == b { 0xFFFF_FFFF } else { 0 })),
-        0x64 => int_binop(m, d, lanes8(|a, b| if (a as i8) > b as i8 { 0xFF } else { 0 })),
-        0x65 => int_binop(m, d, lanes16(|a, b| if (a as i16) > b as i16 { 0xFFFF } else { 0 })),
-        0x66 => int_binop(m, d, lanes32(|a, b| {
-            if (a as i32) > b as i32 { 0xFFFF_FFFF } else { 0 }
-        })),
+        0x64 => int_binop(
+            m,
+            d,
+            lanes8(|a, b| if (a as i8) > b as i8 { 0xFF } else { 0 }),
+        ),
+        0x65 => int_binop(
+            m,
+            d,
+            lanes16(|a, b| if (a as i16) > b as i16 { 0xFFFF } else { 0 }),
+        ),
+        0x66 => int_binop(
+            m,
+            d,
+            lanes32(|a, b| {
+                if (a as i32) > b as i32 {
+                    0xFFFF_FFFF
+                } else {
+                    0
+                }
+            }),
+        ),
         // pmovmskb: 各バイトの符号ビットを16bitに束ねて汎用レジスタへ。
         // 「どのレーンが一致したか」を分岐で使える形にする、比較の相棒
         0xD7 if p == Pfx::P66 => {
@@ -430,11 +452,23 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         // punpckl/h: 2本のレジスタのレーンを互い違いに混ぜる
         0x60 => int_binop(m, d, |a, b| {
             let (x, y) = (to8(a), to8(b));
-            from8(core::array::from_fn(|i| if i % 2 == 0 { x[i / 2] } else { y[i / 2] }))
+            from8(core::array::from_fn(|i| {
+                if i % 2 == 0 {
+                    x[i / 2]
+                } else {
+                    y[i / 2]
+                }
+            }))
         }),
         0x61 => int_binop(m, d, |a, b| {
             let (x, y) = (to16(a), to16(b));
-            from16(core::array::from_fn(|i| if i % 2 == 0 { x[i / 2] } else { y[i / 2] }))
+            from16(core::array::from_fn(|i| {
+                if i % 2 == 0 {
+                    x[i / 2]
+                } else {
+                    y[i / 2]
+                }
+            }))
         }),
         0x62 => int_binop(m, d, |a, b| {
             let (x, y) = (to32(a), to32(b));
@@ -443,11 +477,23 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         0x6C => int_binop(m, d, |a, b| from64([to64(a)[0], to64(b)[0]])),
         0x68 => int_binop(m, d, |a, b| {
             let (x, y) = (to8(a), to8(b));
-            from8(core::array::from_fn(|i| if i % 2 == 0 { x[8 + i / 2] } else { y[8 + i / 2] }))
+            from8(core::array::from_fn(|i| {
+                if i % 2 == 0 {
+                    x[8 + i / 2]
+                } else {
+                    y[8 + i / 2]
+                }
+            }))
         }),
         0x69 => int_binop(m, d, |a, b| {
             let (x, y) = (to16(a), to16(b));
-            from16(core::array::from_fn(|i| if i % 2 == 0 { x[4 + i / 2] } else { y[4 + i / 2] }))
+            from16(core::array::from_fn(|i| {
+                if i % 2 == 0 {
+                    x[4 + i / 2]
+                } else {
+                    y[4 + i / 2]
+                }
+            }))
         }),
         0x6A => int_binop(m, d, |a, b| {
             let (x, y) = (to32(a), to32(b));
@@ -500,7 +546,7 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
 
         // ---- シフト ----
         // 即値形 (71/72/73 はModRMのreg欄が演算選択)
-        0x71 | 0x72 | 0x73 if p == Pfx::P66 => {
+        0x71..=0x73 if p == Pfx::P66 => {
             let (kind, rm) = modrm(m, d);
             let n = fetch8(m) as u32;
             let r = match rm {
@@ -519,11 +565,19 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 (0x73, 6) => from64(to64(v).map(|x| if n < 64 { x << n } else { 0 })),
                 (0x73, 3) => {
                     // psrldq: バイト単位の右シフト (128bit全体)
-                    if n >= 16 { 0 } else { v >> (n * 8) }
+                    if n >= 16 {
+                        0
+                    } else {
+                        v >> (n * 8)
+                    }
                 }
                 (0x73, 7) => {
                     // pslldq
-                    if n >= 16 { 0 } else { v << (n * 8) }
+                    if n >= 16 {
+                        0
+                    } else {
+                        v << (n * 8)
+                    }
                 }
                 _ => return false,
             };
@@ -531,46 +585,92 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         // レジスタ (下位64bitがカウント) 形
         0xD1 => int_binop(m, d, |a, b| {
             let n = (b as u64).min(63) as u32;
-            if b as u64 >= 16 { 0 } else { from16(to16(a).map(|x| x >> n)) }
+            if b as u64 >= 16 {
+                0
+            } else {
+                from16(to16(a).map(|x| x >> n))
+            }
         }),
         0xD2 => int_binop(m, d, |a, b| {
-            if b as u64 >= 32 { 0 } else { from32(to32(a).map(|x| x >> (b as u32))) }
+            if b as u64 >= 32 {
+                0
+            } else {
+                from32(to32(a).map(|x| x >> (b as u32)))
+            }
         }),
         0xD3 => int_binop(m, d, |a, b| {
-            if b as u64 >= 64 { 0 } else { from64(to64(a).map(|x| x >> (b as u32))) }
+            if b as u64 >= 64 {
+                0
+            } else {
+                from64(to64(a).map(|x| x >> (b as u32)))
+            }
         }),
         0xF1 => int_binop(m, d, |a, b| {
-            if b as u64 >= 16 { 0 } else { from16(to16(a).map(|x| x << (b as u32))) }
+            if b as u64 >= 16 {
+                0
+            } else {
+                from16(to16(a).map(|x| x << (b as u32)))
+            }
         }),
         0xF2 => int_binop(m, d, |a, b| {
-            if b as u64 >= 32 { 0 } else { from32(to32(a).map(|x| x << (b as u32))) }
+            if b as u64 >= 32 {
+                0
+            } else {
+                from32(to32(a).map(|x| x << (b as u32)))
+            }
         }),
         0xF3 => int_binop(m, d, |a, b| {
-            if b as u64 >= 64 { 0 } else { from64(to64(a).map(|x| x << (b as u32))) }
+            if b as u64 >= 64 {
+                0
+            } else {
+                from64(to64(a).map(|x| x << (b as u32)))
+            }
         }),
 
         // psadbw: バイト差の絶対値の和。memchr系の最適化で出てくる
         0xF6 if p == Pfx::P66 => int_binop(m, d, |a, b| {
             let (x, y) = (to8(a), to8(b));
-            let lo: u64 = (0..8).map(|i| (x[i] as i16 - y[i] as i16).unsigned_abs() as u64).sum();
-            let hi: u64 = (8..16).map(|i| (x[i] as i16 - y[i] as i16).unsigned_abs() as u64).sum();
+            let lo: u64 = (0..8)
+                .map(|i| (x[i] as i16 - y[i] as i16).unsigned_abs() as u64)
+                .sum();
+            let hi: u64 = (8..16)
+                .map(|i| (x[i] as i16 - y[i] as i16).unsigned_abs() as u64)
+                .sum();
             from64([lo, hi])
         }),
         // pack系: 幅を半分に潰して2本を1本に (飽和つき)
         0x63 => int_binop(m, d, |a, b| {
             let (x, y) = (to16(a), to16(b));
             let sat = |v: u16| (v as i16).clamp(-128, 127) as i8 as u8;
-            from8(core::array::from_fn(|i| if i < 8 { sat(x[i]) } else { sat(y[i - 8]) }))
+            from8(core::array::from_fn(|i| {
+                if i < 8 {
+                    sat(x[i])
+                } else {
+                    sat(y[i - 8])
+                }
+            }))
         }),
         0x67 => int_binop(m, d, |a, b| {
             let (x, y) = (to16(a), to16(b));
             let sat = |v: u16| (v as i16).clamp(0, 255) as u8;
-            from8(core::array::from_fn(|i| if i < 8 { sat(x[i]) } else { sat(y[i - 8]) }))
+            from8(core::array::from_fn(|i| {
+                if i < 8 {
+                    sat(x[i])
+                } else {
+                    sat(y[i - 8])
+                }
+            }))
         }),
         0x6B => int_binop(m, d, |a, b| {
             let (x, y) = (to32(a), to32(b));
             let sat = |v: u32| (v as i32).clamp(-32768, 32767) as i16 as u16;
-            from16(core::array::from_fn(|i| if i < 4 { sat(x[i]) } else { sat(y[i - 4]) }))
+            from16(core::array::from_fn(|i| {
+                if i < 4 {
+                    sat(x[i])
+                } else {
+                    sat(y[i - 4])
+                }
+            }))
         }),
 
         // ---- 浮動小数点 ----
@@ -590,12 +690,11 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
             };
             match p {
                 Pfx::F3 => {
-                    m.cpu.xmm[reg] =
-                        (m.cpu.xmm[reg] & !0xFFFF_FFFF) | (v as f32).to_bits() as u128
+                    m.cpu.xmm[reg] = (m.cpu.xmm[reg] & !0xFFFF_FFFF) | (v as f32).to_bits() as u128
                 }
                 Pfx::F2 => {
-                    m.cpu.xmm[reg] = (m.cpu.xmm[reg] & !0xFFFF_FFFF_FFFF_FFFF)
-                        | (v as f64).to_bits() as u128
+                    m.cpu.xmm[reg] =
+                        (m.cpu.xmm[reg] & !0xFFFF_FFFF_FFFF_FFFF) | (v as f64).to_bits() as u128
                 }
                 _ => return false, // cvtpi2ps はMMX絡み (未対応)
             }
@@ -635,7 +734,8 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 }
                 Pfx::P66 => {
                     let s = tof64(rm128(m, &rm));
-                    m.cpu.xmm[reg] = fromf32([s[0] as f32, s[1] as f32, 0.0, 0.0]) & 0xFFFF_FFFF_FFFF_FFFF;
+                    m.cpu.xmm[reg] =
+                        fromf32([s[0] as f32, s[1] as f32, 0.0, 0.0]) & 0xFFFF_FFFF_FFFF_FFFF;
                 }
             }
         }
@@ -650,7 +750,11 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 Pfx::P66 | Pfx::F3 => {
                     let s = tof32(rm128(m, &rm));
                     m.cpu.xmm[reg] = from32(s.map(|x| {
-                        if x.is_nan() { i32::MIN as u32 } else { x.trunc() as i32 as u32 }
+                        if x.is_nan() {
+                            i32::MIN as u32
+                        } else {
+                            x.trunc() as i32 as u32
+                        }
                     }));
                 }
                 _ => return false,
@@ -660,7 +764,10 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         0x2E | 0x2F => {
             let (reg, rm) = modrm(m, d);
             let (a, b) = if p == Pfx::P66 {
-                (f64::from_bits(m.cpu.xmm[reg] as u64), f64::from_bits(rm64(m, &rm)))
+                (
+                    f64::from_bits(m.cpu.xmm[reg] as u64),
+                    f64::from_bits(rm64(m, &rm)),
+                )
             } else {
                 (
                     f32::from_bits(m.cpu.xmm[reg] as u32) as f64,
@@ -676,6 +783,9 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
             let b32 = rm32(m, &rm);
             let b64 = rm64(m, &rm);
             let imm = fetch8(m) & 7;
+            // NLT (5) / NLE (6) は**否定で定義される** — !(a<b) は a>=b と
+            // NaNの扱いが違い、それがSSEの述語の仕様そのもの
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
             let cmp64 = |a: f64, b: f64| -> bool {
                 match imm {
                     0 => a == b,
@@ -693,7 +803,11 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 Pfx::None => {
                     let (x, y) = (tof32(dst), tof32(b128));
                     from32(core::array::from_fn(|i| {
-                        if cmp64(x[i] as f64, y[i] as f64) { !0u32 } else { 0 }
+                        if cmp64(x[i] as f64, y[i] as f64) {
+                            !0u32
+                        } else {
+                            0
+                        }
                     }))
                 }
                 Pfx::P66 => {
@@ -704,7 +818,10 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                     ])
                 }
                 Pfx::F3 => {
-                    let ok = cmp64(f32::from_bits(dst as u32) as f64, f32::from_bits(b32) as f64);
+                    let ok = cmp64(
+                        f32::from_bits(dst as u32) as f64,
+                        f32::from_bits(b32) as f64,
+                    );
                     (dst & !0xFFFF_FFFF) | if ok { 0xFFFF_FFFF } else { 0 }
                 }
                 Pfx::F2 => {
