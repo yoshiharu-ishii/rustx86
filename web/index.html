@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rustx86 — ブラウザで動く8086マシン</title>
+<title>rustx86 — ブラウザで動くx86エミュレータ</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -125,10 +125,7 @@
 </style>
 </head>
 <body>
-  <h1>rustx86 — ブラウザで動く8086マシン</h1>
-  <p class="sub">Rustで書いた8086エミュレータ。ブートセクタのあるディスクイメージなら何でも起動する。
-    画面はテキストVRAM (0xB8000) を直接描いている。
-    左からマシンを選ぶか、イメージを画面にドロップする。</p>
+  <h1>rustx86</h1>
 
   <div class="app">
   <nav class="machines" id="machines" aria-label="マシン"></nav>
@@ -163,6 +160,10 @@
   <details class="helpbox">
   <summary>使い方</summary>
   <dl class="help">
+    <dt>はじめかた</dt>
+    <dd>左のメニューからマシンを選ぶ。ディスクイメージは<strong>同梱していない</strong>
+        (配布物のため) ので、左に出る取得先から落として、このページと同じ場所に置くか、
+        画面に<strong>ドラッグ&amp;ドロップ</strong>する</dd>
     <dt>キー入力</dt>
     <dd>画面をクリックしてから打つ。<strong>物理キーの位置</strong>が8042へ届くので
         <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印もそのまま使える</dd>
@@ -170,20 +171,12 @@
     <dd>ホイール、または右端のスクロールバー (直近1000行)。キーを打つと最新へ戻る</dd>
     <dt>コピー / 貼り付け</dt>
     <dd>ドラッグで選択して <kbd>⌘C</kbd>。<kbd>⌘V</kbd> で貼り付け</dd>
-    <dt>ディスク</dt>
-    <dd>イメージをこの画面に<strong>ドラッグ&amp;ドロップ</strong>すると、そのOSが起動する</dd>
     <dt>状態の保存</dt>
     <dd>CPU・装置・メモリ・ディスクを丸ごと控える。<strong>割り込みの直前で止めて保存し、
         何度でもそこから始められる</strong>。この端末に残す (保存/復元) ほか、
         JSONで書き出して<strong>ドロップで読み戻せる</strong></dd>
   </dl>
   </details>
-
-  <p class="note">
-    <strong>ディスクイメージはリポジトリに含めていない</strong> (配布物のため)。
-    選んだマシンの取得先は左のメニューに出る。このページと同じ場所に置けば自動で読み込み、
-    置かなくても画面にドロップすれば起動する。
-  </p>
 
   <script type="module" src="./main.js"></script>
 </body>

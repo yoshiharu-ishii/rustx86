@@ -321,3 +321,36 @@ fn ページングが有効になっている() {
         "恒等写像の変換が壊れている"
     );
 }
+
+// ---- 未実装は panic ではなく「巻き戻せる停止」になる (Linus起動のデバッグ用) ----
+
+#[test]
+fn 未実装命令は機械を生かしたまま止める() {
+    // MOV AX,0x1234 / RDTSC (0F 31、未実装) をブートセクタに置く
+    let mut m = Machine::new();
+    let mut sector = vec![0u8; 512];
+    sector[..5].copy_from_slice(&[0xB8, 0x34, 0x12, 0x0F, 0x31]);
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+    m.load_boot_sector(&sector).unwrap();
+    for _ in 0..20 {
+        m.step();
+        if m.trap.is_some() {
+            break;
+        }
+    }
+    let t = m
+        .trap
+        .as_ref()
+        .expect("トラップしていない (panicか、素通りした)");
+    assert!(
+        t.reason.contains("0f 0x31"),
+        "理由に命令名が無い: {}",
+        t.reason
+    );
+    // **機械は生きている** — 直前の MOV の結果が読める (panicなら読めない)
+    assert_eq!(m.cpu.regs[cpu::AX], 0x1234);
+    // 未実装命令は実行していない。IPはその手前 (再実行・巻き戻しができる形)
+    assert_eq!(t.ip, 0x7C03, "トラップ地点が命令の先頭でない");
+    assert!(!m.halted, "halted にしてはいけない (HLTとは別物)");
+}

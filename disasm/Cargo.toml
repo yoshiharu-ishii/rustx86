@@ -1,0 +1,10 @@
+[package]
+name = "rustx86-disasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 実績ある逆アセンブラを借りる。**core には入れない** — coreは無依存を貫き、
+# 逆アセンブルは「表示のための別の権威」に任せる (cosimがUnicornを借りるのと同じ)。
+# もしcoreのデコーダとここが食い違えば、それは検知すべき信号になる
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "gas"] }

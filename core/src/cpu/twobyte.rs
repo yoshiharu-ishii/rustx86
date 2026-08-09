@@ -102,9 +102,9 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             m.cpu.ip = start_ip;
             interrupt(m, 6);
         }
-        _ => panic!(
-            "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
-            m.cpu.sregs[CS], start_ip
-        ),
+        _ => {
+            let _ = start_ip;
+            m.trap(format!("unimplemented opcode 0f {op2:#04x}"));
+        }
     }
 }
