@@ -48,6 +48,10 @@ const CSS = `
                letter-spacing: .04em; }
   .rx-dbg header { position: sticky; top: 0; background: #0b0e14; padding: 10px 12px 6px;
                    border-bottom: 1px solid #1f2733; z-index: 1; }
+  /* ヘッダを掴んで動かせる。ボタンや入力の上では掴ませない */
+  .rx-dbg.panel header { cursor: move; }
+  .rx-dbg.panel header button, .rx-dbg.panel header input { cursor: pointer; }
+  .rx-dbg.dragging { user-select: none; }
   .rx-dbg .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .rx-dbg button { background: #1f2733; color: #c9d1d9; border: 1px solid #30363d;
                    border-radius: 5px; padding: 4px 10px; font: inherit; cursor: pointer; }
@@ -63,7 +67,9 @@ const CSS = `
   .rx-dbg .k { color: #8b949e; }
   .rx-dbg .v { color: #79c0ff; }
   .rx-dbg .changed { color: #f0883e; }
-  .rx-dbg .hex { color: #7ee787; }
+  .rx-dbg .hex { color: #6e7681; font-size: 12px; }
+  .rx-dbg .asm { color: #7ee787; }
+  .rx-dbg .state.stopped { color: #f0883e; }
   /* **必ず1行。** 折り返すと下の欄が丸ごとずれる */
   .rx-dbg .why { margin: 6px 0 0; color: #f0883e; height: 1.4em;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -79,6 +85,34 @@ const CSS = `
                   min-height: 0; height: calc(100vh - 24px); overflow: auto;
                   z-index: 9999; border: 1px solid #30363d; border-radius: 8px;
                   box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+  /* 最小化: ヘッダ (タイトル+状態+操作ボタン) だけ残して畳む。
+     裏の画面を覗きたいとき用。操作ボタンは残るので畳んだまま Step もできる */
+  /* インラインで焼いた height (縦リサイズの結果) より勝たせる。
+     でないと畳んでも大きな空パネルが残る */
+  .rx-dbg.panel.min { height: auto !important; overflow: hidden; }
+  .rx-dbg.panel.min section, .rx-dbg.panel.min .why { display: none; }
+  /* リサイズつまみ。パネルは右上に固定なので、左端=横幅・下端=高さ・
+     左下角=両方 を変える */
+  .rx-dbg .resize { position: absolute; z-index: 2; }
+  .rx-dbg .resize.x { left: -3px; top: 0; width: 8px; height: 100%; cursor: ew-resize; }
+  .rx-dbg .resize.y { left: 0; bottom: -3px; width: 100%; height: 8px; cursor: ns-resize; }
+  .rx-dbg .resize.xy { left: -3px; bottom: -3px; width: 14px; height: 14px;
+                       cursor: nesw-resize; }
+  .rx-dbg .resize:hover { background: #2563eb44; }
+  /* スクロールバーをデバッガの地の色に合わせる。既定の明るいバーが
+     ダークなパネルから浮くので */
+  .rx-dbg, .rx-dbg pre, .rx-dbg .grow pre {
+    scrollbar-width: thin; scrollbar-color: #5b6673 transparent;
+  }
+  .rx-dbg ::-webkit-scrollbar, .rx-dbg::-webkit-scrollbar { width: 11px; height: 11px; }
+  .rx-dbg ::-webkit-scrollbar-track, .rx-dbg::-webkit-scrollbar-track { background: transparent; }
+  .rx-dbg ::-webkit-scrollbar-thumb, .rx-dbg::-webkit-scrollbar-thumb {
+    background: #5b6673; border-radius: 5px; border: 2px solid #0b0e14;
+  }
+  .rx-dbg ::-webkit-scrollbar-thumb:hover, .rx-dbg::-webkit-scrollbar-thumb:hover {
+    background: #79879a;
+  }
+  .rx-dbg .hbtn { padding: 2px 8px; margin-left: 4px; }
   .rx-dbg .close { margin-left: auto; }
 `;
 
@@ -89,6 +123,7 @@ const HTML = `
     <div class="row">
       <h2 style="margin:0">rustx86 debugger</h2>
       <span class="state" id="rxState">—</span>
+      <button class="hbtn" id="rxMin" title="最小化 (裏の画面を覗く)">–</button>
       <button class="close" id="rxClose" hidden>Close</button>
     </div>
     <div class="row" style="margin-top:8px">
@@ -121,8 +156,22 @@ const HTML = `
 
   <section>
     <h2>Next instruction</h2>
-    <p class="note">CS:IP と、これから実行するバイト列。逆アセンブラはまだ無い。</p>
+    <p class="note">CS:IP と、これから実行する命令 (逆アセンブル) と生バイト。幅はCSのDビットで16/32を切り替える。</p>
     <pre id="rxHere"></pre>
+  </section>
+
+  <section>
+    <h2>Memory</h2>
+    <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
+      キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
+      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
+    <div class="row">
+      <input id="rxMa" value="0x400">
+      <input id="rxMl" value="256" style="width:5em">
+      <label class="note" style="margin:0"><input type="checkbox" id="rxLive"
+        checked style="width:auto"> live</label>
+    </div>
+    <pre id="rxMem" style="margin-top:6px; max-height:16em; overflow:auto"></pre>
   </section>
 
   <section>
@@ -158,19 +207,6 @@ const HTML = `
     <pre id="rxTrace" style="margin-top:6px; max-height:11em; overflow:auto"></pre>
   </section>
 
-  <section class="grow">
-    <h2>Memory</h2>
-    <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
-      キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
-      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
-    <div class="row">
-      <input id="rxMa" value="0x400">
-      <input id="rxMl" value="256" style="width:5em">
-      <label class="note" style="margin:0"><input type="checkbox" id="rxLive"
-        checked style="width:auto"> live</label>
-    </div>
-    <pre id="rxMem" style="margin-top:6px"></pre>
-  </section>
 `;
 
 /**
@@ -285,6 +321,7 @@ export class Debugger {
       this.root.classList.add('panel');
       this.$('rxClose').hidden = false;
       this.$('rxClose').onclick = () => this.hide();
+      this.setupPanelControls();
     }
     // 開いている間は命令数を数えさせる。見張るものが無いと元締めが切れて
     // **命令数が0のまま**になり、何も壊れていないのに壊れて見える
@@ -303,6 +340,86 @@ export class Debugger {
     this.root = null;
     if (this.win && !this.win.closed) this.win.close();
     this.win = null;
+  }
+
+  /** ページ内パネルだけの操作: 最小化 と 横幅リサイズ */
+  setupPanelControls() {
+    // 最小化: ヘッダだけ残して畳む。裏の画面を覗きたいとき。
+    // 操作ボタンはヘッダに残るので、畳んだまま Step も打てる
+    // ヘッダのドラッグで移動。右固定 (right:12px) のままだと動かせないので、
+    // ドラッグを始めた瞬間に left/top 固定へ切り替える
+    const header = this.root.querySelector('header');
+    header.addEventListener('mousedown', (e) => {
+      // ボタン・入力の上なら掴まない (最小化やStepを潰さない)
+      if (e.target.closest('button, input, select')) return;
+      e.preventDefault();
+      const r = this.root.getBoundingClientRect();
+      this.root.style.left = r.left + 'px';
+      this.root.style.top = r.top + 'px';
+      this.root.style.right = 'auto';
+      this.root.classList.add('dragging');
+      const dx = e.clientX - r.left;
+      const dy = e.clientY - r.top;
+      const move = (ev) => {
+        // 画面からはみ出さないよう軽く留める (掴んだ帯は残す)
+        const x = Math.max(-r.width + 60, Math.min(window.innerWidth - 60, ev.clientX - dx));
+        const y = Math.max(0, Math.min(window.innerHeight - 30, ev.clientY - dy));
+        this.root.style.left = x + 'px';
+        this.root.style.top = y + 'px';
+      };
+      const up = () => {
+        this.root.classList.remove('dragging');
+        this.doc.removeEventListener('mousemove', move);
+        this.doc.removeEventListener('mouseup', up);
+      };
+      this.doc.addEventListener('mousemove', move);
+      this.doc.addEventListener('mouseup', up);
+    });
+
+    const min = this.$('rxMin');
+    min.onclick = () => {
+      const on = this.root.classList.toggle('min');
+      min.textContent = on ? '□' : '–';
+      min.title = on ? '元に戻す' : '最小化 (裏の画面を覗く)';
+    };
+    // つまみ3つ。パネルは右上固定なので:
+    //   左端 (x)  = 掴んで左へ引くと横幅が広がる
+    //   下端 (y)  = 掴んで下へ引くと高さが伸びる
+    //   左下角(xy) = 両方いっぺんに
+    for (const axis of ['x', 'y', 'xy']) {
+      const grip = this.doc.createElement('div');
+      grip.className = 'resize ' + axis;
+      this.root.appendChild(grip);
+      grip.addEventListener('mousedown', (e) => this.startResize(e, axis));
+    }
+  }
+
+  /** リサイズのドラッグ。axis は 'x' / 'y' / 'xy' */
+  startResize(e, axis) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const r = this.root.getBoundingClientRect();
+    const startW = r.width;
+    const startH = r.height;
+    // 高さを手で決めたら calc(100vh) の自動追従はやめる (固定モードへ)
+    const move = (ev) => {
+      if (axis !== 'y') {
+        // 左へ動かす (clientXが減る) と広がる
+        this.root.style.width = Math.max(300, Math.min(900, startW + (startX - ev.clientX))) + 'px';
+      }
+      if (axis !== 'x') {
+        // 下へ動かす (clientYが増える) と伸びる
+        this.root.style.height =
+          Math.max(120, Math.min(window.innerHeight - 24, startH + (ev.clientY - startY))) + 'px';
+      }
+    };
+    const up = () => {
+      this.doc.removeEventListener('mousemove', move);
+      this.doc.removeEventListener('mouseup', up);
+    };
+    this.doc.addEventListener('mousemove', move);
+    this.doc.addEventListener('mouseup', up);
   }
 
   /** 中身を組み立てる。**子ウインドウかページ内かをここは知らない** */
@@ -397,8 +514,12 @@ export class Debugger {
     // **HLT を隠さない。** ワークロードが終わって止まっているだけなのに
     // 「paused」と出ると、レジスタが動かないのがバグに見える。
     // ベンチは hlt で終わるので、必ずここへ来る
-    st.textContent = c.halted ? 'halted' : stopped ? 'stopped' : paused ? 'paused' : 'running';
-    st.className = 'state ' + (c.halted || stopped || paused ? 'stopped' : 'running');
+    const trapped = !!c.trap;
+    st.textContent = trapped ? 'trapped' : c.halted ? 'halted' : stopped ? 'stopped' : paused ? 'paused' : 'running';
+    st.className = 'state ' + (trapped || c.halted || stopped || paused ? 'stopped' : 'running');
+    // 未実装で止まったら理由を出す。**機械は生きている**ので、この状態で
+    // レジスタもスタックもメモリも覗ける (それがこの停止の値打ち)
+    if (trapped) this.setWhy('未実装: ' + c.trap);
     this.$('rxPause').textContent = paused ? 'Resume' : 'Pause';
     this.$('rxRestart').hidden = !this.host.restart;
     if (!stopped) this.setWhy('');
@@ -451,7 +572,8 @@ export class Debugger {
 
     this.$('rxHere').innerHTML =
       `<span class="v">${hex16(c.sregs[1])}:${hex16(c.ip)}</span>  ` +
-      `<span class="hex">${c.bytes}</span>${c.halted ? '  [HLT]' : ''}`;
+      `<span class="asm">${esc(c.asm)}</span>${c.halted ? '  [HLT]' : ''}<br>` +
+      `<span class="hex">${c.bytes}</span>`;
 
     const w = JSON.parse(emu.watches_json());
     const f = (a, n) => (a.length ? `${n}: ` + a.map((v) => '0x' + v.toString(16)).join(' ') : '');
@@ -550,10 +672,11 @@ export class Debugger {
       this.$('rxTrace').textContent = 'まだ何も残していない。Start recording を押してから走らせる';
       return;
     }
-    this.$('rxTrace').textContent = t
+    this.$('rxTrace').innerHTML = t
       .slice(-40)
-      .map((s) => `${String(s.i).padStart(12)}: ${hex16(s.cs)}:${hex16(s.ip)}  ${s.b}`)
-      .join('\n');
+      .map((s) => `${String(s.i).padStart(12)}: <span class="v">${hex16(s.cs)}:${hex16(s.ip)}</span>  ` +
+                  `<span class="asm">${esc(s.asm)}</span>`)
+      .join('<br>');
   }
 }
 
@@ -575,5 +698,7 @@ function fmtInstr(n) {
     `<span class="k" style="margin-left:.6em">${n.toLocaleString()}</span>`;
 }
 
+// HTMLに出す前に最低限エスケープする (逆アセンブルは信頼できるが念のため)
+const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const hex16 = (v) => (v >>> 0).toString(16).padStart(4, '0');
 const hex32 = (v) => (v >>> 0).toString(16).padStart(8, '0');
