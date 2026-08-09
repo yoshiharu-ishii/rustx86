@@ -13,21 +13,44 @@
 //! 例えばALU演算は 0x00-0x3D が (演算種別3bit) x (形式3bit) の格子になっており、
 //! 48命令を1つのハンドラで処理できる。個別実装は格子から外れるものだけ。
 //! 未実装オペコードは即panicして正体を報告する (静かに壊れない)。
+//!
+//! ## ファイル分割は実CPUのデコード階層に沿う
+//!
+//! `step()` は**1バイトのオペコードマップ**に徹し、Intel SDM 付録Aと同じ階層で
+//! 各区画へ渡す。256席が1画面に見えるのが教材の核なので、ここは畳まない:
+//!
+//! - [`twobyte`] — `0F` の二バイトエスケープ (将来いちばん伸びる区画)
+//! - [`group`] — GRP2-5 (1オペコードを ModRM.reg で再分岐する族)
+//! - [`segment`] — セグメンテーション (隠しレジスタ、記述子ロード)
+//! - [`interrupt`] — 割り込み・例外の配送、リング遷移
+//!
+//! この階層のおかげで、変更の爆風は区画に収まる — SSEは twobyte、
+//! セグメントは segment、というふうに。
 
 pub mod alu;
 pub mod decimal;
+pub mod group;
+pub mod interrupt;
 pub mod operand;
+pub mod segment;
 pub mod shift;
 pub mod string;
+pub mod twobyte;
 
 use alu::{alu16, alu8, alu_w, condition};
 use operand::{
-    fetch16, fetch32, fetch8, fetch_w, modrm, pop16, pop32, pop_w, push16, push32, push_w,
-    read_op16, read_op8, read_op_w, write_op16, write_op8, write_op_w, Operand,
+    fetch16, fetch32, fetch8, fetch_w, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
+    read_op_w, write_op16, write_op8, write_op_w, Operand,
 };
 use shift::shift_rot;
 
 use crate::Machine;
+// 制御の流れ (割り込み・iret) は interrupt.rs へ。呼び出し元 (lib.rs) の
+// `cpu::interrupt` / `cpu::iret` をそのまま保つため再エクスポートする
+pub use interrupt::{interrupt, iret};
+// セグメンテーションは segment.rs へ。step() と interrupt.rs が使う
+pub(crate) use interrupt::{divide_error, software_int};
+pub(crate) use segment::{load_seg, load_seg_raw, SegHidden};
 
 // レジスタ番号 (x86エンコーディング準拠)
 pub const AX: usize = 0;
@@ -94,29 +117,6 @@ pub struct Cpu {
     /// リアルモードは「写しに常に sel×16 が入っている」特殊ケースにすぎない —
     /// この統一がプロテクトモードの正体である
     pub hidden: [SegHidden; 6],
-}
-
-/// セグメントの隠しレジスタ1本分
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SegHidden {
-    pub base: u32,
-    pub limit: u32,
-    /// 記述子のaccessバイト (P/DPL/type)
-    pub access: u8,
-    /// Dビット。コードセグメントなら既定オペランド幅が32bitになる
-    pub big: bool,
-}
-
-impl SegHidden {
-    /// リアルモードの写し: base = sel×16、64K、16bit
-    fn real(sel: u16) -> Self {
-        Self {
-            base: (sel as u32) << 4,
-            limit: 0xFFFF,
-            access: 0x93, // present, data, writable相当
-            big: false,
-        }
-    }
 }
 
 impl Default for Cpu {
@@ -307,94 +307,6 @@ pub struct Decoder {
     pub opsize32: bool,
     /// `0x67` が付いていた。実効アドレスの計算が16bit形式と32bit形式で入れ替わる
     pub addrsize32: bool,
-}
-
-/// GDTから記述子を読んで、セグメントの隠しレジスタへ写す。
-///
-/// **実機がセグメントロードのたびにやっていることそのもの**である。
-/// ここで写した base/limit/Dビット だけが以後のアクセスに使われ、
-/// GDT本体は次のロードまで見られない。
-///
-/// 特権チェック (DPL/RPL/CPL) はまだ実装しない。リング0だけの世界では
-/// 全部 0=0 で恒真になるためで、リング3を作るときに一緒に入れる。
-/// **黙って通す場合とは違い、チェックすべき材料 (access) は写してある**
-/// **明示的な** セグメントロード (MOV Sreg / POP Sreg / far転送)。
-/// ソフトウェアがやる操作なので特権チェックを受ける。
-/// CPU内部のロード (ゲート・リング遷移・iret) は [`load_seg_raw`] を直に呼ぶ
-pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) {
-    // データ/スタックの特権チェックは、GDTを引く前に「持てるか」を見る。
-    // **DPL >= max(CPL, RPL)** — リング3がリング0のデータを覗くのを防ぐ、
-    // 保護の一丁目。コードセグメント (CS) は far転送側の責任なのでここでは見ない
-    if m.cpu.pe() && idx != CS && sel & !0x7 != 0 {
-        let off = (sel & !0x7) as u32;
-        let a = m.cpu.gdtr_base.wrapping_add(off);
-        let access = ((m.read32(a.wrapping_add(4)) >> 8) & 0xFF) as u8;
-        if access & 0x10 != 0 && access & 0x08 == 0 {
-            // コード以外 = データ/スタック
-            let dpl = (access >> 5) & 3;
-            let rpl = (sel & 3) as u8;
-            let cpl = m.cpu.cpl();
-            if dpl < cpl.max(rpl) {
-                panic!(
-                    "selector {sel:#06x}: DPL={dpl} < max(CPL={cpl}, RPL={rpl}) —                      general protection (まだ#GP配送は無いのでpanic)"
-                );
-            }
-        }
-    }
-    load_seg_raw(m, idx, sel);
-}
-
-/// セグメントレジスタへ記述子を写す (**特権チェック無し**)。
-/// CPUが内部でやるロード — ゲートのCS、リング遷移のSS0、iretの復帰 — 用。
-pub(crate) fn load_seg_raw(m: &mut Machine, idx: usize, sel: u16) {
-    if !m.cpu.pe() {
-        m.cpu.sregs[idx] = sel;
-        m.cpu.hidden[idx] = SegHidden::real(sel);
-        return;
-    }
-    // ヌルセレクタ: 写しを空にする。**使った瞬間に咎める**のは後の仕事
-    if sel & !0x7 == 0 {
-        m.cpu.sregs[idx] = sel;
-        m.cpu.hidden[idx] = SegHidden {
-            base: 0,
-            limit: 0,
-            access: 0,
-            big: false,
-        };
-        return;
-    }
-    let off = (sel & !0x7) as u32;
-    if off + 7 > m.cpu.gdtr_limit as u32 {
-        panic!(
-            "selector {sel:#06x} is beyond GDT limit {:#06x}",
-            m.cpu.gdtr_limit
-        );
-    }
-    if sel & 0x4 != 0 {
-        panic!("LDT selector {sel:#06x} (LDT is not implemented)");
-    }
-    // 記述子8バイト。baseとlimitが細切れなのは、286の6バイト記述子に
-    // 後方互換の形で32bit分の桁を継ぎ足したため (ここにも地層がある)
-    let a = m.cpu.gdtr_base.wrapping_add(off);
-    let lo = m.read32(a);
-    let hi = m.read32(a.wrapping_add(4));
-    let base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
-    let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
-    let access = ((hi >> 8) & 0xFF) as u8;
-    if hi & 0x0080_0000 != 0 {
-        // Gビット: limitの単位が4Kページになる
-        limit = (limit << 12) | 0xFFF;
-    }
-    if access & 0x80 == 0 {
-        panic!("selector {sel:#06x}: descriptor not present");
-    }
-    m.cpu.sregs[idx] = sel;
-    m.cpu.hidden[idx] = SegHidden {
-        base,
-        limit,
-        access,
-        big: hi & 0x0040_0000 != 0, // Dビット
-    };
 }
 
 /// moffs のオフセットを読む。アドレスサイズが幅を決める (符号なし)
@@ -1067,194 +979,15 @@ pub fn step(m: &mut Machine) {
         }
 
         // --- GRP2: シフト/回転 ---
-        0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 => {
-            let (kind, rm) = modrm(m, &d);
-            let count = match op {
-                0xC0 | 0xC1 => fetch8(m),
-                0xD0 | 0xD1 => 1,
-                _ => m.cpu.reg8(1), // CL
-            };
-            if op & 1 == 0 {
-                let a = read_op8(m, &rm) as u32;
-                let r = shift_rot(&mut m.cpu, kind as u8, a, count, 8);
-                write_op8(m, &rm, r as u8);
-            } else {
-                let a = read_op16(m, &rm) as u32;
-                let r = shift_rot(&mut m.cpu, kind as u8, a, count, 16);
-                write_op16(m, &rm, r as u16);
-            }
-        }
+        0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 => group::grp2(m, &d, op),
 
         // --- GRP3: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV ---
-        0xF6 => {
-            let (kind, rm) = modrm(m, &d);
-            let a = read_op8(m, &rm);
-            match kind {
-                0 | 1 => {
-                    let b = fetch8(m);
-                    alu8(&mut m.cpu, 4, a, b);
-                }
-                2 => write_op8(m, &rm, !a),
-                3 => {
-                    let r = alu8(&mut m.cpu, 5, 0, a);
-                    m.cpu.set_flag(CF, a != 0);
-                    write_op8(m, &rm, r);
-                }
-                4 => {
-                    let r = m.cpu.reg8(0) as u16 * a as u16;
-                    m.cpu.set_reg16(AX, r);
-                    let hi = r >> 8 != 0;
-                    m.cpu.set_flag(CF, hi);
-                    m.cpu.set_flag(OF, hi);
-                }
-                5 => {
-                    let r = (m.cpu.reg8(0) as i8 as i16) * (a as i8 as i16);
-                    m.cpu.set_reg16(AX, r as u16);
-                    let ext = (r as i8 as i16) != r;
-                    m.cpu.set_flag(CF, ext);
-                    m.cpu.set_flag(OF, ext);
-                }
-                6 => {
-                    let ax = m.cpu.reg16(AX);
-                    if a == 0 {
-                        return divide_error(m, start_ip);
-                    }
-                    let q = ax / a as u16;
-                    if q > 0xFF {
-                        return divide_error(m, start_ip);
-                    }
-                    m.cpu.set_reg8(0, q as u8);
-                    m.cpu.set_reg8(4, (ax % a as u16) as u8);
-                }
-                _ => {
-                    let ax = m.cpu.reg16(AX) as i16;
-                    let b = a as i8 as i16;
-                    if b == 0 {
-                        return divide_error(m, start_ip);
-                    }
-                    let q = ax / b;
-                    if !(-128..=127).contains(&q) {
-                        return divide_error(m, start_ip);
-                    }
-                    m.cpu.set_reg8(0, q as u8);
-                    m.cpu.set_reg8(4, (ax % b) as u8);
-                }
-            }
-        }
-        0xF7 => {
-            let (kind, rm) = modrm(m, &d);
-            let a = read_op16(m, &rm);
-            match kind {
-                0 | 1 => {
-                    let b = fetch16(m);
-                    alu16(&mut m.cpu, 4, a, b);
-                }
-                2 => write_op16(m, &rm, !a),
-                3 => {
-                    let r = alu16(&mut m.cpu, 5, 0, a);
-                    m.cpu.set_flag(CF, a != 0);
-                    write_op16(m, &rm, r);
-                }
-                4 => {
-                    let r = m.cpu.reg16(AX) as u32 * a as u32;
-                    m.cpu.set_reg16(AX, r as u16);
-                    m.cpu.set_reg16(DX, (r >> 16) as u16);
-                    let hi = r >> 16 != 0;
-                    m.cpu.set_flag(CF, hi);
-                    m.cpu.set_flag(OF, hi);
-                }
-                5 => {
-                    let r = (m.cpu.reg16(AX) as i16 as i32) * (a as i16 as i32);
-                    m.cpu.set_reg16(AX, r as u16);
-                    m.cpu.set_reg16(DX, (r >> 16) as u16);
-                    let ext = (r as i16 as i32) != r;
-                    m.cpu.set_flag(CF, ext);
-                    m.cpu.set_flag(OF, ext);
-                }
-                6 => {
-                    let n = ((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32;
-                    if a == 0 {
-                        return divide_error(m, start_ip);
-                    }
-                    let q = n / a as u32;
-                    if q > 0xFFFF {
-                        return divide_error(m, start_ip);
-                    }
-                    m.cpu.set_reg16(AX, q as u16);
-                    m.cpu.set_reg16(DX, (n % a as u32) as u16);
-                }
-                _ => {
-                    let n = (((m.cpu.reg16(DX) as u32) << 16) | m.cpu.reg16(AX) as u32) as i32;
-                    let b = a as i16 as i32;
-                    if b == 0 {
-                        return divide_error(m, start_ip);
-                    }
-                    let q = n / b;
-                    if !(-32768..=32767).contains(&q) {
-                        return divide_error(m, start_ip);
-                    }
-                    m.cpu.set_reg16(AX, q as u16);
-                    m.cpu.set_reg16(DX, (n % b) as u16);
-                }
-            }
-        }
+        0xF6 => group::grp3_byte(m, &d, start_ip),
+        0xF7 => group::grp3_word(m, &d, start_ip),
 
         // --- GRP4/GRP5 ---
-        0xFE => {
-            let (kind, rm) = modrm(m, &d);
-            let a = read_op8(m, &rm);
-            let cf = m.cpu.flag(CF);
-            let r = alu8(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1);
-            m.cpu.set_flag(CF, cf); // INC/DECはCFを変更しない
-            write_op8(m, &rm, r);
-        }
-        0xFF => {
-            let (kind, rm) = modrm(m, &d);
-            match kind {
-                0 | 1 => {
-                    let a = read_op16(m, &rm);
-                    let cf = m.cpu.flag(CF);
-                    let r = alu16(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1);
-                    m.cpu.set_flag(CF, cf);
-                    write_op16(m, &rm, r);
-                }
-                2 => {
-                    let t = read_op_w(m, &rm, d.opsize32);
-                    let ret = m.cpu.ip;
-                    push_w(m, ret, d.opsize32);
-                    m.cpu.set_ip(t);
-                }
-                4 => {
-                    let t = read_op_w(m, &rm, d.opsize32);
-                    m.cpu.set_ip(t);
-                }
-                6 => {
-                    let v = read_op16(m, &rm);
-                    push16(m, v);
-                }
-                // /3 CALL far、/5 JMP far: メモリ上の4バイト far ポインタを読んで飛ぶ
-                3 | 5 => {
-                    let addr = match rm {
-                        Operand::Mem { addr, .. } => addr,
-                        Operand::Reg(_) => panic!("far call/jmp with register operand"),
-                    };
-                    let off = m.read16(addr);
-                    let seg = m.read16(addr.wrapping_add(2));
-                    if kind == 3 {
-                        let cs = m.cpu.sregs[CS];
-                        push16(m, cs);
-                        let ret = m.cpu.ip as u16;
-                        push16(m, ret);
-                    }
-                    m.cpu.sregs[CS] = seg;
-                    m.cpu.set_ip(off as u32);
-                }
-                _ => panic!(
-                    "GRP5 /{kind} not implemented at {:04x}:{:04x}",
-                    m.cpu.sregs[CS], start_ip
-                ),
-            }
-        }
+        0xFE => group::grp4(m, &d),
+        0xFF => group::grp5(m, &d, start_ip),
 
         // --- 十進補正 ---
         0x27 | 0x2F => decimal::daa_das(m, op),
@@ -1316,288 +1049,11 @@ pub fn step(m: &mut Machine) {
         //
         // 8086では `POP CS` だった 0x0F が、186以降で**逃げ道**になった。
         // 1バイトの256席が埋まったので、もう1バイト読んで席を増やす方式である。
-        0x0F => {
-            let op2 = fetch8(m);
-            match op2 {
-                // LLDT/LTR系。ModRMのreg欄が「何をするか」を選ぶ
-                0x00 => {
-                    let (reg, rm) = modrm(m, &d);
-                    match reg {
-                        // LTR: TSSの場所をTRへ。記述子はGDTから読む
-                        3 => {
-                            let sel = read_op16(m, &rm);
-                            let off = (sel & !0x7) as u32;
-                            let a = m.cpu.gdtr_base.wrapping_add(off);
-                            let lo = m.read32(a);
-                            let hi = m.read32(a.wrapping_add(4));
-                            let ty = ((hi >> 8) & 0x1F) as u8;
-                            if ty != 0x09 {
-                                panic!("LTR: not an available 32bit TSS (type {ty:#04x})");
-                            }
-                            m.cpu.tr_sel = sel;
-                            m.cpu.tr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
-                            m.cpu.tr_limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
-                        }
-                        _ => panic!(
-                            "unimplemented 0f 00 /{reg} at {:04x}:{:04x}",
-                            m.cpu.sregs[CS], start_ip
-                        ),
-                    }
-                }
-                // システム表の操作
-                0x01 => {
-                    let (reg, rm) = modrm(m, &d);
-                    match (reg, &rm) {
-                        // LGDT m16&32: limit(2バイト) + base(4バイト)。
-                        // 16bitオペランドのときbaseは24bitしか読まれない —
-                        // 286互換の名残がここにも居る
-                        (2, Operand::Mem { addr, .. }) => {
-                            m.cpu.gdtr_limit = m.read16(*addr);
-                            let base = m.read32(addr.wrapping_add(2));
-                            m.cpu.gdtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
-                        }
-                        // LIDT: 形はLGDTと同じ
-                        (3, Operand::Mem { addr, .. }) => {
-                            m.cpu.idtr_limit = m.read16(*addr);
-                            let base = m.read32(addr.wrapping_add(2));
-                            m.cpu.idtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
-                        }
-                        _ => panic!(
-                            "unimplemented 0f 01 /{reg} at {:04x}:{:04x}",
-                            m.cpu.sregs[CS], start_ip
-                        ),
-                    }
-                }
-                // MOV r32, CRn / MOV CRn, r32。ModRMだがmodは無視して常にレジスタ形式
-                0x20 | 0x22 => {
-                    let mrm = fetch8(m);
-                    let cr = ((mrm >> 3) & 7) as usize;
-                    let r = (mrm & 7) as usize;
-                    // MOV r32,CRn (0x20) と MOV CRn,r32 (0x22)。CR0/CR2/CR3を扱う
-                    if op2 == 0x20 {
-                        m.cpu.regs[r] = match cr {
-                            0 => m.cpu.cr0,
-                            2 => m.cpu.cr2,
-                            3 => m.cpu.cr3,
-                            _ => panic!("unimplemented read of CR{cr}"),
-                        };
-                    } else {
-                        let v = m.cpu.regs[r];
-                        match cr {
-                            0 => {
-                                let was_pe = m.cpu.pe();
-                                m.cpu.cr0 = v;
-                                // PEが立った瞬間、隠しレジスタを今のリアルモードの姿で
-                                // 初期化する (リアルモードは写しを遅延評価しているため)
-                                if !was_pe && m.cpu.pe() {
-                                    for i in 0..6 {
-                                        m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
-                                    }
-                                }
-                            }
-                            2 => m.cpu.cr2 = v,
-                            3 => m.cpu.cr3 = v, // ページテーブルが替わる。TLBは持たないので何もしない
-                            _ => panic!("unimplemented write of CR{cr}"),
-                        }
-                    }
-                }
-                // ud2: 「わざと#UDを起こす」ための公式の命令。
-                // 未実装オペコードの即panicとは別物 — こちらは**仕様どおりの例外**
-                0x0B => {
-                    // フォールトは**その命令自身を指すIP**で配送する (再実行できる形)
-                    m.cpu.ip = start_ip;
-                    interrupt(m, 6);
-                }
-                _ => panic!(
-                    "unimplemented opcode 0x0f {op2:#04x} at {:04x}:{:04x}",
-                    m.cpu.sregs[CS], start_ip
-                ),
-            }
-        }
+        0x0F => twobyte::step_0f(m, &d, start_ip),
 
         _ => panic!(
             "unimplemented opcode {op:#04x} at {:04x}:{:04x}",
             m.cpu.sregs[CS], start_ip
         ),
     }
-}
-
-/// 割り込み・例外の共通入口。**実IVTを引いてハンドラへ飛ぶ**。
-///
-/// ソフトウェア割り込み (`INT n`)、例外 (ゼロ除算など)、ハードウェア割り込み
-/// (PICからのIRQ) は入口が違うだけで、ここから先は同じ道を通る。
-///
-/// 積む順序が `CALL far` と違う点に注意: **FLAGSを先に積む**。`IRET` が
-/// 逆順に取り出すので、ハンドラ実行中に変わったIF/DFが呼び出し前へ戻る。
-pub fn interrupt(m: &mut Machine, n: u8) {
-    let (cs, ip) = (m.cpu.sregs[CS], m.cpu.ip);
-    let i = n as usize;
-    if m.int_counts[i] == 0 {
-        m.int_first[i] = (cs, ip);
-    }
-    m.int_counts[i] += 1;
-    if m.int_recent.len() == 32 {
-        m.int_recent.pop_front();
-    }
-    m.int_recent.push_back((n, cs, ip));
-
-    // ここからモードで作法が分かれる。
-    if m.cpu.pe() {
-        interrupt_protected(m, n);
-        return;
-    }
-
-    // --- リアルモード: IVT (0番地の 4バイト×256) を引く ---
-    let f = (m.cpu.flags as u16) | 0xF002;
-    push16(m, f);
-    // ハンドラ実行中は多重割り込みとシングルステップを止める。
-    // 必要ならハンドラ側が STI で開け直す (これが「割り込み禁止区間」の正体)
-    m.cpu.set_flag(IF, false);
-    m.cpu.set_flag(TF, false);
-    let cs = m.cpu.sregs[CS];
-    push16(m, cs);
-    let ip = m.cpu.ip as u16;
-    push16(m, ip);
-    // IVTは 0x0000 から 4バイト × 256個。n番目に [オフセット, セグメント] が並ぶ。
-    // **OSはここを自分のハンドラで書き換えて割り込みを乗っ取る**
-    let vec = n as u32 * 4;
-    m.cpu.ip = m.read16(vec) as u32;
-    m.cpu.sregs[CS] = m.read16(vec + 2);
-}
-
-/// ソフトウェア INT n の入口。**門のDPLがCPLより浅ければ通さない** —
-/// リング3が好きなベクタを叩けたら、保護は成立しない。
-/// ハードウェア割り込みと例外はこのチェックを受けない (CPU自身が起こすため)
-pub(crate) fn software_int(m: &mut Machine, n: u8) {
-    if m.cpu.pe() {
-        let off = n as u32 * 8;
-        if off + 7 <= m.cpu.idtr_limit as u32 {
-            let hi = m.read32(m.cpu.idtr_base.wrapping_add(off).wrapping_add(4));
-            let gate_dpl = ((hi >> 13) & 3) as u8;
-            if gate_dpl < m.cpu.cpl() {
-                panic!(
-                    "int {n:#04x} from CPL{}: gate DPL={gate_dpl} —                      general protection (まだ#GP配送は無いのでpanic)",
-                    m.cpu.cpl()
-                );
-            }
-        }
-    }
-    interrupt(m, n);
-}
-
-/// 保護モードの割り込み配送。IVTではなく**IDTのゲート記述子**を引く。
-///
-/// ゲートは「どのセグメントの、どこへ、どの作法で」を全部言う8バイト:
-///
-/// ```text
-///   dw offset[15:0]   dw selector   db 0   db type   dw offset[31:16]
-/// ```
-///
-/// type 0xE = 割り込みゲート (IFを落として入る) / 0xF = トラップゲート
-/// (IFはそのまま)。この1bitの違いが「割り込みハンドラは再入しない」を
-/// ハードウェアで作っている。
-///
-/// まだやらないこと (リング0だけの世界なので恒真):
-/// DPLチェック、スタック切り替え (TSS)、エラーコードのpush
-fn interrupt_protected(m: &mut Machine, n: u8) {
-    let off = n as u32 * 8;
-    if off + 7 > m.cpu.idtr_limit as u32 {
-        panic!(
-            "vector {n:#04x} is beyond IDT limit {:#06x}",
-            m.cpu.idtr_limit
-        );
-    }
-    let a = m.cpu.idtr_base.wrapping_add(off);
-    let lo = m.read32(a);
-    let hi = m.read32(a.wrapping_add(4));
-    let ty = ((hi >> 8) & 0x1F) as u8;
-    if hi & 0x8000 == 0 {
-        panic!("vector {n:#04x}: gate not present");
-    }
-    let (sel, dest) = ((lo >> 16) as u16, (lo & 0xFFFF) | (hi & 0xFFFF_0000));
-    match ty {
-        0x0E | 0x0F => {}
-        _ => panic!("vector {n:#04x}: unimplemented gate type {ty:#04x}"),
-    }
-
-    // 受け手のコードセグメントのDPLが、いまより深ければ**リングが変わる**
-    let old_cpl = m.cpu.cpl();
-    let target_dpl = {
-        let off = (sel & !0x7) as u32;
-        let a = m.cpu.gdtr_base.wrapping_add(off);
-        ((m.read32(a.wrapping_add(4)) >> 13) & 3) as u8
-    };
-
-    if target_dpl < old_cpl {
-        // ---- リング遷移 (3→0など): スタックを差し替えてから積む ----
-        //
-        // ここが**TSSの存在理由のすべて**である。リング3のスタックを
-        // カーネルが信用するわけにはいかない (ユーザーが好きな場所を
-        // 指させられる) ので、落ちた瞬間に使うスタックはTSSが決めておく。
-        // 元の SS:ESP は新しいスタックに積んで、帰り道 (iretd) が拾う
-        let old_ss = m.cpu.sregs[SS] as u32;
-        let old_esp = m.cpu.regs[SP];
-        // 32bit TSS: +4 = ESP0, +8 = SS0 (リング0に落ちる場合)
-        let esp0 = m.read32(m.cpu.tr_base.wrapping_add(4));
-        let ss0 = m.read16(m.cpu.tr_base.wrapping_add(8));
-        load_seg_raw(m, SS, ss0);
-        m.cpu.regs[SP] = esp0;
-        push32(m, old_ss);
-        push32(m, old_esp);
-    }
-
-    // EFLAGS, CS, EIP を32bitで積む (32bitゲート)
-    push32(m, m.cpu.flags);
-    push32(m, m.cpu.sregs[CS] as u32);
-    push32(m, m.cpu.ip);
-    if ty == 0x0E {
-        // 割り込みゲートだけがIFを落とす
-        m.cpu.set_flag(IF, false);
-    }
-    m.cpu.set_flag(TF, false);
-    load_seg_raw(m, CS, sel);
-    m.cpu.set_ip(dest);
-}
-
-/// 割り込みからの復帰。IP・CS・FLAGS をこの順で取り出す
-pub fn iret(m: &mut Machine) {
-    // 保護モード (32bitゲートで入った) なら EIP, CS, EFLAGS を32bitで取り出す。
-    // 積む側 (interrupt_protected) と対でなければスタックが腐る
-    if m.cpu.pe() {
-        let ip = pop32(m);
-        let sel = pop32(m) as u16;
-        let f = pop32(m);
-        // 戻り先のRPLがいまのCPLより浅い (数字が大きい) なら**外側リングへの
-        // 復帰**で、ESPとSSもスタックから取り出す。積む側 (リング遷移) と対。
-        // 「行ったことのない場所へ戻る」— リング3への降下もこの経路を使う
-        let to_outer = ((sel & 3) as u8) > m.cpu.cpl();
-        load_seg_raw(m, CS, sel);
-        m.cpu.set_ip(ip);
-        // 復元するフラグの範囲はリアルモードと同じ (AC等の上位はまだ持たない)
-        m.cpu.flags = (f & 0x0FD5) | 0x0002;
-        if to_outer {
-            let esp = pop32(m);
-            let ss = pop32(m) as u16;
-            load_seg_raw(m, SS, ss);
-            m.cpu.regs[SP] = esp;
-        }
-        return;
-    }
-    m.cpu.ip = pop16(m) as u32;
-    m.cpu.sregs[CS] = pop16(m);
-    let f = pop16(m);
-    m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
-}
-
-/// ゼロ除算・商オーバーフローで上がる #DE (INT 0)。
-///
-/// **フォールトなので、積むのは「失敗した命令の先頭」**である。次の命令ではない。
-/// ハンドラが原因を直して `IRET` すれば同じ除算をやり直せる、という設計。
-/// (8086は次の命令を積む実装だったが、286以降で今の形に直された)
-fn divide_error(m: &mut Machine, start_ip: u32) {
-    m.cpu.ip = start_ip;
-    if m.first_fault.is_none() {
-        m.first_fault = Some((0, m.cpu.sregs[CS], start_ip));
-    }
-    interrupt(m, 0);
 }
