@@ -442,7 +442,7 @@ export class Debugger {
     const segFmt = (n, s) =>
       `${n}=${hex16(s.sel)}→base=${hex32(s.base)} ${s.big ? '32' : '16'}bit`;
     this.$('rxMode').innerHTML = c.pe
-      ? `<span class="changed">protected</span>  CR0=${hex32(c.cr0)} ` +
+      ? `<span class="changed">protected</span> (CPL${c.cpl}) CR0=${hex32(c.cr0)} ` +
         `GDTR=${hex32(c.gdtrBase)}+${hex16(c.gdtrLimit)} ` +
         `IDTR=${hex32(c.idtrBase)}+${hex16(c.idtrLimit)}<br>` +
         `${segFmt('CS', c.cs)}  ${segFmt('DS', c.ds)}  ${segFmt('SS', c.ss)}`
