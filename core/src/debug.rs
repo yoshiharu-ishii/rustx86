@@ -51,12 +51,12 @@ pub enum Stop {
         addr: u32,
         old: u8,
         new: u8,
-        at: (u16, u16),
+        at: (u16, u32),
     },
     /// I/O書き込み
-    WriteIo { port: u16, val: u8, at: (u16, u16) },
+    WriteIo { port: u16, val: u8, at: (u16, u32) },
     /// I/O読み出し
-    ReadIo { port: u16, val: u8, at: (u16, u16) },
+    ReadIo { port: u16, val: u8, at: (u16, u32) },
     /// 指定した命令数に達した
     Count(u64),
 }
@@ -67,7 +67,7 @@ pub enum Stop {
 pub struct Step {
     pub instr: u64,
     pub cs: u16,
-    pub ip: u16,
+    pub ip: u32,
     /// 命令の先頭5バイト。逆アセンブラはまだ無いので生のまま持つ
     pub bytes: [u8; 5],
 }
@@ -109,7 +109,7 @@ pub struct Debug {
     /// 止まった理由。**呼び出し側が取り去るまで残る**
     pub stop: Option<Stop>,
     /// いま実行中の命令の先頭。フックが「誰が書いたか」を答えるための元
-    pub at: (u16, u16),
+    pub at: (u16, u32),
     /// 実行の足跡。`trace_cap` が0なら何も残さない
     pub trace: VecDeque<Step>,
     pub trace_cap: usize,
@@ -218,7 +218,7 @@ impl Debug {
     /// **実行前**に判定するので、止まった状態でその命令を見られる。
     ///
     /// 止まっている (HLT) 間は呼ばれない。呼ぶと同じ番地で永久に止まるため
-    pub(crate) fn before_exec(&mut self, lin: u32, cs: u16, ip: u16) -> bool {
+    pub(crate) fn before_exec(&mut self, lin: u32, cs: u16, ip: u32) -> bool {
         self.at = (cs, ip);
         if self.code.is_empty() {
             return false;

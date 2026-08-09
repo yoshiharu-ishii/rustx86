@@ -319,7 +319,7 @@ fn main() {
     for v in [0u8, 1, 3, 4, 6] {
         if m.int_counts[v as usize] > 0 {
             let (cs, ip) = m.int_first[v as usize];
-            let a = rustx86_core::cpu::operand::linear(cs, ip);
+            let a = rustx86_core::cpu::operand::linear(cs, ip as u16);
             let before: Vec<String> = (1..=6)
                 .rev()
                 .map(|i| format!("{:02x}", m.read8(a - i)))
@@ -334,7 +334,7 @@ fn main() {
     }
 
     if let Some((vec, cs, ip)) = m.first_fault {
-        let a = rustx86_core::cpu::operand::linear(cs, ip);
+        let a = m.cpu.lin(rustx86_core::cpu::CS, ip);
         let b: Vec<String> = (0..8).map(|i| format!("{:02x}", m.read8(a + i))).collect();
         println!(
             "最初のCPU例外: INT {vec:#04x} @ {cs:04x}:{ip:04x}  命令バイト: {}",
@@ -344,7 +344,7 @@ fn main() {
 
     // 止まった/回り続けている位置の周辺を見せる。
     // 逆アセンブラは持っていないので生バイトだが、オペコード表と突き合わせれば読める
-    let base = rustx86_core::cpu::operand::linear(m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip);
+    let base = m.cpu.lin(rustx86_core::cpu::CS, m.cpu.ip);
     let dump: Vec<String> = (0..16)
         .map(|i| format!("{:02x}", m.read8(base.wrapping_add(i))))
         .collect();

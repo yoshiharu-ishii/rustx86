@@ -22,7 +22,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// 形式の版。合わないものは読まない (黙って壊れた状態で動き出さないため)。
 /// v2: プロテクトモードの状態 (CR0・GDTR・セグメントの隠しレジスタ) を追加
 /// v3: IDTR を追加
-pub const VERSION: u16 = 3;
+/// v4: IP を32bit (EIP) にした
+pub const VERSION: u16 = 4;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
