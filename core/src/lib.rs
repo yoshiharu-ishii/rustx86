@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod debug;
 pub mod dev;
 pub mod disk;
+pub mod elf;
 pub mod snapshot;
 
 pub use bios::BIOS_SEG;
@@ -438,6 +439,66 @@ impl Machine {
         self.boot_bzimage_with_initrd(image, cmdline, None)
     }
 
+    /// Linux を起動する (bzImage / vmlinux の自動判別)。
+    ///
+    /// 先頭が ELF なら vmlinux 直接ロード (解凍ステブ無し = 起動が半分)、
+    /// そうでなければ bzImage。呼ぶ側はファイルの中身を気にしなくてよい
+    pub fn boot_linux_with_initrd(
+        &mut self,
+        image: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+    ) -> Result<(), String> {
+        if elf::is_elf(image) {
+            self.boot_vmlinux_with_initrd(image, cmdline, initrd)
+        } else {
+            self.boot_bzimage_with_initrd(image, cmdline, initrd)
+        }
+    }
+
+    /// 非圧縮の vmlinux (ELF32) を直接ロードして起動する。
+    ///
+    /// bzImage の自己解凍ステブは**起動全体の55% (540M命令) を無言で食う**。
+    /// 展開済みのカーネルをこちらで物理メモリに置けば、その区間は丸ごと消える。
+    /// Firecracker が bzImage ではなく vmlinux を要求するのと同じ判断。
+    /// vmlinux は tools/extract-vmlinux.sh で bzImage から取り出せる
+    pub fn boot_vmlinux_with_initrd(
+        &mut self,
+        image: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let v = elf::parse_vmlinux(image)?;
+        self.power_on_self_test();
+
+        // セグメントを物理メモリへ。解凍ステブがやっていた仕事の代行:
+        // ファイルの中身を写し、memsz までの残り (BSS) をゼロで埋める
+        for s in &v.segments {
+            let end = s.paddr as usize + s.memsz;
+            if end > self.mem.len() {
+                return Err(format!(
+                    "vmlinux のセグメント (物理 0x{:08x}..0x{end:08x}) がRAM ({}MB) に収まらない",
+                    s.paddr,
+                    self.mem.len() >> 20
+                ));
+            }
+            let dst = s.paddr as usize;
+            self.mem[dst..dst + s.filesz].copy_from_slice(&image[s.offset..s.offset + s.filesz]);
+            self.mem[dst + s.filesz..end].fill(0);
+        }
+
+        // zero page に写すセットアップヘッダが vmlinux には無いので合成する。
+        // カーネルが読み返して意味を持つ欄だけ: マジック・版・LOADED_HIGH。
+        // (type_of_loader / ramdisk / cmdline は build_zero_page 自身が書く)
+        let mut hdr_src = vec![0u8; 0x268];
+        hdr_src[0x202..0x206].copy_from_slice(b"HdrS");
+        hdr_src[0x206..0x208].copy_from_slice(&0x020Cu16.to_le_bytes());
+        hdr_src[0x211] = 0x01; // LOADED_HIGH
+        hdr_src[0x214..0x218].copy_from_slice(&v.entry.to_le_bytes());
+
+        self.finish_linux_boot(&hdr_src, cmdline, initrd, v.entry)
+    }
+
     /// initrd (initramfs) 付きの bzImage 起動。
     /// initrd は**RAMの高い方**に置く — カーネル本体 (1MB〜) と展開作業域から
     /// 遠ざけるのが慣習で、実ブートローダも同じことをする
@@ -447,7 +508,6 @@ impl Machine {
         cmdline: &str,
         initrd: Option<&[u8]>,
     ) -> Result<(), String> {
-        use cpu::{CS, DS, ES, FS, GS, SS};
         let hdr = bzimage::SetupHeader::parse(image)?;
         if !hdr.loaded_high() {
             return Err("LOADED_HIGH でない (bzImage ではなく zImage?)".into());
@@ -461,6 +521,23 @@ impl Machine {
         for (i, b) in kbody.iter().enumerate() {
             self.write_phys8(KERNEL_BASE + i as u32, *b);
         }
+
+        self.finish_linux_boot(image, cmdline, initrd, hdr.code32_start)
+    }
+
+    /// Linux 起動の共通の尾部 — カーネル本体を置いた後の仕事。
+    /// cmdline / initrd / zero page を配り、フラット32bitの姿勢を作って
+    /// `entry` へ飛ぶ。bzImage と vmlinux の両経路がここへ合流する。
+    /// `hdr_src` は zero page に写すセットアップヘッダの持ち主
+    /// (bzImage ならファイル先頭、vmlinux なら合成したもの)
+    fn finish_linux_boot(
+        &mut self,
+        hdr_src: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+        entry: u32,
+    ) -> Result<(), String> {
+        use cpu::{CS, DS, ES, FS, GS, SS};
 
         // cmdline を低位に置く (慣習の 0x2_0000)
         const CMDLINE_ADDR: u32 = 0x0002_0000;
@@ -490,7 +567,7 @@ impl Machine {
 
         // zero page を組んで低位に置く (慣習の 0x1_0000)
         const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(image, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
+        let zp = bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }
@@ -528,7 +605,7 @@ impl Machine {
 
         // 規約: %esi = zero page、エントリへ
         self.cpu.regs[cpu::SI] = ZERO_PAGE_ADDR;
-        self.cpu.set_ip(hdr.code32_start);
+        self.cpu.set_ip(entry);
         self.cpu.set_flag(cpu::IF, false); // カーネルが自分でSTIするまで割り込み禁止
         Ok(())
     }

@@ -129,8 +129,9 @@ impl Emulator {
         Ok(Emulator { m })
     }
 
-    /// bzImage (+ initramfs) から 32bit Linux を起動する。
-    /// `ram_mb` はRAMサイズ (MB)、`cmdline` はカーネルコマンドライン。
+    /// カーネルイメージ (+ initramfs) から 32bit Linux を起動する。
+    /// bzImage / vmlinux (ELF) は中身で自動判別 — vmlinux なら自己解凍ステブが
+    /// 無いぶん起動が4割速い。`ram_mb` はRAMサイズ (MB)。
     /// コンソールはシリアル (ttyS0) — `serial_out` / `serial_in` で読み書きする
     pub fn from_bzimage(
         kernel: &[u8],
@@ -139,7 +140,7 @@ impl Emulator {
         ram_mb: usize,
     ) -> Result<Emulator, JsError> {
         let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
-        m.boot_bzimage_with_initrd(kernel, cmdline, initrd.as_deref())
+        m.boot_linux_with_initrd(kernel, cmdline, initrd.as_deref())
             .map_err(|e| JsError::new(&e))?;
         Ok(Emulator { m })
     }
