@@ -101,8 +101,8 @@ function syncControls() {
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!linux;
-  // デバッガはメインスレッドの機械を覗く道具。Linuxはワーカーの中なので覗けない
-  $('debug').disabled = !on || !!linux;
+  // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
+  $('debug').disabled = !on && !linux?.booted;
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
@@ -231,19 +231,30 @@ document.querySelector('.toolbar').addEventListener('click', e => {
 let linux = null;
 
 // **いま動いている機械**を見せる。参照を握らせず毎回聞く —
-// Emulator は再起動のたびに作り直されるため
+// Emulator は再起動のたびに作り直されるため。
+// Linuxのときはワーカー越しの代役 (各メソッドが Promise) を渡す。
+// デバッガは全部 await で呼ぶので、同期の機械と代役の区別を知らない
 const dbg = new Debugger({
-  emu: () => machine?.emu ?? null,
-  isPaused: () => machine?.paused ?? true,
+  emu: () => (linux ? linux.dbgEmu : (machine?.emu ?? null)),
+  isPaused: () => (linux ? linux.paused : (machine?.paused ?? true)),
   setPaused: (v) => {
+    if (linux) {
+      linux.setPaused(v);
+      syncControls();
+      return;
+    }
     if (!machine) return;
     if (v) machine.stop();
     else machine.start();
     syncControls();
   },
-  // 最初から流し直す
+  // 最初から流し直す。Linuxは**フル起動** — デバッガで見たいのは
+  // 起動の流れそのものなので、スナップショット復帰では意味がない
   restart: async () => {
-    if (linux) return; // Linuxはワーカーの中なのでデバッガの相手にならない
+    if (linux) {
+      await linux.boot({ full: true });
+      return;
+    }
     if (!current) return;
     await bootFromUrl(current);
     startScript(current.script);
@@ -518,6 +529,7 @@ async function select(m) {
     linux = mountLinux($('linuxScreen'), {
       onStatus: setStatus,
       onState: syncControls,
+      onDbgStop: (why) => dbg.onStop(why),
     });
     dbg.reset();
     syncControls();

@@ -47,6 +47,35 @@ export function mountLinux(canvas, opts = {}) {
       入らないので、端末側の姿は端末側で控える — VGA機と使い勝手を揃えるため */
   let savedTerm = null;
 
+  // --- デバッガの覗き見RPC ---
+  //
+  // 機械はワーカーの中に居るので、メインスレッドの Emulator と違って
+  // 同期では覗けない。**同じメソッド名で Promise を返す代役**を渡し、
+  // デバッガ側は await で呼ぶ (メインスレッドの機械は同期値を await しても
+  // そのまま解決するので、呼ぶ側は相手がどちらかを知らずに済む)
+  let dbgSeq = 0;
+  const dbgPending = new Map();
+  function dbgCall(method, ...args) {
+    if (!worker) return Promise.resolve(null);
+    const id = ++dbgSeq;
+    return new Promise((resolve) => {
+      dbgPending.set(id, resolve);
+      worker.postMessage({ type: 'dbg', id, method, args });
+    });
+  }
+  /** ワーカーを取り替える/畳むとき、待ちぼうけの約束を全部 null で流す */
+  function dbgFlush() {
+    for (const resolve of dbgPending.values()) resolve(null);
+    dbgPending.clear();
+  }
+  const dbgEmu = Object.fromEntries(
+    [
+      'cpu_json', 'watches_json', 'trace_json', 'read_mem',
+      'set_break', 'watch_mem', 'watch_io', 'clear_debug',
+      'step_one', 'take_stop', 'is_stopped', 'set_counting', 'record_trace',
+    ].map((m) => [m, (...args) => dbgCall(m, ...args)]),
+  );
+
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
   term.onData = (s) => {
@@ -154,8 +183,9 @@ export function mountLinux(canvas, opts = {}) {
         : 'ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)',
     );
 
-    // 前のワーカーがあれば止める
+    // 前のワーカーがあれば止める (覗き見の待ちも流す)
     if (worker) worker.terminate();
+    dbgFlush();
     worker = new Worker('./linux-worker.js', { type: 'module' });
 
     worker.onmessage = (e) => {
@@ -208,6 +238,21 @@ export function mountLinux(canvas, opts = {}) {
           status(`停止: ${msg.reason} — 画面は倒れた瞬間のまま`, true);
           opts.onState?.();
           break;
+        case 'dbg-result': {
+          const resolve = dbgPending.get(msg.id);
+          if (resolve) {
+            dbgPending.delete(msg.id);
+            resolve(msg.result);
+          }
+          break;
+        }
+        case 'dbg-stop':
+          // 見張りが機械を止めた。ワーカーのループは既に降りているので、
+          // こちらの「一時停止」の帳簿を合わせてからデバッガへ理由を渡す
+          paused = true;
+          opts.onState?.();
+          opts.onDbgStop?.(msg.why);
+          break;
       }
     };
   }
@@ -237,6 +282,8 @@ export function mountLinux(canvas, opts = {}) {
       }
     },
     get hasSaved() { return savedState !== null; },
+    /** デバッガが覗くための代役 (各メソッドが Promise を返す)。起動前は null */
+    get dbgEmu() { return worker && booted ? dbgEmu : null; },
     /** 控えた状態そのもの (JSON書き出し用)。無ければ null */
     get savedBytes() { return savedState; },
     /** 端末が見た全文 (履歴1000行+今の画面)。VGA機の「ログを保存」と同じ意味論。
@@ -249,6 +296,7 @@ export function mountLinux(canvas, opts = {}) {
       alive = false;
       worker?.terminate();
       worker = null;
+      dbgFlush();
       term.onData = null;
     },
   };

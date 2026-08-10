@@ -68,8 +68,9 @@ pub struct Step {
     pub instr: u64,
     pub cs: u16,
     pub ip: u32,
-    /// 命令の先頭5バイト。逆アセンブラはまだ無いので生のまま持つ
-    pub bytes: [u8; 5],
+    /// 命令の生バイト。x86の最長は15バイト — 5バイトで切っていたら
+    /// 32bitの `mov mem, imm32` 級が逆アセンブルできず (bad) が並んだ
+    pub bytes: [u8; 15],
 }
 
 #[derive(Default)]

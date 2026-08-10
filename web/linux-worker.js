@@ -11,10 +11,13 @@
 //         {type:'load', bytes}                           控えた状態へ戻す
 //         {type:'input', bytes}                          シリアルへ流す
 //         {type:'pause'} / {type:'resume'}
+//         {type:'dbg', id, method, args}                 デバッガの覗き見RPC (下記)
 //   送信: {type:'ready'}                     wasm初期化完了
 //         {type:'serial', bytes}             コンソール出力 (差分)
 //         {type:'status', booted, mips, trap} 状態 (定期)
 //         {type:'trap', reason}              未実装で停止
+//         {type:'dbg-result', id, result}    RPCの返事
+//         {type:'dbg-stop', why}             見張り (ブレークポイント等) が機械を止めた
 
 import init, { Emulator } from './pkg/rustx86_wasm.js';
 
@@ -79,8 +82,33 @@ self.onmessage = (e) => {
         loop();
       }
       break;
+    case 'dbg': {
+      // デバッガの覗き見RPC。**メソッド名は許可リスト** — postMessage の中身は
+      // 信用しない (任意メソッド呼び出しの入口にしない)。
+      // 走っている間もスライスの切れ目で捌かれるので、live表示もできる
+      postMessage({ type: 'dbg-result', id: msg.id, result: dbgDispatch(msg.method, msg.args ?? []) });
+      break;
+    }
   }
 };
+
+/** デバッガRPCで呼んでよいメソッド。Emulator のデバッグAPIと1対1 */
+const DBG_METHODS = new Set([
+  'cpu_json', 'watches_json', 'trace_json', 'read_mem',
+  'set_break', 'watch_mem', 'watch_io', 'clear_debug',
+  'step_one', 'take_stop', 'is_stopped', 'set_counting', 'record_trace',
+]);
+
+function dbgDispatch(method, args) {
+  if (!emu || !DBG_METHODS.has(method)) return null;
+  try {
+    const r = emu[method](...args);
+    return r === undefined ? true : r;
+  } catch (err) {
+    // 覗き見の失敗で機械もワーカーも殺さない。null は「読めなかった」の顔
+    return null;
+  }
+}
 
 // 1スライスの命令数。
 //
@@ -132,6 +160,14 @@ function loop() {
   if (trap) {
     running = false;
     postMessage({ type: 'trap', reason: trap });
+    return;
+  }
+
+  // デバッガの見張り (ブレークポイント等) が機械を止めたら、ループを降りて
+  // メインへ理由を知らせる。見張っていなければ真偽値1つの判定
+  if (emu.is_stopped()) {
+    running = false;
+    postMessage({ type: 'dbg-stop', why: emu.take_stop() });
     return;
   }
 
