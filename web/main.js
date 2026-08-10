@@ -95,6 +95,9 @@ function syncControls() {
   // ベンチには端末が無いので、端末向けの操作は伏せる。
   // デバッガだけは**どちらでも使える**
   for (const id of ['boot', 'pause']) $(id).hidden = !!bench;
+  // 電源ON (フル起動) はLinuxだけの操作。再起動がスナップショット優先なので、
+  // カーネルログの流れる本物の起動を選ぶ口がここ
+  $('fullboot').hidden = !linux;
   // スナップショットとログはVGA端末のもの。Linuxでは再起動と一時停止だけ残す
   // (シリアル端末には履歴が無く、ワーカー越しのスナップショットはまだ無い)
   for (const id of ['snap', 'restore', 'snapfile', 'save']) {
@@ -108,6 +111,7 @@ function syncControls() {
   if (bench) return;
   if (linux) {
     $('boot').disabled = linux.busy;
+    $('fullboot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
     return;
@@ -270,6 +274,11 @@ $('boot').addEventListener('click', () => {
     return;
   }
   if (lastImage) boot(lastImage, 'ディスク');
+});
+
+$('fullboot').addEventListener('click', () => {
+  // スナップショットを使わない本物の起動 (カーネルログが流れる)
+  linux?.boot({ full: true });
 });
 
 $('snap').addEventListener('click', async () => {
