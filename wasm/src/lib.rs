@@ -43,12 +43,6 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// ベンチ用ワークロード (`asm/bench.asm` の成果物) をwasmバイナリに埋め込む。
-///
-/// ページ側からfetchさせてもよいが、埋め込んでおくと `file://` で開いても
-/// 動き、測定対象がバイナリと必ず一致する
-const BENCH_SECTOR: &[u8] = include_bytes!("../../asm/bench.bin");
-
 #[wasm_bindgen]
 pub struct Emulator {
     m: Machine,
@@ -62,14 +56,6 @@ impl Emulator {
         let mut m = Machine::new();
         m.load_boot_sector(sector).map_err(|e| JsError::new(&e))?;
         Ok(Emulator { m })
-    }
-
-    /// 埋め込みのベンチ用ワークロードで初期化する
-    pub fn bench() -> Emulator {
-        let mut m = Machine::new();
-        m.load_boot_sector(BENCH_SECTOR)
-            .expect("埋め込みワークロードが壊れている");
-        Emulator { m }
     }
 
     /// HLTするか上限まで実行し、実行した命令数を返す。
@@ -109,12 +95,6 @@ impl Emulator {
 #[wasm_bindgen]
 pub fn cp437_table() -> String {
     rustx86_core::cp437::table_string()
-}
-
-/// 埋め込みワークロードの命令数は固定なので、ネイティブ側の測定と直接比較できる
-#[wasm_bindgen]
-pub fn bench_sector_len() -> usize {
-    BENCH_SECTOR.len()
 }
 
 // ---------- OSを動かすための口 ----------

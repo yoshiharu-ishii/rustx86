@@ -22,8 +22,16 @@
 /** @typedef {'ok'|'partial'|'todo'} Status */
 
 export const MACHINES = [
+  // 先頭は「スタート」— オープニングに戻る入口。マシンではないが、
+  // メニューの並びとして同格に扱うとハイライトや選択の作法を使い回せる
   {
-    group: '16bit リアルモード',
+    group: '',
+    id: 'start',
+    label: 'スタート',
+    kind: 'welcome',
+  },
+  {
+    group: 'OS選択',
     id: 'elks',
     label: 'ELKS 0.9.1',
     sub: '16bit UNIX',
@@ -37,7 +45,7 @@ export const MACHINES = [
     file: 'fd1440.img',
   },
   {
-    group: '16bit リアルモード',
+    group: 'OS選択',
     id: 'freedos',
     label: 'FreeDOS 1.4',
     sub: '8086ビルド',
@@ -66,7 +74,7 @@ export const MACHINES = [
     file: 'fd14boot.img (配布zipの 144m/x86BOOT.img)',
   },
   {
-    group: '32bit プロテクトモード',
+    group: 'OS選択',
     id: 'linux',
     label: 'Linux 6.18',
     sub: 'bzImage + initramfs',
@@ -82,21 +90,6 @@ export const MACHINES = [
       'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す
-  },
-  {
-    group: 'その他',
-    id: 'bench',
-    label: '実行速度ベンチ',
-    sub: '命令数固定のワークロード',
-    // **OSと同じ扱いにする。** ベンチもCPUを回す処理なので、
-    // 別ページへ飛ばさず右のペインに出す。単独ページ (bench.html) は
-    // 「計測だけの静かな部屋」として残してあり、中身は同じ部品である
-    kind: 'bench',
-    status: 'ok',
-    note:
-      'ネイティブとブラウザで何倍違うかを測る。命令数が固定のワークロード ' +
-      '(asm/bench.asm) を流すので、環境が変わってもMIPSを比較できる。' +
-      '計測だけの静かな部屋が要るなら bench.html を直接開く。',
   },
 ];
 
