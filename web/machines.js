@@ -76,9 +76,9 @@ export const MACHINES = [
     kind: 'linux',
     status: 'ok',
     note:
-      'BIOSは通さず bzImage + initrd を直接ロードして32bitエントリへ飛ぶ。' +
-      'コンソールはシリアル (ttyS0)。シェルまで1〜2分かかる — デコンプレッサ・' +
-      'ページング・ドライバ初期化を全部ソフトウェアでやっているため。' +
+      'BIOSは通さず、カーネルを直接ロードして32bitエントリへ飛ぶ。' +
+      'コンソールはシリアル (ttyS0)。起動済みスナップショットがあれば数秒で復元、' +
+      '無ければフル起動 — vmlinux (非圧縮) なら自己解凍ステブを飛ばすので4割速い。' +
       'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す

@@ -390,8 +390,8 @@ fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
 
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
-                                           // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
-                                           // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
+    // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
+    // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
     let cs32 = m.cpu.seg_is32(CS);
     let mut d = Decoder {
         seg_override: None,
@@ -401,6 +401,7 @@ pub fn step(m: &mut Machine) {
     };
 
     // プレフィクスループ
+    let mut saw_66 = false;
     let op = loop {
         let b = fetch8(m);
         match b {
@@ -411,15 +412,27 @@ pub fn step(m: &mut Machine) {
             // FS/GS上書き (386〜)。Linuxはper-CPUデータを %fs で引く
             0x64 => d.seg_override = Some(FS),
             0x65 => d.seg_override = Some(GS),
-            0xF0 => {}                    // LOCK: シングルコアなので無視
-            0x66 => d.opsize32 = !cs32,   // オペランドサイズの**反転** (386〜)
+            0xF0 => {} // LOCK: シングルコアなので無視
+            0x66 => {
+                // オペランドサイズの**反転** (386〜)
+                d.opsize32 = !cs32;
+                saw_66 = true;
+            }
             0x67 => d.addrsize32 = !cs32, // アドレスサイズの反転 (386〜)
             0xF2 | 0xF3 => d.rep = Some(b),
             _ => break b,
         }
     };
 
-    if d.opsize32 {
+    // 0x66 が**実際に付いた**命令を控える (幅対応を忘れた命令は静かに壊れるため)。
+    //
+    // 以前は `d.opsize32` を条件にしていたが、それは32bitセグメントでは
+    // **プレフィクス無しでも常に真**である。つまり32bitコードの全命令が
+    // ここで BTreeSet::insert を踏んでいて、プロファイルの27%を占めていた —
+    // 診断のつもりの1行が、実行そのものより高くついていた。
+    // 記録済みかどうかは配列1発で見る (木を歩かない)
+    if saw_66 && !m.prefixed_seen[op as usize] {
+        m.prefixed_seen[op as usize] = true;
         m.prefixed_ops.insert(op);
     }
 

@@ -172,7 +172,12 @@ function boot(image, label) {
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
 setInterval(() => {
   if (linux) {
-    $('gauge').textContent = linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '';
+    // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
+    $('gauge').textContent = linux.idle
+      ? 'アイドル'
+      : linux.mips
+        ? `${linux.mips.toFixed(0)} MIPS`
+        : '';
     return;
   }
   if (!machine) return;

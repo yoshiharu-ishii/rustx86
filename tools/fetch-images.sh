@@ -148,12 +148,23 @@ publish_to_web() {
   say "web/ へ複製した"
 }
 
+# 起動フロッピーだけ (ゲーム無し・mtools不要)。CIの起動回帰が使う —
+# プロンプト到達の確認にゲームは要らず、ibiblioへの依存も減らせる
+build_freedos_boot() {
+  mkdir -p "$IMAGES"
+  fetch "$FREEDOS_URL" "$WORK/fd14flop.zip"
+  say "起動フロッピーを取り出す (ゲーム無し)"
+  unzip -oqj "$WORK/fd14flop.zip" "144m/x86BOOT.img" -d "$WORK"
+  cp "$WORK/x86BOOT.img" "$IMAGES/fd14boot.img"
+}
+
 case "${1:-all}" in
   elks) build_elks ;;
   freedos) build_freedos ;;
+  freedos-boot) build_freedos_boot ;;
   linux) build_linux ;;
   all) build_elks; build_freedos; build_linux ;;
-  *) echo "使い方: $0 [all|elks|freedos|linux]" >&2; exit 1 ;;
+  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux]" >&2; exit 1 ;;
 esac
 publish_to_web
 
