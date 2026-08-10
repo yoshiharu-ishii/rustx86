@@ -30,7 +30,10 @@ let lastImage = null;
 // バイナリは Base64 の文字列1本にして入れる。
 
 const SNAP_FORMAT = 'rustx86-snapshot';
-const SNAP_KEY = 'rustx86.snapshot';
+/** VGA機のスナップショット置き場 (localStorage) は**マシン別**。
+    ELKSで保存した状態がFreeDOSの「復元」を光らせるのは、状態が無いのに
+    押せるのと同じで、押した人を裏切る */
+const snapKey = () => `rustx86.snapshot.${current?.id ?? 'custom'}`;
 
 /**
  * gzip をかけてから Base64 にする。
@@ -95,13 +98,13 @@ function syncControls() {
   // ベンチには端末が無いので、端末向けの操作は伏せる。
   // デバッガだけは**どちらでも使える**
   for (const id of ['boot', 'pause']) $(id).hidden = !!bench;
-  // 電源ON (フル起動) はLinuxだけの操作。再起動がスナップショット優先なので、
-  // カーネルログの流れる本物の起動を選ぶ口がここ
-  $('fullboot').hidden = !linux;
-  // 状態の保存/復元/JSON/ログは、Linuxでもワーカー越しに同じ顔で使える
-  for (const id of ['snap', 'restore', 'snapfile', 'save']) {
+  // 状態の保存/復元/ログは、Linuxでもワーカー越しに同じ顔で使える。
+  // JSON書き出しは**Linuxだけ** — VGA機はlocalStorageに残るので出番が薄く、
+  // Linuxはメモリ持ち (64MB) なので永続化の口がこれしかない
+  for (const id of ['snap', 'restore', 'save']) {
     $(id).hidden = !!bench;
   }
+  $('snapfile').hidden = !!bench || !linux;
   // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!bench || !!linux;
   $('gauge').hidden = !!bench;
@@ -110,7 +113,6 @@ function syncControls() {
   if (bench) return;
   if (linux) {
     $('boot').disabled = linux.busy;
-    $('fullboot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
     $('snap').disabled = !linux.booted;
@@ -123,7 +125,7 @@ function syncControls() {
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
   $('snapfile').disabled = !on;
-  $('restore').disabled = !on || !localStorage.getItem(SNAP_KEY);
+  $('restore').disabled = !on || !localStorage.getItem(snapKey());
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
@@ -272,15 +274,13 @@ $('pause').addEventListener('click', () => {
 
 $('boot').addEventListener('click', () => {
   if (linux) {
-    linux.boot();
+    // **再起動 = フル起動。** 実機の再起動がBIOSから走るのと同じで、
+    // カーネルログの流れる本物のブートをやり直す。
+    // スナップショットからの高速復帰は「マシンを選び直したとき」の顔
+    linux.boot({ full: true });
     return;
   }
   if (lastImage) boot(lastImage, 'ディスク');
-});
-
-$('fullboot').addEventListener('click', () => {
-  // スナップショットを使わない本物の起動 (カーネルログが流れる)
-  linux?.boot({ full: true });
 });
 
 $('snap').addEventListener('click', async () => {
@@ -291,7 +291,7 @@ $('snap').addEventListener('click', async () => {
   if (!machine) return;
   try {
     const json = await snapshotJson(lastLabel);
-    localStorage.setItem(SNAP_KEY, json);
+    localStorage.setItem(snapKey(), json);
     setStatus(`状態を保存した (${(json.length / 1024).toFixed(0)} KB、この端末に残る)`);
     syncControls();
   } catch (e) {
@@ -305,7 +305,7 @@ $('restore').addEventListener('click', async () => {
     linux.restoreState();
     return;
   }
-  const json = localStorage.getItem(SNAP_KEY);
+  const json = localStorage.getItem(snapKey());
   if (!machine || !json) return;
   try {
     const o = await applySnapshotJson(json);
