@@ -12,7 +12,6 @@ import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
 import { MACHINES, byGroup, statusLabel } from './machines.js';
 import { Debugger } from './debugger.js';
-import { mountBench } from './bench.js';
 import { mountLinux } from './linux-machine.js';
 
 const $ = id => document.getElementById(id);
@@ -95,21 +94,10 @@ function setStatus(text, warn = false) {
 /** ツールバーの表示を実際の状態に合わせる */
 function syncControls() {
   const on = !!machine;
-  // ベンチには端末が無いので、端末向けの操作は伏せる。
-  // デバッガだけは**どちらでも使える**
-  for (const id of ['boot', 'pause']) $(id).hidden = !!bench;
-  // 状態の保存/復元/ログは、Linuxでもワーカー越しに同じ顔で使える。
-  // JSON書き出しは**Linuxだけ** — VGA機はlocalStorageに残るので出番が薄く、
-  // Linuxはメモリ持ち (64MB) なので永続化の口がこれしかない
-  for (const id of ['snap', 'restore', 'save']) {
-    $(id).hidden = !!bench;
-  }
-  // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('layout').closest('.sel').hidden = !!bench || !!linux;
-  $('gauge').hidden = !!bench;
+  // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
+  $('layout').closest('.sel').hidden = !!linux;
   // デバッガはメインスレッドの機械を覗く道具。Linuxはワーカーの中なので覗けない
-  $('debug').disabled = (!on && !bench) || !!linux;
-  if (bench) return;
+  $('debug').disabled = !on || !!linux;
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
@@ -234,32 +222,22 @@ document.querySelector('.toolbar').addEventListener('click', e => {
 //
 // Emulator は再起動のたびに作り直されるので、**参照を握らせず毎回聞かせる**。
 // 握らせると再起動後に古い機械を覗き続けることになる
-/** ベンチを選んでいるときの取っ手 (選んでいなければ null) */
-let bench = null;
 /** Linuxを選んでいるときの取っ手 (選んでいなければ null) */
 let linux = null;
 
-// **いま動いている機械**を見せる。OSとベンチで持ち主が違うので、
-// 参照を握らず毎回聞く
+// **いま動いている機械**を見せる。参照を握らせず毎回聞く —
+// Emulator は再起動のたびに作り直されるため
 const dbg = new Debugger({
-  emu: () => (bench ? bench.emu : machine?.emu) ?? null,
-  isPaused: () => (bench ? bench.paused : machine?.paused) ?? true,
+  emu: () => machine?.emu ?? null,
+  isPaused: () => machine?.paused ?? true,
   setPaused: (v) => {
-    if (bench) {
-      bench.setPaused(v);
-      return;
-    }
     if (!machine) return;
     if (v) machine.stop();
     else machine.start();
     syncControls();
   },
-  // 最初から流し直す。ベンチは hlt で終わるので、これが無いと死体を眺めるだけになる
+  // 最初から流し直す
   restart: async () => {
-    if (bench) {
-      await bench.restartDebugMachine();
-      return;
-    }
     if (linux) return; // Linuxはワーカーの中なのでデバッガの相手にならない
     if (!current) return;
     await bootFromUrl(current);
@@ -267,9 +245,7 @@ const dbg = new Debugger({
   },
 });
 
-$('debug').addEventListener('click', async () => {
-  // ベンチのデバッグ機械は求められて初めて作る (計測だけしたい人に costs を払わせない)
-  if (bench) await bench.ensureDebugMachine();
+$('debug').addEventListener('click', () => {
   dbg.show();
   dbg.reset();
 });
@@ -501,12 +477,9 @@ async function select(m) {
   // 裏で走り続けて画面にも出ず、計測を汚し、デバッガは古い機械を覗く。
   // 「選び直したらまっさらから」を守る
   machine?.stop();
-  bench?.destroy();
-  bench = null;
   linux?.destroy();
   linux = null;
   $('welcomePane').hidden = true;
-  $('benchPane').hidden = true;
   $('linuxScreen').hidden = true;
   $('screen').hidden = false;
 
@@ -529,26 +502,6 @@ async function select(m) {
     // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)
     await linux.boot();
     syncControls();
-    return;
-  }
-
-  if (m.kind === 'bench') {
-    machine = null;
-    lastImage = null;
-    term.reset();
-    $('screen').hidden = true;
-    $('benchPane').hidden = false;
-    bench = mountBench($('benchPane'), {
-      onStop: (why) => dbg.onStop(why),
-    });
-    setStatus('実行速度ベンチ。「計測する」で始める');
-    syncControls();
-    // デバッガを開いたまま切り替えたなら、覗く相手をすぐ用意する。
-    // **開いている窓に「機械が無い」とだけ出るのは道具として不親切**である。
-    // 閉じているならベンチの機械は作らない — 計測だけしたい人に費用を払わせない
-    if (dbg.open) await bench.ensureDebugMachine();
-    // 見ている機械が入れ替わったので、前の残りかすを捨てる
-    dbg.reset();
     return;
   }
 
