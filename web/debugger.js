@@ -28,6 +28,15 @@
  *    ↓
  *   子 (この窓/パネル) ── 表示するだけ。操作は親のコールバックを呼ぶ
  *
+ * ## 機械はメインスレッドとは限らない (32bit Linux)
+ *
+ * Linuxの機械はワーカーの中に居る。親が渡す `emu()` は、そのときは
+ * **同じメソッド名で Promise を返す代役** (linux-machine.js の覗き見RPC) になる。
+ * だからここでは機械のメソッドを**全部 await で呼ぶ** — 同期の機械
+ * (ELKS/FreeDOS) は値を await してもそのまま解決するので、どちらが
+ * 相手でも同じコードで済む。await の間に窓が閉じられることがあるので、
+ * 返事を受けたら `open` を見てから描く。
+ *
  * **wasmのメモリを直接見ない。** wasmの線形メモリは伸びるとJS側の参照が
  * 無効になる (`terminal.js` に同じ注意がある)。渡すのは組み立て済みのJSONと、
  * そのつど取り直したバイト列だけにする。
@@ -164,7 +173,9 @@ const HTML = `
     <h2>Memory</h2>
     <p class="note">既定は <code>0x400</code> から。BIOSデータエリアの256バイトで、
       キー待ち行列・修飾キー・カーソル・ビデオモード・CRTCのポート番号が
-      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。</p>
+      ここに並んでいる。<strong>リアルモードでいちばん情報の詰まった1ページ</strong>。
+      番地は線形 — ページング有効 (Linux) ならページ表を通る。カーネルは
+      <code>0xc0000000</code> から上に住む。未マップは <code>ff</code> で見える。</p>
     <div class="row">
       <input id="rxMa" value="0x400">
       <input id="rxMl" value="256" style="width:5em">
@@ -448,14 +459,14 @@ export class Debugger {
       this.host.setPaused(!this.host.isPaused());
       this.render();
     };
-    this.$('rxStep').onclick = () => {
+    this.$('rxStep').onclick = async () => {
       this.host.setPaused(true);
-      emu()?.step_one();
+      await emu()?.step_one();
       this.render();
     };
-    this.$('rxCont').onclick = () => {
+    this.$('rxCont').onclick = async () => {
       // **止まった理由を取り去らないと、また同じ所で止まる**
-      emu()?.take_stop();
+      await emu()?.take_stop();
       this.lastWhy = '';
       this.host.setPaused(false);
       this.render();
@@ -469,17 +480,17 @@ export class Debugger {
     };
 
     const add = (id, field, fn) => {
-      this.$(id).onclick = () => {
+      this.$(id).onclick = async () => {
         const a = parseAddr(this.$(field).value);
-        if (a !== null && emu()) fn(emu(), a);
+        if (a !== null && emu()) await fn(emu(), a);
         this.render();
       };
     };
     add('rxAddBp', 'rxBp', (e, a) => e.set_break(a >>> 0));
     add('rxAddWp', 'rxWp', (e, a) => e.watch_mem(a >>> 0));
     add('rxAddIo', 'rxIo', (e, a) => e.watch_io(a & 0xffff, true, true));
-    this.$('rxClr').onclick = () => {
-      emu()?.clear_debug();
+    this.$('rxClr').onclick = async () => {
+      await emu()?.clear_debug();
       this.render();
     };
 
@@ -494,8 +505,17 @@ export class Debugger {
     this.$('rxShowT').onclick = () => this.showTrace();
   }
 
-  render() {
-    if (!this.open) return;
+  async render() {
+    if (!this.open || this.rendering) return;
+    this.rendering = true;
+    try {
+      await this.#render();
+    } finally {
+      this.rendering = false;
+    }
+  }
+
+  async #render() {
     const emu = this.host.emu();
     if (!emu) {
       this.$('rxState').textContent = 'no machine';
@@ -506,8 +526,16 @@ export class Debugger {
       this.prev = {};
       return;
     }
-    const c = JSON.parse(emu.cpu_json());
-    const stopped = emu.is_stopped() || !!this.lastWhy;
+    // ワーカー越しなら1つずつ往復させず、まとめて頼んで揃うのを待つ
+    const [cj, stoppedNow, wj] = await Promise.all([
+      emu.cpu_json(),
+      emu.is_stopped(),
+      emu.watches_json(),
+    ]);
+    if (!this.open) return; // 待っている間に窓が閉じられた
+    if (!cj) return; // 機械が畳まれた (次の render が no machine を出す)
+    const c = JSON.parse(cj);
+    const stopped = stoppedNow || !!this.lastWhy;
     const paused = this.host.isPaused();
 
     const st = this.$('rxState');
@@ -576,7 +604,7 @@ export class Debugger {
       `<span class="asm">${esc(c.asm)}</span>${c.halted ? '  [HLT]' : ''}<br>` +
       `<span class="hex">${c.bytes}</span>`;
 
-    const w = JSON.parse(emu.watches_json());
+    const w = JSON.parse(wj);
     const f = (a, n) => (a.length ? `${n}: ` + a.map((v) => '0x' + v.toString(16)).join(' ') : '');
     this.$('rxWatches').textContent =
       [f(w.code, 'execute'), f(w.mem, 'write'), f(w.ioR, 'I/O read'), f(w.ioW, 'I/O write')]
@@ -584,7 +612,7 @@ export class Debugger {
         .join('  /  ') || 'nothing watched';
 
     // メモリは最後に置いた欄を埋めるので、走っている間も追いかける
-    if (this.$('rxLive').checked) this.dump();
+    if (this.$('rxLive').checked) await this.dump(emu);
   }
 
   /**
@@ -643,13 +671,13 @@ export class Debugger {
     }
   }
 
-  dump() {
-    const emu = this.host.emu();
+  async dump(emu = this.host.emu()) {
     const a = parseAddr(this.$('rxMa').value);
     const len = Math.min(parseInt(this.$('rxMl').value, 10) || 256, 4096);
     if (a === null || !emu) return;
     // **毎回取り直す。** wasmのメモリが伸びると前の参照は無効になる
-    const b = emu.read_mem(a >>> 0, len);
+    const b = await emu.read_mem(a >>> 0, len);
+    if (!b || !this.open) return;
     const out = [];
     for (let r = 0; r * 16 < len; r++) {
       const base = a + r * 16;
@@ -665,10 +693,12 @@ export class Debugger {
     this.$('rxMem').textContent = out.join('\n');
   }
 
-  showTrace() {
+  async showTrace() {
     const emu = this.host.emu();
     if (!emu) return;
-    const t = JSON.parse(emu.trace_json());
+    const tj = await emu.trace_json();
+    if (!tj || !this.open) return;
+    const t = JSON.parse(tj);
     if (!t.length) {
       this.$('rxTrace').textContent = 'まだ何も残していない。Start recording を押してから走らせる';
       return;
