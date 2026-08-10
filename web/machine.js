@@ -10,8 +10,22 @@
 
 import init, { Emulator, cp437_table, install_panic_hook } from './pkg/rustx86_wasm.js';
 
-/** 1フレームで進める命令数。実機の8086より遥かに速いが、起動を待たずに済む */
-const INSTRUCTIONS_PER_FRAME = 3_000_000;
+/**
+ * 1ゲストミリ秒に相当する仮想命令数 (linux-worker.js と同じ勘定)。
+ * PITの入力 1.193182 MHz × 64命令/クロック ÷ 1000 ≒ 76,364。
+ *
+ * フレームの予算は**実時間で流れたぶんだけ** — つまりゲストの時計 = 実時間。
+ * 以前は「1フレーム3M命令」の固定予算で、これは 60fps で 180M/s ≒
+ * **実時間の2.4倍速の時計**だった。ホストが遅いうちは上限に届かず
+ * 気づかなかったが、デコードキャッシュで速くなった途端、テトリスの駒が
+ * 目で追えない速さで落ちた (実際になった)。ゲームのテンポは
+ * ゲストのタイマが決めるもので、エミュレータが速くなっても変わってはいけない
+ */
+const INSTR_PER_GUEST_MS = (1_193_182 * 64) / 1000;
+
+/** 1フレーム予算の上限。裏タブから戻った直後などの巨大なdtを
+    一気に追いつかせると操作不能の早回しになるので、50msぶんで頭打ち */
+const MAX_FRAME_BUDGET = Math.round(50 * INSTR_PER_GUEST_MS);
 
 /**
  * 何命令ごとに画面を覗くか。
@@ -156,16 +170,21 @@ export class Machine {
   #frame() {
     if (!this.running) return;
     let changed = false;
-    this.executed += INSTRUCTIONS_PER_FRAME;
     const now = performance.now();
+    // 予算 = 前のフレームから実時間で流れたぶんの仮想時間。
+    // ゲストの時計を実時間に繋ぎ止める (速いホストでも遅いホストでも同じ速さ)
+    const dt = Math.min(50, this.lastFrame ? now - this.lastFrame : 16);
+    this.lastFrame = now;
+    const budget = Math.min(MAX_FRAME_BUDGET, Math.max(CHUNK, Math.round(dt * INSTR_PER_GUEST_MS)));
+    this.executed += budget;
     if (now - this.lastMeasure >= 500) {
       this.mips = this.executed / (now - this.lastMeasure) / 1000;
       this.executed = 0;
       this.lastMeasure = now;
     }
-    for (let done = 0; done < INSTRUCTIONS_PER_FRAME; done += CHUNK) {
+    for (let done = 0; done < budget; done += CHUNK) {
       try {
-        this.emu.run_slice(CHUNK);
+        this.emu.run_slice(Math.min(CHUNK, budget - done));
         // デバッガが止めたら、そこで走るのをやめる。**画面は描き直す** —
         // 止まった瞬間の絵を見たいので (パニックのときと違い、続きがある)
         if (this.emu.is_stopped()) {
@@ -197,6 +216,10 @@ export class Machine {
         this.onFrame?.(this.vram(), row, col, false);
       }
     }
+    // 予算の大半が早送り (HLT) なら、この機械は暇 — ゲージに「アイドル」と出す
+    const skipped = this.emu.take_idle_skipped();
+    this.idle = skipped > budget / 2;
+
     // 描かせるのは1フレームに1回だけ
     if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
     this.#schedule();
