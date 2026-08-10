@@ -329,73 +329,137 @@ impl DecodeCache {
     }
 }
 
-/// キャッシュ経由の1命令実行。対象外は従来の [`super::step`] へ落ちる
-pub(crate) fn step_cached(m: &mut Machine) {
+/// キャッシュ経由の実行。対象外は従来の [`super::step`] へ落ちる。
+///
+/// ## ブロック連結 (B4)
+///
+/// 1命令実行して外側の帳簿へ戻る代わりに、`chain_extra` 命令ぶんまで
+/// **この中で連結して実行し続ける**。次の命令が同じ物理ページに居るかぎり、
+/// lin計算・ページ変換・外側のはしご (デバッガ判定・HLT判定・BIOS入口判定…)
+/// を払い直さずに、スロット照合だけで次のuopへ直行する。
+///
+/// 意味を変えないための約束:
+/// - **時計は1命令粒度のまま**。連結中も毎命令 tsc+=1 と装置tickを、外側の
+///   [`Machine::step_inner`] と同じ順序で回す。命令数の決定性は崩れない
+/// - **割り込みの受付点も1命令粒度のまま**。毎命令の境界で保留を見て、
+///   受けられるなら連結を打ち切って外へ返す (配送は外側の次の呼び出し —
+///   従来と同じ境界で同じ配送になる)
+/// - **タグ+世代の照合は毎命令やる**。連結は照合を飛ばさない — 自己書き換えの
+///   検出は非連結時と同一。連結が省くのは変換とはしごだけ
+/// - 分岐で途切れない: IPが直線から外れても、行き先が同じ線形ページなら
+///   物理番地を差し替えて続行する (ループがまるごと連結される)。
+///   ページ表の書き換えは実機同様TLB/invlpgの約束の上に居るし、
+///   mov cr3 / invlpg はuopに無いので連結はそこで自然に切れる
+/// - TF (シングルステップ) 中は連結しない — 毎命令 INT1 の意味を守る
+pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     // 16bitコードは対象外 (ELKS/FreeDOSは従来経路)
     if !m.cpu.seg_is32(CS) {
         m.guard_save();
         return super::step(m);
     }
-    let lin = m.cpu.lin(CS, m.cpu.ip);
-    let Ok(pa) = m.translate_for(lin, false) else {
+    let mut lin = m.cpu.lin(CS, m.cpu.ip);
+    let Ok(mut pa) = m.translate_for(lin, false) else {
         // フェッチがフォールトする状況は従来経路に任せる (#PF配送もそちら)
         m.guard_save();
         return super::step(m);
     };
-    let page = (pa >> 12) as usize;
-    let slot = (pa as usize) & (SLOTS - 1);
+    let mut extra = if m.cpu.flag(super::TF) {
+        0
+    } else {
+        chain_extra
+    };
 
-    if !m.dcache.entries.is_empty() {
-        let e = &m.dcache.entries[slot];
-        if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
-            let (len, uop) = (e.len, e.uop);
-            m.dcache.hits += 1;
-            // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
-            // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
-            // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
-            if exec::may_touch_memory(&uop) {
-                m.guard_save();
+    loop {
+        let page = (pa >> 12) as usize;
+        let slot = (pa as usize) & (SLOTS - 1);
+
+        let mut cached = None;
+        if !m.dcache.entries.is_empty() {
+            let e = &m.dcache.entries[slot];
+            if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
+                cached = Some((e.len, e.uop));
+                m.dcache.hits += 1;
             }
-            m.cpu.advance_ip(len as u32);
-            exec::exec(m, uop);
+        }
+        let (len, uop) = match cached {
+            Some(x) => x,
+            None => match decode::decode_at(m, pa) {
+                Some((len, uop)) => {
+                    if m.dcache.entries.is_empty() {
+                        m.dcache.entries = vec![
+                            Entry {
+                                tag: TAG_INVALID,
+                                gen: 0,
+                                len: 0,
+                                uop: Uop::Ret,
+                            };
+                            SLOTS
+                        ];
+                    }
+                    let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+                    m.dcache.entries[slot] = Entry {
+                        tag: pa,
+                        gen,
+                        len,
+                        uop,
+                    };
+                    if let Some(h) = m.dcache.page_has_code.get_mut(page) {
+                        *h = true;
+                    }
+                    m.dcache.fills += 1;
+                    (len, uop)
+                }
+                None => {
+                    m.dcache.fallbacks += 1;
+                    // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
+                    // ブロック先頭のIP)
+                    m.trap_ip = m.cpu.ip;
+                    m.guard_save();
+                    return super::step(m);
+                }
+            },
+        };
+
+        // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
+        // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
+        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
+        if exec::may_touch_memory(&uop) {
+            m.guard_save();
+        }
+        let ip_linear = m.cpu.ip.wrapping_add(len as u32);
+        m.cpu.advance_ip(len as u32);
+        exec::exec(m, uop);
+
+        // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
+        if extra == 0 {
             return;
         }
-    }
-
-    match decode::decode_at(m, pa) {
-        Some((len, uop)) => {
-            if m.dcache.entries.is_empty() {
-                m.dcache.entries = vec![
-                    Entry {
-                        tag: TAG_INVALID,
-                        gen: 0,
-                        len: 0,
-                        uop: Uop::Ret,
-                    };
-                    SLOTS
-                ];
-            }
-            let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            m.dcache.entries[slot] = Entry {
-                tag: pa,
-                gen,
-                len,
-                uop,
-            };
-            if let Some(h) = m.dcache.page_has_code.get_mut(page) {
-                *h = true;
-            }
-            m.dcache.fills += 1;
-            if exec::may_touch_memory(&uop) {
-                m.guard_save();
-            }
-            m.cpu.advance_ip(len as u32);
-            exec::exec(m, uop);
+        // フォールトの巻き戻しと#UDの裁きは外側の担当。割り込みが受けられる
+        // 状態になったら境界で外へ返す (配送点は非連結時と同じ)
+        if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+            return;
         }
-        None => {
-            m.dcache.fallbacks += 1;
-            m.guard_save();
-            super::step(m);
+        if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+            return;
+        }
+        // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
+        let new_lin = if m.cpu.ip == ip_linear {
+            lin.wrapping_add(len as u32)
+        } else {
+            m.cpu.lin(CS, m.cpu.ip)
+        };
+        if new_lin >> 12 != lin >> 12 {
+            return; // ページを跨いだら外へ (変換からやり直し)
+        }
+        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+        lin = new_lin;
+        // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
+        extra -= 1;
+        m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+        m.tick_countdown -= 1;
+        if m.tick_countdown == 0 {
+            m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+            m.tick_devices(1);
         }
     }
 }

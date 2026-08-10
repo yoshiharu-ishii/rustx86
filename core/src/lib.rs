@@ -496,12 +496,20 @@ impl Machine {
     /// 「予算=仮想時間」の約束を守るのはそちら経由である
     #[inline]
     pub fn step(&mut self) {
-        self.step_budgeted(u64::MAX);
+        // 連結は0 — 「1命令進める」の契約を守る (デバッガ・cosimが頼る粒度)
+        self.step_inner(u64::MAX, 0);
     }
 
-    /// 1命令進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算) までに
-    /// 制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる
+    /// 1命令**以上**進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算)
+    /// までに制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる。
+    /// 予算の残りはブロック連結 (B4) の連結許可量も兼ねる — 進んだ量は
+    /// 常にTSCに現れるので、run系の「予算=仮想時間」の約束はそのまま保たれる
     pub fn step_budgeted(&mut self, idle_budget: u64) {
+        self.step_inner(idle_budget, idle_budget.saturating_sub(1));
+    }
+
+    /// 実体。`chain_extra` = 最初の1命令に**追加して**連結実行してよい命令数
+    fn step_inner(&mut self, idle_budget: u64, chain_extra: u64) {
         // 未実装で止まっていたら、以後は何もしない (run系がここで抜ける)
         if self.trap.is_some() {
             return;
@@ -629,7 +637,7 @@ impl Machine {
             self.guard_save();
             cpu::step(self);
         } else {
-            cpu::dcache::step_cached(self);
+            cpu::dcache::step_cached(self, chain_extra);
         }
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
