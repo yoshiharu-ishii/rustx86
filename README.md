@@ -191,7 +191,8 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       Tier 8c の前倒し) と vmlinux 直接ロード (自己解凍ステブ = 起動の55%を
       ホスト側ロードで消す。Firecracker と同じ判断)
 - [ ] **3e: CPU高速化** — フルブート10秒 (~100 MIPS) が目標。
-      計画は [docs/perf.md](docs/perf.md)。本丸はデコード済み命令キャッシュで、
+      判断は [ADR-0007](docs/adr/0007-cpu-optimization-steps.md)、数字は
+      [docs/perf.md](docs/perf.md)。本丸はデコード済み命令キャッシュで、
       cosim + lockstep + OS起動回帰の検証網の上で進める
 - [ ] **3f: 32bitの道具** — ワーカー越しデバッガ (Linuxマシンは Worker の中で
       回るので今のデバッガから覗けない)、電源ON / 再起動 / スナップショット保存 /
