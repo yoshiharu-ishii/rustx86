@@ -420,17 +420,22 @@ function renderMachines() {
   const nav = $('machines');
   nav.textContent = '';
   for (const [group, list] of byGroup()) {
-    const h = document.createElement('h2');
-    h.textContent = group;
-    nav.append(h);
+    if (group) {
+      const h = document.createElement('h2');
+      h.textContent = group;
+      nav.append(h);
+    }
     for (const m of list) {
       // **別ページに住むマシンはリンクにする** (Linux)。見た目はボタンと揃えるが、
       // 中身は本物の <a> — 新しいタブで開く・URLをコピーする、が普通にできる
       const b = document.createElement(m.href ? 'a' : 'button');
       b.title = m.note ?? '';
+      // 状態の丸と状態語はマシンだけ (「スタート」はマシンではない)
+      const dot = m.status ? `<span class="dot ${m.status}"></span>` : '';
+      const meta = [m.sub, m.status && statusLabel(m.status)].filter(Boolean).join(' · ');
       b.innerHTML =
-        `<span class="name"><span class="dot ${m.status}"></span>${m.label}</span>` +
-        `<span class="meta">${m.sub ?? ''}${m.sub ? ' · ' : ''}${statusLabel(m.status)}</span>`;
+        `<span class="name">${dot}${m.label}</span>` +
+        `<span class="meta">${meta}</span>`;
       b.querySelector('.meta').style.display = 'block';
       if (m.href) {
         b.href = m.href;
@@ -486,6 +491,20 @@ async function select(m) {
   current = m;
   markCurrent(m.id);
   showNote(m);
+
+  // 「スタート」— オープニングに戻る。機械は全部畳んだ状態
+  if (m.kind === 'welcome') {
+    machine = null;
+    lastImage = null;
+    term.reset();
+    $('screen').hidden = true;
+    $('welcomePane').hidden = false;
+    showNote(null);
+    setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
+    dbg.reset();
+    syncControls();
+    return;
+  }
 
   if (m.kind === 'linux') {
     machine = null;
@@ -558,6 +577,14 @@ try {
     setStatus(`停止: ${detail} — 画面は倒れた瞬間のまま`, true);
   });
   renderMachines();
+  markCurrent('start');
+  // オープニングのカードからも起動できる (メニューと同じ select を通す)
+  for (const b of document.querySelectorAll('#welcomePane [data-boot]')) {
+    b.addEventListener('click', () => {
+      const m = MACHINES.find((x) => x.id === b.dataset.boot);
+      if (m) select(m);
+    });
+  }
   setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
   syncControls();
 } catch (e) {
