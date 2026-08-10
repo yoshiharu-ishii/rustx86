@@ -551,7 +551,7 @@ impl Machine {
             // instr との差がそのまま「暇にしていた時間」になる
             self.dbg.executed += 1;
             if self.dbg.trace_cap > 0 {
-                let mut bytes = [0u8; 5];
+                let mut bytes = [0u8; 15];
                 for (i, b) in bytes.iter_mut().enumerate() {
                     *b = self.read8(lin.wrapping_add(i as u32));
                 }

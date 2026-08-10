@@ -464,7 +464,9 @@ impl Emulator {
             .iter()
             .map(|s| {
                 let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
-                let asm = rustx86_disasm::one(&s.bytes, bits, s.ip as u64).replace('"', "'");
+                let asm = rustx86_disasm::one(&s.bytes, bits, s.ip as u64)
+                    .replace('\\', "\\\\")
+                    .replace('"', "'");
                 format!(
                     r#"{{"i":{},"cs":{},"ip":{},"b":"{}","asm":"{}"}}"#,
                     s.instr,
