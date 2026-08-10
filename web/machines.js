@@ -22,8 +22,17 @@
 /** @typedef {'ok'|'partial'|'todo'} Status */
 
 export const MACHINES = [
+  // 先頭は「スタート」— オープニングに戻る入口。マシンではないが、
+  // メニューの並びとして同格に扱うとハイライトや選択の作法を使い回せる
   {
-    group: '16bit リアルモード',
+    group: '',
+    id: 'start',
+    label: 'スタート',
+    sub: 'このアプリについて',
+    kind: 'welcome',
+  },
+  {
+    group: 'OS選択',
     id: 'elks',
     label: 'ELKS 0.9.1',
     sub: '16bit UNIX',
@@ -37,7 +46,7 @@ export const MACHINES = [
     file: 'fd1440.img',
   },
   {
-    group: '16bit リアルモード',
+    group: 'OS選択',
     id: 'freedos',
     label: 'FreeDOS 1.4',
     sub: '8086ビルド',
@@ -66,7 +75,7 @@ export const MACHINES = [
     file: 'fd14boot.img (配布zipの 144m/x86BOOT.img)',
   },
   {
-    group: '32bit プロテクトモード',
+    group: 'OS選択',
     id: 'linux',
     label: 'Linux 6.18',
     sub: 'bzImage + initramfs',

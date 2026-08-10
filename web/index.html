@@ -25,15 +25,27 @@
     background: #000; color: #d8d8d8;
   }
   .console.drop { outline: 2px dashed #00aa00; outline-offset: -6px; }
-  /* オープニング。マシンを選ぶまで端末の代わりにここが出る */
-  #welcomePane { padding: 2.2rem 2rem; color: #5dbb5d;
-                 font-family: ui-monospace, Menlo, monospace; }
-  #welcomePane .logo { color: #23ff18; font-size: 1.6rem; letter-spacing: .12em;
-                       margin: 0 0 .4rem; }
-  #welcomePane p { margin: .4rem 0; font-size: .92rem; }
-  #welcomePane ul { margin: .8rem 0; padding-left: 1.2rem; font-size: .88rem;
-                    line-height: 1.9; }
-  #welcomePane .hint { color: #7cff7c; margin-top: 1.4rem; }
+  /* オープニング。マシンを選ぶまで端末の代わりにここが出る。
+     端末の緑に寄せた「それっぽい」文体はやめて、普通の紹介ページとして書く */
+  #welcomePane { padding: 2.4rem 2.2rem 2rem; color: #c9cdd1; }
+  #welcomePane h2 { margin: 0 0 .5rem; font-size: 1.35rem; font-weight: 650;
+                    color: #f0f2f4; letter-spacing: .01em; }
+  #welcomePane .lead { margin: 0 0 1.6rem; font-size: .95rem; color: #9aa1a8;
+                       max-width: 34rem; }
+  #welcomePane .oscards { display: grid; gap: .7rem;
+                          grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+                          max-width: 40rem; }
+  #welcomePane .oscards button {
+    font: inherit; text-align: left; cursor: pointer;
+    background: #141719; color: inherit;
+    border: 1px solid #2b3036; border-radius: .6rem;
+    padding: .85rem .95rem; display: flex; flex-direction: column; gap: .3rem;
+    transition: border-color .12s, background .12s;
+  }
+  #welcomePane .oscards button:hover { border-color: #3b82f6; background: #171c22; }
+  #welcomePane .oscards .os { font-weight: 600; font-size: .95rem; color: #e8eaec; }
+  #welcomePane .oscards .d { font-size: .8rem; color: #9aa1a8; line-height: 1.55; }
+  #welcomePane .fine { margin: 1.6rem 0 0; font-size: .8rem; color: #757c83; }
 
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
@@ -100,12 +112,17 @@
   .machines h2:first-child { margin-top: 0; }
   .machines button {
     display: block; width: 100%; text-align: left; font: inherit;
-    padding: .4rem .6rem; margin-bottom: .25rem; border-radius: .4rem;
-    border: 1px solid var(--line); background: transparent; color: inherit;
+    padding: .45rem .65rem; margin-bottom: .15rem; border-radius: .45rem;
+    border: none; background: transparent; color: inherit;
     cursor: pointer; line-height: 1.35;
+    /* 選択中の色付き縁は box-shadow で描く — border だと行がガタつく */
+    transition: background .12s;
   }
-  .machines button:hover:not(:disabled) { background: rgba(128,128,128,.12); }
-  .machines button[aria-current="true"] { border-color: #2563eb; background: rgba(37,99,235,.12); }
+  .machines button:hover:not(:disabled) { background: rgba(128,128,128,.14); }
+  .machines button[aria-current="true"] {
+    background: rgba(37,99,235,.16);
+    box-shadow: inset 2px 0 0 #3b82f6;
+  }
   .machines button:disabled { opacity: .4; cursor: default; }
   .machines .name { font-size: .88rem; }
   .machines .meta { font-size: .72rem; opacity: .65; }
@@ -153,14 +170,25 @@
     </div>
     <!-- オープニング。いきなりOSが立ち上がるのではなく、まず選んでもらう -->
     <div id="welcomePane">
-      <p class="logo">rustx86</p>
-      <p>Rustで書いたx86エミュレータ。8086から386まで、本物のOSがブラウザの中で動く。</p>
-      <ul>
-        <li><b>ELKS 0.9.1</b> — 16bit UNIX。8042とテキストVRAMを直接叩く。tetris入り</li>
-        <li><b>FreeDOS 1.4</b> — BIOS経由で動くDOS。A:\> まで自動で進む</li>
-        <li><b>Linux 6.18</b> — 32bitプロテクトモード+ページング。数秒でシェルが出る</li>
-      </ul>
-      <p class="hint">← 左のメニューからマシンを選ぶと、ここが画面になる</p>
+      <h2>rustx86</h2>
+      <p class="lead">Rustで書いたx86エミュレータです。8086から386まで、
+        実物のOSに手を加えずそのままブラウザで実行します。
+        下のカード、または左のメニューからOSを選ぶと起動します。</p>
+      <div class="oscards">
+        <button data-boot="elks">
+          <span class="os">ELKS 0.9.1</span>
+          <span class="d">16bit UNIX。ハードウェアを直接叩くタイプのOS。tetrisなどのゲーム入り</span>
+        </button>
+        <button data-boot="freedos">
+          <span class="os">FreeDOS 1.4</span>
+          <span class="d">BIOS経由で動くDOS。プロンプトまで自動で進む</span>
+        </button>
+        <button data-boot="linux">
+          <span class="os">Linux 6.18</span>
+          <span class="d">32bitプロテクトモード+ページング。数秒でシェルが使える</span>
+        </button>
+      </div>
+      <p class="fine">手元のディスクイメージは、この枠にドロップしても起動できます。</p>
     </div>
     <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
