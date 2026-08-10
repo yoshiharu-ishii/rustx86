@@ -1437,7 +1437,18 @@ impl Machine {
         // レジスタを残すと、再実行が汚れの上に積む。実際に `add mem,reg` の
         // 読みがデマンドページングに当たり、フォールトの器 0xFFFFFFFF を
         // 足した EDX (-1) のまま再実行して、muslのELF解析が1バイトずれた
-        let saved = self.cpu.clone();
+        //
+        // ただし**要るときだけ控える**。控えの使い道は #PF の巻き戻し
+        // (ページング有効時しか起きない) と、ユーザー空間 (CPL=3) の #UD
+        // 巻き戻しの2つ。どちらも起き得ない「ページングOFFかつリング0」—
+        // bzImage の解凍ステブや16bit機の全域 — では、毎命令352バイトの
+        // 複写が純粋な無駄になる。PGは命令の途中で変わらない (mov cr0 は
+        // その後にメモリを触らない) ので、命令の頭の判定で足りる
+        let saved = if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+            Some(self.cpu.clone())
+        } else {
+            None
+        };
         cpu::step(self);
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
@@ -1453,7 +1464,8 @@ impl Machine {
             if self.cpu.cpl() == 3 && self.pending_fault.get().is_none() {
                 self.ud_user.insert(t.reason.clone());
                 self.trap = None;
-                self.cpu = saved;
+                // CPL=3 で実行した命令なら、頭の判定で必ず控えている
+                self.cpu = saved.expect("CPL=3 の命令に控えが無い");
                 cpu::interrupt(self, 6);
                 return;
             }
@@ -1471,7 +1483,8 @@ impl Machine {
             // デコードし、偽の「未実装」トラップが立つことがある。
             // 本当の事件は #PF の方 — トラップは取り消して配送する
             self.trap = None;
-            self.cpu = saved;
+            // #PF はページング有効時にしか起きず、そのときは必ず控えている
+            self.cpu = saved.expect("#PF なのに控えが無い (ページングOFFで#PF?)");
             self.cpu.cr2 = f.la;
             let err = (f.present as u32)
                 | ((f.write as u32) << 1)
