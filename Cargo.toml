@@ -6,3 +6,6 @@ resolver = "2"
 [profile.release]
 opt-level = 3
 lto = true
+# 1ユニットに束ねるとLTOの見通しが広がる。交互A/Bで-2〜3% (perf.md A1)。
+# ビルドは少し遅くなるが、このプロジェクトはビルドより実行が長い
+codegen-units = 1
