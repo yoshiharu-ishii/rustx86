@@ -64,8 +64,8 @@ self.onmessage = (e) => {
     case 'load': {
       if (!emu) break;
       emu.load_state(new Uint8Array(msg.bytes));
-      // 送信済みのシリアルは履歴なので控えに無い。改行でプロンプトを出させる
-      emu.serial_in(new TextEncoder().encode('\n'));
+      // 起動スナップショットと違って**改行は突かない** — 画面には保存時までの
+      // 表示がそのまま残っているので、突くと復元のたびに空プロンプトが積もる
       postMessage({ type: 'loaded' });
       break;
     }
