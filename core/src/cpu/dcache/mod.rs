@@ -424,7 +424,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
         // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
         if exec::may_touch_memory(&uop) {
-            m.guard_save();
+            m.guard_save_slim();
         }
         let ip_linear = m.cpu.ip.wrapping_add(len as u32);
         m.cpu.advance_ip(len as u32);

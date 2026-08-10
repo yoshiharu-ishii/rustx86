@@ -489,6 +489,37 @@ impl Cpu {
         self.cc_op = CC_NONE;
     }
 
+    /// #PF巻き戻し用の**薄い控え** ([`crate::Machine::guard_save`] の速い相棒)。
+    ///
+    /// キャッシュ済みuop (dcache) が書き得るのは 汎用レジスタ・IP・フラグ
+    /// (遅延材料含む) だけ — sregs/hidden/CR/xmm/dr/gdtr はuopの語彙に無い。
+    /// Cpu丸ごと (xmm 128B + hidden 72B + …) を毎回複写するのをやめ、
+    /// 書き得る ~76B だけ控える。フォールバック経路は何でも起こせるので
+    /// 従来どおり丸ごとcloneを使う (控えの種類は Machine 側が覚える)
+    pub(crate) fn save_slim(&self, s: &mut SlimSave) {
+        s.regs = self.regs;
+        s.ip = self.ip;
+        s.flags = self.flags;
+        s.cc_op = self.cc_op;
+        s.cc_w = self.cc_w;
+        s.cc_a = self.cc_a;
+        s.cc_b = self.cc_b;
+        s.cc_cin = self.cc_cin;
+        s.cc_r = self.cc_r;
+    }
+
+    pub(crate) fn restore_slim(&mut self, s: &SlimSave) {
+        self.regs = s.regs;
+        self.ip = s.ip;
+        self.flags = s.flags;
+        self.cc_op = s.cc_op;
+        self.cc_w = s.cc_w;
+        self.cc_a = s.cc_a;
+        self.cc_b = s.cc_b;
+        self.cc_cin = s.cc_cin;
+        self.cc_r = s.cc_r;
+    }
+
     pub fn flag(&self, mask: u32) -> bool {
         // 遅延中でも、対象外のフラグ (IF/DF等) は flags を直接見る。
         // このifは分岐予測が当たり続けるので、eager時代のコストとほぼ同じ
@@ -525,6 +556,20 @@ impl Cpu {
         }
     }
 }
+/// [`Cpu::save_slim`] の器。中身はキャッシュ済みuopが書き得る部分だけ
+#[derive(Default)]
+pub(crate) struct SlimSave {
+    regs: [u32; 8],
+    ip: u32,
+    flags: u32,
+    cc_op: u8,
+    cc_w: u8,
+    cc_a: u32,
+    cc_b: u32,
+    cc_cin: u32,
+    cc_r: u32,
+}
+
 /// プレフィクスの解析結果
 pub struct Decoder {
     pub seg_override: Option<usize>,

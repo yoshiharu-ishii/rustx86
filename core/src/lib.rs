@@ -184,7 +184,9 @@ pub struct Machine {
     /// キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算・jcc・lea等は
     /// #PFが起き得ないので複写ごと省く。機械の状態ではないのでスナップショット外
     pub(crate) fault_save: Cpu,
-    pub(crate) fault_save_valid: bool,
+    /// 薄い控えの器 (キャッシュ済みuop用)。どちらの控えが有効かは kind が語る
+    fault_slim: cpu::SlimSave,
+    fault_save_kind: FaultSaveKind,
     /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
     ///
     /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
@@ -214,6 +216,15 @@ struct TlbEntry {
     writable: bool,
     /// ユーザー (リング3) が触れるか (PDEとPTEのU/Sが両方立っている)
     user_ok: bool,
+}
+
+/// フォールト巻き戻しの控えの種類。
+/// Slim はキャッシュ済みuop用 (書き得る部分だけ)、Full はフォールバック経路用
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultSaveKind {
+    None,
+    Full,
+    Slim,
 }
 
 const TLB_INVALID: u32 = 0xFFFF_FFFF;
@@ -282,7 +293,8 @@ impl Machine {
             trap: None,
             halted: false,
             fault_save: Cpu::new(),
-            fault_save_valid: false,
+            fault_slim: cpu::SlimSave::default(),
+            fault_save_kind: FaultSaveKind::None,
             idle_skipped: 0,
             tlb: (0..TLB_SLOTS)
                 .map(|_| {
@@ -337,7 +349,33 @@ impl Machine {
     pub(crate) fn guard_save(&mut self) {
         if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
             self.fault_save = self.cpu.clone();
-            self.fault_save_valid = true;
+            self.fault_save_kind = FaultSaveKind::Full;
+        }
+    }
+
+    /// [`guard_save`](Self::guard_save) の薄い版 — キャッシュ済みuop用。
+    /// uopが書き得るのは regs/ip/フラグだけなので、そこだけ控える (~76B)。
+    /// Cpu丸ごと (~400B) の複写はプロファイルの memmove 11%だった
+    #[inline]
+    pub(crate) fn guard_save_slim(&mut self) {
+        if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+            self.cpu.save_slim(&mut self.fault_slim);
+            self.fault_save_kind = FaultSaveKind::Slim;
+        }
+    }
+
+    /// 控えからCPUを命令前の姿へ戻す。控えが無ければ false
+    fn guard_restore(&mut self) -> bool {
+        match self.fault_save_kind {
+            FaultSaveKind::None => false,
+            FaultSaveKind::Full => {
+                self.cpu = self.fault_save.clone();
+                true
+            }
+            FaultSaveKind::Slim => {
+                self.cpu.restore_slim(&self.fault_slim);
+                true
+            }
         }
     }
 
@@ -630,7 +668,7 @@ impl Machine {
         // 控えは**実行する側**が入れる (guard_save)。フォールバック経路は毎回、
         // キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算やjccは
         // #PFが起き得ないので、352バイトの複写ごと省ける
-        self.fault_save_valid = false;
+        self.fault_save_kind = FaultSaveKind::None;
         // デバッガが見ているときは従来経路 (before_exec/トレースの意味を守る)。
         // 普段はデコード済み命令キャッシュ経由 — 対象外は中で従来経路に落ちる
         if self.dbg.on {
@@ -654,8 +692,7 @@ impl Machine {
                 self.ud_user.insert(t.reason.clone());
                 self.trap = None;
                 // CPL=3 で実行した命令なら、頭の判定で必ず控えている
-                assert!(self.fault_save_valid, "CPL=3 の命令に控えが無い");
-                self.cpu = self.fault_save.clone();
+                assert!(self.guard_restore(), "CPL=3 の命令に控えが無い");
                 cpu::interrupt(self, 6);
                 return;
             }
@@ -675,10 +712,9 @@ impl Machine {
             self.trap = None;
             // #PF はページング有効時にしか起きず、そのときは必ず控えている
             assert!(
-                self.fault_save_valid,
+                self.guard_restore(),
                 "#PF なのに控えが無い (ページングOFFで#PF?)"
             );
-            self.cpu = self.fault_save.clone();
             self.cpu.cr2 = f.la;
             let err = (f.present as u32)
                 | ((f.write as u32) << 1)
