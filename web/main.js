@@ -130,6 +130,8 @@ let lastLabel = '';
 
 function boot(image, label) {
   lastLabel = label;
+  $('welcomePane').hidden = true;
+  $('screen').hidden = false;
   machine?.stop();
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
@@ -491,6 +493,7 @@ async function select(m) {
   bench = null;
   linux?.destroy();
   linux = null;
+  $('welcomePane').hidden = true;
   $('benchPane').hidden = true;
   $('linuxScreen').hidden = true;
   $('screen').hidden = false;
@@ -558,19 +561,6 @@ async function bootFromUrl(m = current) {
   }
 }
 
-/** 置いてあるイメージのうち、最初に見つかったものを選ぶ */
-async function selectFirstAvailable() {
-  for (const m of MACHINES) {
-    if (!m.image) continue;
-    const head = await fetch(m.image, { method: 'HEAD' }).catch(() => null);
-    if (head?.ok) {
-      await select(m);
-      return true;
-    }
-  }
-  return false;
-}
-
 // 読み込みに失敗すると「読み込み中…」のまま黙って止まる。
 // 何が起きたか分からないのが一番困るので、必ず画面に出す。
 //
@@ -604,7 +594,6 @@ try {
   });
   renderMachines();
   setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
-  await selectFirstAvailable();
   syncControls();
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);

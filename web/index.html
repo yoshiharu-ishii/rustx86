@@ -42,6 +42,16 @@
   #benchPane input, #benchPane select { background: #0d1117; color: #c9d1d9;
                                         border: 1px solid #30363d; border-radius: 4px;
                                         padding: .2rem .4rem; }
+  /* オープニング。マシンを選ぶまで端末の代わりにここが出る */
+  #welcomePane { padding: 2.2rem 2rem; color: #5dbb5d;
+                 font-family: ui-monospace, Menlo, monospace; }
+  #welcomePane .logo { color: #23ff18; font-size: 1.6rem; letter-spacing: .12em;
+                       margin: 0 0 .4rem; }
+  #welcomePane p { margin: .4rem 0; font-size: .92rem; }
+  #welcomePane ul { margin: .8rem 0; padding-left: 1.2rem; font-size: .88rem;
+                    line-height: 1.9; }
+  #welcomePane .hint { color: #7cff7c; margin-top: 1.4rem; }
+
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
      アスペクト比を固定してあるので、縮んでも文字が潰れない。
@@ -158,7 +168,18 @@
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
     </div>
-    <canvas id="screen" tabindex="0"></canvas>
+    <!-- オープニング。いきなりOSが立ち上がるのではなく、まず選んでもらう -->
+    <div id="welcomePane">
+      <p class="logo">rustx86</p>
+      <p>Rustで書いたx86エミュレータ。8086から386まで、本物のOSがブラウザの中で動く。</p>
+      <ul>
+        <li><b>ELKS 0.9.1</b> — 16bit UNIX。8042とテキストVRAMを直接叩く。tetris入り</li>
+        <li><b>FreeDOS 1.4</b> — BIOS経由で動くDOS。A:\> まで自動で進む</li>
+        <li><b>Linux 6.18</b> — 32bitプロテクトモード+ページング。数秒でシェルが出る</li>
+      </ul>
+      <p class="hint">← 左のメニューからマシンを選ぶと、ここが画面になる</p>
+    </div>
+    <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
          違うので canvas を分け、選ばれている方だけを見せる -->
     <canvas id="linuxScreen" tabindex="0" hidden></canvas>
