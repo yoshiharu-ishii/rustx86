@@ -394,7 +394,16 @@ impl Machine {
     /// 止まるのはCPUであって時計ではない。時計を置き去りにすると、
     /// nanosleep したプロセスが永遠に起きない罠 (Tier 3bで実際に踏んだ) を
     /// 逆向きにもう一度踏むことになる。
-    fn idle_fast_forward(&mut self) {
+    ///
+    /// もう一つの約束: **予算 (budget) を超えて飛ばさない。**
+    /// run系は「予算=仮想時間」で回っているのに、ここが1回で次のPITパルスまで
+    /// (100Hzなら10ms ≒ 763k命令分) 飛ぶと、予算6千の run_slice が127倍
+    /// 超過する。呼ぶ側は「頼んだ分だけ進んだ」と勘定するので、アイドル中の
+    /// ゲストの時計だけが実時間の百倍で流れた — ELKSのtetrisは read(2) を
+    /// SIGALRM (300ms) で切ってテンポを作るゲームで、駒が一瞬で積み上がって
+    /// 即ゲームオーバーになった (実際になった)。予算の途中までしか飛ばず、
+    /// 残りは次の呼び出しが続きから飛ぶ。
+    fn idle_fast_forward(&mut self, budget: u64) {
         // 既に挙手があるなら飛ばさない。IF=1なら次のstepで配送されて起きるし、
         // IF=0で寝ている機械の時計だけが暴走するのも防ぐ (従来の1刻みに落とす)
         if self.pending_irq.is_some() || self.pic_service {
@@ -407,7 +416,17 @@ impl Machine {
             return;
         };
         // クロック → tick数 (切り上げ)。パルスが出る tick まで飛ぶ
-        let ticks = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1);
+        let to_irq = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1) as u64;
+        // 予算内に収まる tick 数。最低1 tick は進める — ゼロだと進捗が無く
+        // run系のループが空回りする (超過は高々 tick_countdown ≦ 64命令分)
+        let affordable = if budget <= self.tick_countdown as u64 {
+            1
+        } else {
+            1 + (budget - self.tick_countdown as u64) / INSTRUCTIONS_PER_TICK as u64
+        };
+        // 予算が先に尽きるならパルスの手前で止まる。IRQは出ないので機械は
+        // 寝たままだが、それでよい — 次の呼び出しが続きから飛ぶ
+        let ticks = to_irq.min(affordable) as u32;
         // 命令数に換算: 次のtickまでの残り + そこから先のtick分。
         // この間 step() は呼ばれなかったことになるので、TSCをまとめて進める
         let skip = self.tick_countdown as u64 + (ticks as u64 - 1) * INSTRUCTIONS_PER_TICK as u64;
@@ -1338,7 +1357,17 @@ impl Machine {
     /// 順序に意味がある。**割り込みの受付は命令の途中ではなく境界で行う**。
     /// 命令の実行中に割り込むと、書き換え途中のレジスタやスタックのまま
     /// ハンドラへ飛ぶことになり、`IRET` で戻っても再開できない。
+    /// 1命令進める。アイドル早送りは無制限 (次のPITパルスまで一気に飛ぶ)。
+    /// 予算の中で回すときは [`Self::step_budgeted`] を使う — run系が
+    /// 「予算=仮想時間」の約束を守るのはそちら経由である
+    #[inline]
     pub fn step(&mut self) {
+        self.step_budgeted(u64::MAX);
+    }
+
+    /// 1命令進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算) までに
+    /// 制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる
+    pub fn step_budgeted(&mut self, idle_budget: u64) {
         // 未実装で止まっていたら、以後は何もしない (run系がここで抜ける)
         if self.trap.is_some() {
             return;
@@ -1389,7 +1418,7 @@ impl Machine {
         }
 
         if self.halted {
-            self.idle_fast_forward();
+            self.idle_fast_forward(idle_budget);
             return;
         }
 
@@ -1543,7 +1572,10 @@ impl Machine {
             if self.trap.is_some() {
                 break; // 未実装にぶつかった。生きたまま止まっている
             }
-            self.step();
+            // 残り予算を渡す — アイドルの早送りが予算を飛び越えないように。
+            // 飛び越えると「頼んだ分だけ進んだ」という呼ぶ側の勘定が壊れ、
+            // 暇な機械の時計だけが速く回る (ELKS tetris が即死した原因)
+            self.step_budgeted(max_instructions - elapsed);
             // デバッガが止めたら抜ける。**見張っていなければ真偽値1つ**なので
             // 計測経路には効かない。
             //
