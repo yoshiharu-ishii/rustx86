@@ -179,6 +179,12 @@ pub struct Machine {
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
     pub op_counts: Vec<u64>,
+    /// フォールト巻き戻し用の命令前CPU控え (常設の器 + この命令で控えたかの印)。
+    /// **実行する側が「要るときだけ」控える**: フォールバック経路は従来どおり毎回、
+    /// キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算・jcc・lea等は
+    /// #PFが起き得ないので複写ごと省く。機械の状態ではないのでスナップショット外
+    pub(crate) fault_save: Cpu,
+    pub(crate) fault_save_valid: bool,
     /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
     ///
     /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
@@ -275,6 +281,8 @@ impl Machine {
             trap_ip: 0,
             trap: None,
             halted: false,
+            fault_save: Cpu::new(),
+            fault_save_valid: false,
             idle_skipped: 0,
             tlb: (0..TLB_SLOTS)
                 .map(|_| {
@@ -319,6 +327,18 @@ impl Machine {
     /// PICに未処理の要求があるか (CPUが受けにいくべきか)
     fn pic_has_service(&self) -> bool {
         self.pic_service
+    }
+
+    /// フォールトに備えてCPUを控える (要るときだけ呼ばれる)。
+    /// 控えの使い道は #PF 巻き戻し (ページング有効時のみ) と CPL=3 の #UD
+    /// 巻き戻しの2つなので、その条件以外では何もしない。
+    /// Boxの器は使い回して確保を避ける
+    #[inline]
+    pub(crate) fn guard_save(&mut self) {
+        if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+            self.fault_save = self.cpu.clone();
+            self.fault_save_valid = true;
+        }
     }
 
     /// アイドル (HLT) の早送り。
@@ -476,12 +496,20 @@ impl Machine {
     /// 「予算=仮想時間」の約束を守るのはそちら経由である
     #[inline]
     pub fn step(&mut self) {
-        self.step_budgeted(u64::MAX);
+        // 連結は0 — 「1命令進める」の契約を守る (デバッガ・cosimが頼る粒度)
+        self.step_inner(u64::MAX, 0);
     }
 
-    /// 1命令進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算) までに
-    /// 制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる
+    /// 1命令**以上**進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算)
+    /// までに制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる。
+    /// 予算の残りはブロック連結 (B4) の連結許可量も兼ねる — 進んだ量は
+    /// 常にTSCに現れるので、run系の「予算=仮想時間」の約束はそのまま保たれる
     pub fn step_budgeted(&mut self, idle_budget: u64) {
+        self.step_inner(idle_budget, idle_budget.saturating_sub(1));
+    }
+
+    /// 実体。`chain_extra` = 最初の1命令に**追加して**連結実行してよい命令数
+    fn step_inner(&mut self, idle_budget: u64, chain_extra: u64) {
         // 未実装で止まっていたら、以後は何もしない (run系がここで抜ける)
         if self.trap.is_some() {
             return;
@@ -599,17 +627,17 @@ impl Machine {
         // bzImage の解凍ステブや16bit機の全域 — では、毎命令352バイトの
         // 複写が純粋な無駄になる。PGは命令の途中で変わらない (mov cr0 は
         // その後にメモリを触らない) ので、命令の頭の判定で足りる
-        let saved = if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
-            Some(self.cpu.clone())
-        } else {
-            None
-        };
+        // 控えは**実行する側**が入れる (guard_save)。フォールバック経路は毎回、
+        // キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算やjccは
+        // #PFが起き得ないので、352バイトの複写ごと省ける
+        self.fault_save_valid = false;
         // デバッガが見ているときは従来経路 (before_exec/トレースの意味を守る)。
         // 普段はデコード済み命令キャッシュ経由 — 対象外は中で従来経路に落ちる
         if self.dbg.on {
+            self.guard_save();
             cpu::step(self);
         } else {
-            cpu::dcache::step_cached(self);
+            cpu::dcache::step_cached(self, chain_extra);
         }
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
@@ -626,7 +654,8 @@ impl Machine {
                 self.ud_user.insert(t.reason.clone());
                 self.trap = None;
                 // CPL=3 で実行した命令なら、頭の判定で必ず控えている
-                self.cpu = saved.expect("CPL=3 の命令に控えが無い");
+                assert!(self.fault_save_valid, "CPL=3 の命令に控えが無い");
+                self.cpu = self.fault_save.clone();
                 cpu::interrupt(self, 6);
                 return;
             }
@@ -645,7 +674,11 @@ impl Machine {
             // 本当の事件は #PF の方 — トラップは取り消して配送する
             self.trap = None;
             // #PF はページング有効時にしか起きず、そのときは必ず控えている
-            self.cpu = saved.expect("#PF なのに控えが無い (ページングOFFで#PF?)");
+            assert!(
+                self.fault_save_valid,
+                "#PF なのに控えが無い (ページングOFFで#PF?)"
+            );
+            self.cpu = self.fault_save.clone();
             self.cpu.cr2 = f.la;
             let err = (f.present as u32)
                 | ((f.write as u32) << 1)
