@@ -35,7 +35,7 @@ fn restored_machine_follows_the_same_path() {
     assert_eq!(a.text_screen_string(), b.text_screen_string(), "画面が違う");
     assert_eq!(a.cpu.regs, b.cpu.regs, "レジスタが違う");
     assert_eq!(a.cpu.ip, b.cpu.ip, "IPが違う");
-    assert_eq!(a.cpu.flags, b.cpu.flags, "フラグが違う");
+    assert_eq!(a.cpu.eflags(), b.cpu.eflags(), "フラグが違う");
     assert_eq!(a.halted, b.halted);
 }
 

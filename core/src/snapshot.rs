@@ -208,7 +208,8 @@ impl Machine {
             w.u16(s);
         }
         w.u32(self.cpu.ip);
-        w.u32(self.cpu.flags);
+        // 遅延フラグは具現化した値で保存する — スナップショット形式は変わらない
+        w.u32(self.cpu.eflags());
         // プロテクトモードの状態 (v2)。隠しレジスタを落とすと、復元した瞬間に
         // 全アドレスが嘘になる — セレクタだけでは base を再構成できない
         w.u32(self.cpu.cr0);
@@ -285,7 +286,7 @@ impl Machine {
             m.cpu.sregs[i] = r.u16()?;
         }
         m.cpu.ip = r.u32()?;
-        m.cpu.flags = r.u32()?;
+        m.cpu.set_eflags(r.u32()?);
         m.cpu.cr0 = r.u32()?;
         m.cpu.gdtr_base = r.u32()?;
         m.cpu.gdtr_limit = r.u16()?;

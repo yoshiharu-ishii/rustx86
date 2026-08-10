@@ -215,35 +215,13 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
 
         // --- INC/DEC r16 ---
-        0x40..=0x47 => {
+        // **CFは触らない** — INC/DECがADD/SUBと違う唯一の点で、
+        // 多倍長の加算ループでキャリーを壊さないための配慮である
+        0x40..=0x4F => {
             let (r, w) = ((op & 7) as usize, d.opsize32);
             let a = m.cpu.reg_w(r, w);
-            let v = if w {
-                a.wrapping_add(1)
-            } else {
-                (a as u16).wrapping_add(1) as u32
-            };
+            let v = alu::inc_dec_w(&mut m.cpu, a, op >= 0x48, w);
             m.cpu.set_reg_w(r, v, w);
-            // **CFは触らない** — INC/DECがADD/SUBと違う唯一の点で、
-            // 多倍長の加算ループでキャリーを壊さないための配慮である
-            m.cpu
-                .set_flag(OF, a == if w { 0x7FFF_FFFF } else { 0x7FFF });
-            m.cpu.set_flag(AF, a & 0xF == 0xF);
-            alu::set_szp_w(&mut m.cpu, v, w);
-        }
-        0x48..=0x4F => {
-            let (r, w) = ((op & 7) as usize, d.opsize32);
-            let a = m.cpu.reg_w(r, w);
-            let v = if w {
-                a.wrapping_sub(1)
-            } else {
-                (a as u16).wrapping_sub(1) as u32
-            };
-            m.cpu.set_reg_w(r, v, w);
-            m.cpu
-                .set_flag(OF, a == if w { 0x8000_0000 } else { 0x8000 });
-            m.cpu.set_flag(AF, a & 0xF == 0);
-            alu::set_szp_w(&mut m.cpu, v, w);
         }
 
         // --- PUSH/POP ---
@@ -673,7 +651,7 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // 読み直して残っているか見る」というもので、そのためには
         // 32bit幅でフラグを出し入れできる必要がある
         0x9C => {
-            let f = m.cpu.flags | 0x0002;
+            let f = m.cpu.eflags() | 0x0002;
             if d.opsize32 {
                 // 上位2bit (VM/RF) はPUSHFDでは常に0で出る
                 push_w(m, f & 0x00FC_FFFF, true);
@@ -702,15 +680,17 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             } else {
                 0x0FD5
             };
-            m.cpu.flags = (m.cpu.flags & !mask) | (f & mask) | 0x0002;
+            let cur = m.cpu.eflags();
+            m.cpu.set_eflags((cur & !mask) | (f & mask) | 0x0002);
         }
         0x9E => {
             // SAHF: AHの下位バイトをフラグへ
             let ah = m.cpu.reg8(4) as u32;
-            m.cpu.flags = (m.cpu.flags & !0xD5) | (ah & 0xD5) | 0x0002;
+            let cur = m.cpu.eflags();
+            m.cpu.set_eflags((cur & !0xD5) | (ah & 0xD5) | 0x0002);
         }
         0x9F => {
-            let f = (m.cpu.flags as u8 & 0xD5) | 0x02;
+            let f = (m.cpu.eflags() as u8 & 0xD5) | 0x02;
             m.cpu.set_reg8(4, f);
         }
         0xA8 => {
