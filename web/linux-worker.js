@@ -5,7 +5,8 @@
 // 60fpsで更新でき、キー入力も届く。wasm はここで初期化して抱える。
 //
 // メインとの約束 (postMessage):
-//   受信: {type:'boot', kernel, initrd, cmdline, ramMb}  起動する
+//   受信: {type:'boot', kernel, initrd, cmdline, ramMb}  カーネルから起動する
+//         {type:'boot', snapshot}                        起動済み控えから復元する
 //         {type:'input', bytes}                          シリアルへ流す
 //         {type:'pause'} / {type:'resume'}
 //   送信: {type:'ready'}                     wasm初期化完了
@@ -27,12 +28,21 @@ self.onmessage = (e) => {
   const msg = e.data;
   switch (msg.type) {
     case 'boot': {
-      emu = Emulator.from_bzimage(
-        new Uint8Array(msg.kernel),
-        msg.initrd ? new Uint8Array(msg.initrd) : undefined,
-        msg.cmdline ?? 'console=ttyS0',
-        msg.ramMb ?? 128,
-      );
+      if (msg.snapshot) {
+        // 起動済みスナップショットから復元 (数秒)。
+        // 送信済みのシリアル出力は履歴なので控えに入っていない —
+        // 空画面のままだと死んで見えるので、改行を1つ流して
+        // シェルにプロンプトを出させる
+        emu = Emulator.from_snapshot(new Uint8Array(msg.snapshot));
+        emu.serial_in(new TextEncoder().encode('\n'));
+      } else {
+        emu = Emulator.from_bzimage(
+          new Uint8Array(msg.kernel),
+          msg.initrd ? new Uint8Array(msg.initrd) : undefined,
+          msg.cmdline ?? 'console=ttyS0',
+          msg.ramMb ?? 128,
+        );
+      }
       running = true;
       instrs = 0;
       lastMeasure = performance.now();

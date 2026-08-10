@@ -144,6 +144,17 @@ impl Emulator {
         Ok(Emulator { m })
     }
 
+    /// 起動済みスナップショットから機械を丸ごと復元する。
+    ///
+    /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を
+    /// 控えておき、次からはそこから始める (Firecrackerのsnapshot相当)。
+    /// RAMサイズはスナップショットが暗黙に持つので引数は要らない
+    pub fn from_snapshot(data: &[u8]) -> Result<Emulator, JsError> {
+        let mut m = Machine::new();
+        m.load_state(data).map_err(|e| JsError::new(&e))?;
+        Ok(Emulator { m })
+    }
+
     /// シリアル (UART) に溜まった出力を取り出して返す。**読むと消える** —
     /// 端末は差分だけ受け取ればよい。Linuxのコンソールはここに出る
     pub fn serial_out(&mut self) -> Vec<u8> {
