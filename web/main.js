@@ -316,10 +316,10 @@ $('restore').addEventListener('click', async () => {
 
 $('save').addEventListener('click', () => {
   if (linux) {
-    // シリアル全文 = dmesg込みのブートログ (CIの証跡と同じもの)
+    // 端末が見た全文 (履歴+画面)。VGA機のログ保存と同じ意味論
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([linux.log], { type: 'text/plain' }));
-    a.download = 'linux-boot.log';
+    a.href = URL.createObjectURL(new Blob([linux.logText], { type: 'text/plain' }));
+    a.download = 'linux.log';
     a.click();
     URL.revokeObjectURL(a.href);
     return;
