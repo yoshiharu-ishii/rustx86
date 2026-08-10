@@ -110,6 +110,15 @@ pub const OF: u32 = 1 << 11;
 /// デバッガのシングルステップはこれで実現されている
 pub const TF: u32 = 1 << 8;
 
+/// ALUが書く6フラグ (CF PF AF ZF SF OF) — 遅延評価の対象。
+/// IF/DF/TF等の**制御フラグは対象外** (ALUは触らないので flags フィールドが常に真実)
+const CC_MASK: u32 = CF | PF | AF | ZF | SF | OF;
+/// cc_op の「遅延なし」— flags フィールドが6フラグ含めて真実
+const CC_NONE: u8 = 0xFF;
+/// cc_op のINC/DEC (CFだけは flags フィールド側に保存されている)
+const CC_INC: u8 = 8;
+const CC_DEC: u8 = 9;
+
 #[derive(Clone)]
 pub struct Cpu {
     /// AX CX DX BX SP BP SI DI (将来の32bit拡張を見据えてu32で保持)
@@ -121,7 +130,26 @@ pub struct Cpu {
     /// 幅を決めるのはモードとCSのDビットで、レジスタ自体は最初から32bit
     /// (regsをu32で持っているのと同じ判断)
     pub ip: u32,
-    pub flags: u32,
+    /// EFLAGS — ただし**ALUの6フラグ (CC_MASK) は遅延評価**で、cc_op が
+    /// CC_NONE でない間は cc_* の材料が真実である。外から読むときは
+    /// [`eflags`](Self::eflags)、書くときは [`set_eflags`](Self::set_eflags) を
+    /// 通すこと (privateなのはこの規律をコンパイラに守らせるため)。
+    ///
+    /// なぜ遅延か: フラグは**書かれる回数 >> 読まれる回数**。ADD/SUB/CMPの
+    /// たびに6フラグを合成しても、大半は次のALU命令に上書きされて誰にも
+    /// 読まれない。そこで演算の材料 (op, a, b, r) だけ控えて、読まれた瞬間に
+    /// 必要な1ビットだけ計算する (QEMUの cc_op/cc_src/cc_dst と同じ考え方)
+    flags: u32,
+    /// 遅延フラグの材料: 最後にフラグを書いたALU演算の種別。
+    /// 0..=7 = alu.rs の op (7=CMPはSUBと同じ)、CC_INC/CC_DEC、CC_NONE
+    cc_op: u8,
+    /// 幅: 0=8bit / 1=16bit / 2=32bit
+    cc_w: u8,
+    /// 材料: オペランドa・b (幅でマスク済み)、キャリー入力 (ADC/SBB)、結果
+    cc_a: u32,
+    cc_b: u32,
+    cc_cin: u32,
+    cc_r: u32,
     /// CR0。bit0 = PE (Protection Enable) / bit31 = PG (Paging)
     pub cr0: u32,
     /// CR2。**フォールトした線形アドレス** (まだ#PF配送はしないので観測用)
@@ -186,6 +214,12 @@ impl Cpu {
             sregs: [0; 6],
             ip: 0,
             flags: 0x0002, // bit1は常に1
+            cc_op: CC_NONE,
+            cc_w: 0,
+            cc_a: 0,
+            cc_b: 0,
+            cc_cin: 0,
+            cc_r: 0,
             cr0: 0,
             cr2: 0,
             cr3: 0,
@@ -337,8 +371,139 @@ impl Cpu {
         }
     }
 
+    // ---------- 遅延フラグ (lazy flags) ----------
+    //
+    // 読み書きの規律: 6フラグ (CC_MASK) は cc_op が立っている間 cc_* から
+    // 計算する。それ以外 (IF/DF/TF...) は常に flags フィールドが真実。
+    // set_flag で6フラグのどれかを**部分的に**書く命令 (シフト・MUL・BT等) は
+    // 先に materialize してから書く — 意味論は従来と1bitも変わらない。
+
+    /// ALU演算の材料を控える (フラグはまだ計算しない)。alu.rs だけが呼ぶ
+    #[inline]
+    pub(super) fn set_cc(&mut self, op: u8, w: u8, a: u32, b: u32, cin: u32, r: u32) {
+        self.cc_op = op;
+        self.cc_w = w;
+        self.cc_a = a;
+        self.cc_b = b;
+        self.cc_cin = cin;
+        self.cc_r = r;
+    }
+
+    /// INC/DEC用: CFだけは前の値を引き継ぐので、遅延状態を上書きする**前に**
+    /// CFを計算して flags のビットへ退避する
+    #[inline]
+    pub(super) fn set_cc_incdec(&mut self, op: u8, w: u8, a: u32, r: u32) {
+        let cf = self.flag(CF);
+        self.set_cc(op, w, a, 1, 0, r);
+        if cf {
+            self.flags |= CF;
+        } else {
+            self.flags &= !CF;
+        }
+    }
+
+    /// 幅の符号ビット (0x80 / 0x8000 / 0x8000_0000)
+    #[inline]
+    fn cc_sign(&self) -> u32 {
+        1u32 << ((8 << self.cc_w) - 1)
+    }
+
+    #[inline]
+    fn cc_cf(&self) -> bool {
+        let (a, b, cin) = (self.cc_a as u64, self.cc_b as u64, self.cc_cin as u64);
+        match self.cc_op {
+            0 | 2 => a + b + cin > (self.cc_sign() as u64 * 2 - 1), // ADD/ADC: 幅を溢れた
+            3 | 5 | 7 => a < b + cin,                               // SBB/SUB/CMP: 借りた
+            CC_INC | CC_DEC => self.flags & CF != 0,                // 不変 (flagsへ退避済み)
+            _ => false,                                             // 論理演算はCF=0
+        }
+    }
+
+    #[inline]
+    fn cc_of(&self) -> bool {
+        let (a, b, r, s) = (self.cc_a, self.cc_b, self.cc_r, self.cc_sign());
+        match self.cc_op {
+            0 | 2 => (a ^ !b) & (a ^ r) & s != 0, // 同符号を足して符号が変わった
+            3 | 5 | 7 => (a ^ b) & (a ^ r) & s != 0,
+            CC_INC => a == s - 1, // 0x7F.. → 0x80..
+            CC_DEC => a == s,     // 0x80.. → 0x7F..
+            _ => false,
+        }
+    }
+
+    #[inline]
+    fn cc_af(&self) -> bool {
+        let (a, b, cin) = (self.cc_a, self.cc_b, self.cc_cin);
+        match self.cc_op {
+            0 | 2 => (a & 0xF) + (b & 0xF) + cin > 0xF,
+            3 | 5 | 7 => (a & 0xF) < (b & 0xF) + cin,
+            CC_INC => a & 0xF == 0xF,
+            CC_DEC => a & 0xF == 0,
+            _ => false,
+        }
+    }
+
+    /// 遅延中の6フラグをまとめて計算する (materialize と eflags の共通部)
+    fn cc_compute(&self) -> u32 {
+        let mut f = 0;
+        if self.cc_cf() {
+            f |= CF;
+        }
+        if self.cc_of() {
+            f |= OF;
+        }
+        if self.cc_af() {
+            f |= AF;
+        }
+        if self.cc_r == 0 {
+            f |= ZF;
+        }
+        if self.cc_r & self.cc_sign() != 0 {
+            f |= SF;
+        }
+        if (self.cc_r as u8).count_ones().is_multiple_of(2) {
+            f |= PF;
+        }
+        f
+    }
+
+    /// EFLAGS全体の**具現化された値** (純粋 — 状態は変えない)。
+    /// PUSHF・割り込み配送・スナップショット・cosim照合はここを通る
+    pub fn eflags(&self) -> u32 {
+        if self.cc_op == CC_NONE {
+            self.flags
+        } else {
+            (self.flags & !CC_MASK) | self.cc_compute()
+        }
+    }
+
+    /// EFLAGS全体を書く (POPF/IRET/スナップショット復元)。遅延状態は捨てる
+    pub fn set_eflags(&mut self, v: u32) {
+        self.flags = v;
+        self.cc_op = CC_NONE;
+    }
+
+    /// 遅延分を flags フィールドへ畳み込む。以後 flags が真実に戻る
+    fn materialize(&mut self) {
+        self.flags = self.eflags();
+        self.cc_op = CC_NONE;
+    }
+
     pub fn flag(&self, mask: u32) -> bool {
-        self.flags & mask != 0
+        // 遅延中でも、対象外のフラグ (IF/DF等) は flags を直接見る。
+        // このifは分岐予測が当たり続けるので、eager時代のコストとほぼ同じ
+        if self.cc_op == CC_NONE || mask & CC_MASK == 0 {
+            return self.flags & mask != 0;
+        }
+        match mask {
+            CF => self.cc_cf(),
+            ZF => self.cc_r == 0,
+            SF => self.cc_r & self.cc_sign() != 0,
+            OF => self.cc_of(),
+            PF => (self.cc_r as u8).count_ones().is_multiple_of(2),
+            AF => self.cc_af(),
+            _ => self.eflags() & mask != 0, // 複数ビットまとめての問い合わせ
+        }
     }
 
     /// BIOS HLE が「成功/失敗」を返すのに使う。x86のBIOSは慣例として
@@ -348,6 +513,11 @@ impl Cpu {
     }
 
     pub fn set_flag(&mut self, mask: u32, on: bool) {
+        // 6フラグの一部だけ書く命令 (シフト・MUL・BT・SETcc後の补正等) は、
+        // 書かない残りが遅延材料に残っていると食い違う — 先に具現化する
+        if self.cc_op != CC_NONE && mask & CC_MASK != 0 {
+            self.materialize();
+        }
         if on {
             self.flags |= mask;
         } else {

@@ -420,7 +420,7 @@ impl Machine {
         let addr = cpu::operand::linear(self.cpu.sregs[cpu::SS], sp.wrapping_add(4));
         let stacked = self.read16(addr);
         let keep = (cpu::CF | cpu::ZF) as u16;
-        self.write16(addr, (stacked & !keep) | (self.cpu.flags as u16 & keep));
+        self.write16(addr, (stacked & !keep) | (self.cpu.eflags() as u16 & keep));
     }
 
     /// カーソルの位置 (行, 桁)。CRTCが持っている

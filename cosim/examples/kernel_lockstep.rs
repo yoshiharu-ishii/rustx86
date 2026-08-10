@@ -42,7 +42,7 @@ fn main() {
     for (ur, i) in gpr {
         uc.reg_write(ur, m.cpu.regs[i] as u64).unwrap();
     }
-    uc.reg_write(RegisterX86::EFLAGS, m.cpu.flags as u64 | 2)
+    uc.reg_write(RegisterX86::EFLAGS, m.cpu.eflags() as u64 | 2)
         .unwrap();
 
     // GDTR は64bit超の特殊レジスタなので reg_write_long で

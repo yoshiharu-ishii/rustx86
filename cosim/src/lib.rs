@@ -90,7 +90,7 @@ pub fn run_ours(tc: &TestCase) -> State {
     }
     m.cpu.regs[..8].copy_from_slice(&tc.regs.map(|v| v as u32));
     m.cpu.sregs[..4].copy_from_slice(&tc.sregs);
-    m.cpu.flags = tc.flags as u32 | 0x0002;
+    m.cpu.set_eflags(tc.flags as u32 | 0x0002);
     m.cpu.set_cs_ip(0, CODE_ADDR);
     m.step();
     let mut data = [0u8; 16];
@@ -104,7 +104,8 @@ pub fn run_ours(tc: &TestCase) -> State {
     State {
         regs: std::array::from_fn(|i| m.cpu.regs[i] as u16),
         sregs: std::array::from_fn(|i| m.cpu.sregs[i]),
-        flags: m.cpu.flags as u16 & FLAG_MASK_ALL,
+        // 遅延フラグを具現化して照合する — ここが嘘をつくとcosimの意味が無い
+        flags: m.cpu.eflags() as u16 & FLAG_MASK_ALL,
         ip: m.cpu.ip as u16,
         data,
         stack,

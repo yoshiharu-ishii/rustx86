@@ -4,116 +4,44 @@
 //! オーバーフロー) は境界値でしか姿を現さない。ここがバグの主産地なので
 //! co-simで重点的に検証している。
 
-use super::{Cpu, AF, CF, OF, PF, SF, ZF};
+use super::{Cpu, CF, OF, PF, SF, ZF};
 
-pub fn alu8(c: &mut Cpu, op: u8, a: u8, b: u8) -> u8 {
-    let carry = c.flag(CF) as u16;
-    let (r, cf, of, af) = match op {
-        0 => {
-            let r = a as u16 + b as u16;
-            (
-                r,
-                r > 0xFF,
-                ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0,
-                (a & 0xF) + (b & 0xF) > 0xF,
-            )
-        }
-        1 => ((a | b) as u16, false, false, false),
-        2 => {
-            let r = a as u16 + b as u16 + carry;
-            (
-                r,
-                r > 0xFF,
-                ((a ^ !b) & (a ^ r as u8)) & 0x80 != 0,
-                (a & 0xF) + (b & 0xF) + carry as u8 > 0xF,
-            )
-        }
-        3 => {
-            let r = (a as u16).wrapping_sub(b as u16).wrapping_sub(carry);
-            (
-                r,
-                (a as u16) < b as u16 + carry,
-                ((a ^ b) & (a ^ r as u8)) & 0x80 != 0,
-                (a & 0xF) < (b & 0xF) + carry as u8,
-            )
-        }
-        4 => ((a & b) as u16, false, false, false),
-        5 | 7 => {
-            let r = (a as u16).wrapping_sub(b as u16);
-            (
-                r,
-                (a as u16) < b as u16,
-                ((a ^ b) & (a ^ r as u8)) & 0x80 != 0,
-                (a & 0xF) < (b & 0xF),
-            )
-        }
-        _ => ((a ^ b) as u16, false, false, false), // 6 = XOR
+/// ALU本体 — 幅を問わない共通部。**フラグはここでは計算しない**。
+///
+/// 演算の材料 (op, a, b, キャリー入力, 結果) を [`Cpu::set_cc`] に控えるだけで、
+/// フラグは読まれた瞬間に cpu/mod.rs の cc_* が計算する (遅延評価)。
+/// フラグの式そのものは cc_cf/cc_of/cc_af に移った — 意味論の原本はそちら。
+#[inline]
+fn alu_lazy(c: &mut Cpu, op: u8, a: u32, b: u32, w: u8) -> u32 {
+    let mask = (1u64 << (8 << w)) - 1;
+    let cin = match op {
+        2 | 3 => c.flag(CF) as u32, // ADC/SBBだけ前のCFを食う (遅延中なら1bitだけ計算)
+        _ => 0,
     };
-    let r8 = r as u8;
-    c.set_flag(CF, cf);
-    c.set_flag(OF, of);
-    c.set_flag(AF, af);
-    set_szp8(c, r8);
+    let r = match op {
+        0 | 2 => (a as u64 + b as u64 + cin as u64) & mask,
+        1 => (a | b) as u64,
+        3 | 5 | 7 => (a as u64)
+            .wrapping_sub(b as u64)
+            .wrapping_sub(cin as u64)
+            & mask,
+        4 => (a & b) as u64,
+        _ => (a ^ b) as u64, // 6 = XOR
+    } as u32;
+    c.set_cc(op, w, a, b, cin, r);
     if op == 7 {
         a
     } else {
-        r8
+        r
     } // CMPは結果を書き戻さない
 }
 
+pub fn alu8(c: &mut Cpu, op: u8, a: u8, b: u8) -> u8 {
+    alu_lazy(c, op, a as u32, b as u32, 0) as u8
+}
+
 pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
-    let carry = c.flag(CF) as u32;
-    let (r, cf, of, af) = match op {
-        0 => {
-            let r = a as u32 + b as u32;
-            (
-                r,
-                r > 0xFFFF,
-                ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0,
-                (a & 0xF) + (b & 0xF) > 0xF,
-            )
-        }
-        1 => ((a | b) as u32, false, false, false),
-        2 => {
-            let r = a as u32 + b as u32 + carry;
-            (
-                r,
-                r > 0xFFFF,
-                ((a ^ !b) & (a ^ r as u16)) & 0x8000 != 0,
-                (a & 0xF) + (b & 0xF) + carry as u16 > 0xF,
-            )
-        }
-        3 => {
-            let r = (a as u32).wrapping_sub(b as u32).wrapping_sub(carry);
-            (
-                r,
-                (a as u32) < b as u32 + carry,
-                ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0,
-                (a & 0xF) < (b & 0xF) + carry as u16,
-            )
-        }
-        4 => ((a & b) as u32, false, false, false),
-        5 | 7 => {
-            let r = (a as u32).wrapping_sub(b as u32);
-            (
-                r,
-                (a as u32) < b as u32,
-                ((a ^ b) & (a ^ r as u16)) & 0x8000 != 0,
-                (a & 0xF) < (b & 0xF),
-            )
-        }
-        _ => ((a ^ b) as u32, false, false, false),
-    };
-    let r16 = r as u16;
-    c.set_flag(CF, cf);
-    c.set_flag(OF, of);
-    c.set_flag(AF, af);
-    set_szp16(c, r16);
-    if op == 7 {
-        a
-    } else {
-        r16
-    }
+    alu_lazy(c, op, a as u32, b as u32, 1) as u16
 }
 
 /// 32bit版。`0x66` プレフィクスが付いたときの演算。
@@ -122,58 +50,32 @@ pub fn alu16(c: &mut Cpu, op: u8, a: u16, b: u16) -> u16 {
 /// 8/16/32で構造が完全に平行しているのは偶然ではなく、
 /// 386が16bitの意味論をそのまま広げる形で拡張されたからである。
 pub fn alu32(c: &mut Cpu, op: u8, a: u32, b: u32) -> u32 {
-    let carry = c.flag(CF) as u64;
-    let (r, cf, of, af) = match op {
-        0 => {
-            let r = a as u64 + b as u64;
-            (
-                r,
-                r > 0xFFFF_FFFF,
-                ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0,
-                (a & 0xF) + (b & 0xF) > 0xF,
-            )
-        }
-        1 => ((a | b) as u64, false, false, false),
-        2 => {
-            let r = a as u64 + b as u64 + carry;
-            (
-                r,
-                r > 0xFFFF_FFFF,
-                ((a ^ !b) & (a ^ r as u32)) & 0x8000_0000 != 0,
-                (a & 0xF) + (b & 0xF) + carry as u32 > 0xF,
-            )
-        }
-        3 => {
-            let r = (a as u64).wrapping_sub(b as u64).wrapping_sub(carry);
-            (
-                r,
-                (a as u64) < b as u64 + carry,
-                ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0,
-                (a & 0xF) < (b & 0xF) + carry as u32,
-            )
-        }
-        4 => ((a & b) as u64, false, false, false),
-        5 | 7 => {
-            let r = (a as u64).wrapping_sub(b as u64);
-            (
-                r,
-                (a as u64) < b as u64,
-                ((a ^ b) & (a ^ r as u32)) & 0x8000_0000 != 0,
-                (a & 0xF) < (b & 0xF),
-            )
-        }
-        _ => ((a ^ b) as u64, false, false, false),
-    };
-    let r32 = r as u32;
-    c.set_flag(CF, cf);
-    c.set_flag(OF, of);
-    c.set_flag(AF, af);
-    set_szp32(c, r32);
-    if op == 7 {
-        a
+    alu_lazy(c, op, a, b, 2)
+}
+
+/// INC/DEC (8bit)。ADD/SUBと違い**CFだけは触らない** — 多倍長加算ループの
+/// キャリーを壊さないための8086以来の配慮。遅延側では CC_INC/CC_DEC
+pub fn inc_dec8(c: &mut Cpu, a: u8, dec: bool) -> u8 {
+    let r = if dec {
+        a.wrapping_sub(1)
     } else {
-        r32
-    }
+        a.wrapping_add(1)
+    };
+    c.set_cc_incdec(if dec { super::CC_DEC } else { super::CC_INC }, 0, a as u32, r as u32);
+    r
+}
+
+/// INC/DEC (16/32bit、幅は実行時に選ぶ)
+pub fn inc_dec_w(c: &mut Cpu, a: u32, dec: bool, wide: bool) -> u32 {
+    let (w, mask) = if wide { (2, 0xFFFF_FFFF) } else { (1, 0xFFFF) };
+    let a = a & mask;
+    let r = if dec {
+        a.wrapping_sub(1)
+    } else {
+        a.wrapping_add(1)
+    } & mask;
+    c.set_cc_incdec(if dec { super::CC_DEC } else { super::CC_INC }, w, a, r);
+    r
 }
 
 /// 幅を実行時に選ぶALU。`0x66` の有無で16bitと32bitを切り替える。
