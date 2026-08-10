@@ -4,7 +4,10 @@
 //! ヘッダの解釈は [`crate::bzimage`] / [`crate::elf`] が持ち、ここは
 //! **メモリへの配置と最初のレジスタ状態**だけを受け持つ。
 
-use crate::{bzimage, cpu, elf, Disk, Machine};
+pub mod bzimage;
+pub mod elf;
+
+use crate::{cpu, Disk, Machine};
 
 impl Machine {
     /// ディスクイメージを入れ、その先頭セクタからブートする

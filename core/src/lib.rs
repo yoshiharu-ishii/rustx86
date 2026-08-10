@@ -1,15 +1,17 @@
 pub mod bios;
-mod boot;
-pub mod bus;
-pub mod bzimage;
+pub mod boot;
 pub mod cp437;
 pub mod cpu;
 pub mod debug;
 pub mod dev;
 pub mod disk;
-pub mod elf;
-mod mem;
+pub mod mem;
 pub mod snapshot;
+
+// 移動前のパス (rustx86_core::bzimage 等) を保つ再エクスポート。
+// テスト・wasm・cosim の参照はこれで壊れない
+pub use boot::{bzimage, elf};
+pub use mem::bus;
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
