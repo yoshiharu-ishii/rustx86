@@ -92,6 +92,33 @@ fn dec_modrm(b: &[u8], i: &mut usize, seg_override: Option<u8>) -> Option<(u8, R
 
 /// 物理 `pa` の命令を対象なら Uop へ。対象外・ページ跨ぎ・RAM外は None
 pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
+    let (len1, u1) = decode_one(m, pa)?;
+    // B3: 頻出ペアの融合。1命令目がメモリを書かない形 (cmp/test/inc/dec) で、
+    // 直後が同一ページ内で完結する jcc なら、1スロットにまとめる。
+    // Entry::len には**1命令目の長さ**を入れる — 途中退出の作法は mod.rs 参照
+    if let Some(first) = super::FusedFirst::compress(&u1) {
+        if let Some((cc, rel8)) = decode_jcc8(m, pa.wrapping_add(len1 as u32)) {
+            return Some((len1, Uop::FusedJcc { first, cc, rel8 }));
+        }
+    }
+    Some((len1, u1))
+}
+
+/// jcc rel8 (70-7F) を1個だけ読む。ページ内で完結しなければ None。
+/// rel32 (0F 8x) は融合しない — 抱えるとUop enumが太り、Entry×32Kの
+/// キャッシュ足跡が増えて逆効果だった (実測)
+fn decode_jcc8(m: &Machine, pa: u32) -> Option<(u8, i8)> {
+    let start = pa as usize;
+    let page_end = (start | 0xFFF) + 1;
+    let n = (page_end - start).min(2).min(m.mem.len().saturating_sub(start));
+    let b = m.mem.get(start..start + n)?;
+    match *b.first()? {
+        op @ 0x70..=0x7F => Some((op & 0x0F, *b.get(1)? as i8)),
+        _ => None,
+    }
+}
+
+fn decode_one(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
     // ページ内のバイト列だけを見る。跨いだら控えない
     let start = pa as usize;
     let page_end = (start | 0xFFF) + 1;

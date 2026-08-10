@@ -63,6 +63,9 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::Mov8AMoffs { .. }
         | Uop::Grp5 { .. }
         | Uop::StrOne { .. } => true,
+        // 融合ペアは step_cached が部品ごとに判定する (ここには来ない)。
+        // 保守的に true — 迷ったら控える側に倒す
+        Uop::FusedJcc { .. } => true,
     }
 }
 
@@ -89,6 +92,11 @@ fn off_of(m: &Machine, r: &MemRef) -> u32 {
 
 pub(super) fn exec(m: &mut Machine, u: Uop) {
     match u {
+        // 融合ペアは step_cached が部品 (reconstructした1命令目とJcc) に
+        // ほどいてからここへ来る。丸ごとは来ない。
+        // **panicさせない** — unreachable!() のpanic整形がこの関数の
+        // インライン化を壊し、それだけで全体が2割遅くなった (実測)
+        Uop::FusedJcc { .. } => {}
         Uop::MovRmR { rm, reg } => {
             let v = m.cpu.regs[reg as usize];
             match rm {
