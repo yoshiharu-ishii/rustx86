@@ -46,6 +46,9 @@ fn bit_op(m: &mut Machine, d: &Decoder, rm: &Operand, off: i32, kind: u8) {
 /// `0F` を読んだ後の分岐。`start_ip` は命令の先頭 (フォールトの配送に使う)
 pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
     let op2 = fetch8(m);
+    if cfg!(feature = "opstats") {
+        m.op_counts[256 + op2 as usize] += 1;
+    }
     match op2 {
         // LLDT/LTR系。ModRMのreg欄が「何をするか」を選ぶ
         0x00 => {

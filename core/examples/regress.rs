@@ -224,7 +224,9 @@ fn linux() -> Outcome {
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
     m.boot_linux_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
         .expect("boot");
+    let t0 = std::time::Instant::now();
     let reached = run_until_serial(&mut m, "busybox shell", budget);
+    let boot_secs = t0.elapsed().as_secs_f32();
     if reached.is_some() {
         // プロンプトまでもう少し流す
         let _ = run_until_serial(&mut m, "~ #", 100_000_000);
@@ -236,17 +238,40 @@ fn linux() -> Outcome {
         String::from_utf8_lossy(&m.devices.uart.tx).into_owned(),
     )];
     match reached {
-        Some(n) => Outcome {
-            name,
-            passed: Some(true),
-            detail: format!(
-                "シェル到達 ({}M命令、上限{}M — 決定的なので大きな増加は意味の後退)",
-                n / 1_000_000,
-                budget / 1_000_000
-            ),
-            shot: screenshot_serial(&m, 25),
-            logs,
-        },
+        Some(n) => {
+            // MIPS を毎回測って記録する (perf.md の台帳と対になる時系列)。
+            // 共有ランナーの壁時計は±10〜30%揺れるので、下限は「壊滅の検出」
+            // だけを狙った粗い値にする — きつくするとランナーの運で赤くなり、
+            // CIの信用が死ぬ。日々の推移はレポートの数字で見る
+            let mips = n as f32 / 1e6 / boot_secs;
+            let min_mips: f32 = std::env::var("REGRESS_MIN_MIPS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            let too_slow = min_mips > 0.0 && mips < min_mips;
+            Outcome {
+                name,
+                passed: Some(!too_slow),
+                detail: format!(
+                    "シェル到達 {}M命令 / {:.1}s = **{:.1} MIPS**{} (命令数上限{}M — 決定的なので増加は意味の後退)",
+                    n / 1_000_000,
+                    boot_secs,
+                    mips,
+                    if min_mips > 0.0 {
+                        if too_slow {
+                            format!("。**下限 {min_mips:.0} MIPS を下回った — 壊滅的な速度後退**")
+                        } else {
+                            format!(" (下限 {min_mips:.0})")
+                        }
+                    } else {
+                        String::new()
+                    },
+                    budget / 1_000_000
+                ),
+                shot: screenshot_serial(&m, 25),
+                logs,
+            }
+        }
         None => Outcome {
             name,
             passed: Some(false),

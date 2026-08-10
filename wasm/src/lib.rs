@@ -184,12 +184,21 @@ impl Emulator {
     /// 予算は**TSCの進み**で数える。忙しいときは1命令=1で従来どおりだが、
     /// アイドル (HLT) の早送りが飛ばした時間も含む。step の回数で数えると、
     /// 暇なときは1回でPIT1周期ぶん時間が飛ぶので、同じ予算でゲストの時計が
-    /// 何百倍も速く回ってしまう
+    /// 何百倍も速く回ってしまう。
+    ///
+    /// **予算は超過もしない** (step_budgeted)。早送りが予算を飛び越えると、
+    /// 呼ぶ側 (machine.js) の「頼んだ分だけ進んだ」という勘定が壊れて、
+    /// アイドル中のゲストの時計だけが実時間の百倍で流れる —
+    /// ELKSのtetrisの駒が一瞬で積み上がった原因はこれだった
     pub fn run_slice(&mut self, instructions: f64) {
         let budget = instructions as u64;
         let start = self.m.cpu.tsc;
-        while self.m.cpu.tsc.wrapping_sub(start) < budget {
-            self.m.step();
+        loop {
+            let elapsed = self.m.cpu.tsc.wrapping_sub(start);
+            if elapsed >= budget {
+                break;
+            }
+            self.m.step_budgeted(budget - elapsed);
             // デバッガが止めたらフレームを打ち切る。**見張っていなければ
             // この判定は真偽値1つ**なので、通常の実行には効かない
             if self.m.dbg.on && self.m.dbg.stop.is_some() {

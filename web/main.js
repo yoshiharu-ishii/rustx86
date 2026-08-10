@@ -30,7 +30,10 @@ let lastImage = null;
 // バイナリは Base64 の文字列1本にして入れる。
 
 const SNAP_FORMAT = 'rustx86-snapshot';
-const SNAP_KEY = 'rustx86.snapshot';
+/** VGA機のスナップショット置き場 (localStorage) は**マシン別**。
+    ELKSで保存した状態がFreeDOSの「復元」を光らせるのは、状態が無いのに
+    押せるのと同じで、押した人を裏切る */
+const snapKey = () => `rustx86.snapshot.${current?.id ?? 'custom'}`;
 
 /**
  * gzip をかけてから Base64 にする。
@@ -95,10 +98,11 @@ function syncControls() {
   // ベンチには端末が無いので、端末向けの操作は伏せる。
   // デバッガだけは**どちらでも使える**
   for (const id of ['boot', 'pause']) $(id).hidden = !!bench;
-  // スナップショットとログはVGA端末のもの。Linuxでは再起動と一時停止だけ残す
-  // (シリアル端末には履歴が無く、ワーカー越しのスナップショットはまだ無い)
-  for (const id of ['snap', 'restore', 'snapfile', 'save']) {
-    $(id).hidden = !!bench || !!linux;
+  // 状態の保存/復元/ログは、Linuxでもワーカー越しに同じ顔で使える。
+  // JSON書き出しは**Linuxだけ** — VGA機はlocalStorageに残るので出番が薄く、
+  // Linuxはメモリ持ち (64MB) なので永続化の口がこれしかない
+  for (const id of ['snap', 'restore', 'save']) {
+    $(id).hidden = !!bench;
   }
   // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!bench || !!linux;
@@ -110,14 +114,15 @@ function syncControls() {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
+    $('snap').disabled = !linux.booted;
+    $('restore').disabled = !linux.hasSaved;
     return;
   }
   $('pause').disabled = !on;
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
-  $('snapfile').disabled = !on;
-  $('restore').disabled = !on || !localStorage.getItem(SNAP_KEY);
+  $('restore').disabled = !on || !localStorage.getItem(snapKey());
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
@@ -125,6 +130,8 @@ let lastLabel = '';
 
 function boot(image, label) {
   lastLabel = label;
+  $('welcomePane').hidden = true;
+  $('screen').hidden = false;
   machine?.stop();
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
@@ -182,7 +189,9 @@ setInterval(() => {
   }
   if (!machine) return;
   const parts = [];
-  parts.push(machine.paused ? '停止中' : `${machine.mips.toFixed(0)} MIPS`);
+  parts.push(
+    machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`,
+  );
   if (term.scrollback.length) parts.push(`履歴 ${term.scrollback.length}行`);
   if (term.offset) parts.push(`▲${term.offset}行前`);
   $('gauge').textContent = parts.join('   ');
@@ -266,17 +275,24 @@ $('pause').addEventListener('click', () => {
 
 $('boot').addEventListener('click', () => {
   if (linux) {
-    linux.boot();
+    // **再起動 = フル起動。** 実機の再起動がBIOSから走るのと同じで、
+    // カーネルログの流れる本物のブートをやり直す。
+    // スナップショットからの高速復帰は「マシンを選び直したとき」の顔
+    linux.boot({ full: true });
     return;
   }
   if (lastImage) boot(lastImage, 'ディスク');
 });
 
 $('snap').addEventListener('click', async () => {
+  if (linux) {
+    linux.saveState(); // 返事 ('state') が来たら status と hasSaved が更新される
+    return;
+  }
   if (!machine) return;
   try {
     const json = await snapshotJson(lastLabel);
-    localStorage.setItem(SNAP_KEY, json);
+    localStorage.setItem(snapKey(), json);
     setStatus(`状態を保存した (${(json.length / 1024).toFixed(0)} KB、この端末に残る)`);
     syncControls();
   } catch (e) {
@@ -286,7 +302,11 @@ $('snap').addEventListener('click', async () => {
 });
 
 $('restore').addEventListener('click', async () => {
-  const json = localStorage.getItem(SNAP_KEY);
+  if (linux) {
+    linux.restoreState();
+    return;
+  }
+  const json = localStorage.getItem(snapKey());
   if (!machine || !json) return;
   try {
     const o = await applySnapshotJson(json);
@@ -298,17 +318,16 @@ $('restore').addEventListener('click', async () => {
   }
 });
 
-$('snapfile').addEventListener('click', async () => {
-  if (!machine) return;
-  const blob = new Blob([await snapshotJson(lastLabel)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `rustx86-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-});
-
 $('save').addEventListener('click', () => {
+  if (linux) {
+    // 端末が見た全文 (履歴+画面)。VGA機のログ保存と同じ意味論
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([linux.logText], { type: 'text/plain' }));
+    a.download = 'linux.log';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return;
+  }
   const blob = new Blob([term.allLines().join('\n')], { type: 'text/plain' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -474,6 +493,7 @@ async function select(m) {
   bench = null;
   linux?.destroy();
   linux = null;
+  $('welcomePane').hidden = true;
   $('benchPane').hidden = true;
   $('linuxScreen').hidden = true;
   $('screen').hidden = false;
@@ -541,19 +561,6 @@ async function bootFromUrl(m = current) {
   }
 }
 
-/** 置いてあるイメージのうち、最初に見つかったものを選ぶ */
-async function selectFirstAvailable() {
-  for (const m of MACHINES) {
-    if (!m.image) continue;
-    const head = await fetch(m.image, { method: 'HEAD' }).catch(() => null);
-    if (head?.ok) {
-      await select(m);
-      return true;
-    }
-  }
-  return false;
-}
-
 // 読み込みに失敗すると「読み込み中…」のまま黙って止まる。
 // 何が起きたか分からないのが一番困るので、必ず画面に出す。
 //
@@ -587,7 +594,6 @@ try {
   });
   renderMachines();
   setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
-  await selectFirstAvailable();
   syncControls();
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);

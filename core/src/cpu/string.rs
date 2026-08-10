@@ -92,6 +92,7 @@ fn bulk_stos(m: &mut Machine, width: u32, a32: bool) {
             return;
         }
         let bytes = (n * width) as usize;
+        m.dcache.note_write_range(pa as u32, bytes); // コードページなら写しを捨てる
         let mem = m.mem_slice_mut();
         match width {
             1 => mem[pa..pa + bytes].fill(pat[0]),
@@ -144,6 +145,7 @@ fn bulk_movs(m: &mut Machine, src_seg: usize, width: u32, a32: bool) {
         let bytes = (n * width) as usize;
         // src と dest は別ページなので範囲は重ならない。copy_within は使わず
         // 一時コピーで安全に (重なり得ないが借用を分けるため)
+        m.dcache.note_write_range(dpa as u32, bytes); // コードページなら写しを捨てる
         let mem = m.mem_slice_mut();
         mem.copy_within(spa..spa + bytes, dpa);
         m.cpu.set_reg_w(SI, si.wrapping_add(bytes as u32), a32);

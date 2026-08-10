@@ -1,0 +1,389 @@
+//! デコード済み命令キャッシュ (ADR-0007 の本丸、P1a)。
+//!
+//! 同じ命令を何百万回もデコードし直すのをやめる。物理アドレスをキーに
+//! デコード結果 (Uop) を控え、2回目からはデコードを飛ばして実行だけを行う。
+//! 実CPUのuopキャッシュ、QEMU TCG のTBと同じ系譜の答えである。
+//!
+//! ## 対象は実測の上位だけ (opstats で選定)
+//!
+//! Linuxブート624M命令の実測で、mov (89/8B) 24% / ALUグリッド ~16% /
+//! jcc ~10% / lea 4.7% / シフト 4.5% / movzx 3.8% / test 3.5% が上位。
+//! これらを Uop 化し、**それ以外は従来の `cpu::step` にそのまま落とす**。
+//! 全命令を一気にIR化しない — フォールバックがあるから安全に刻める。
+//!
+//! ## 意味を変えないための約束
+//!
+//! - 実行器は従来経路と**同じヘルパ** (alu8/alu_w/shift_rot/condition/
+//!   push_w/pop_w) を呼ぶ。意味論を二重実装しない
+//! - 0x66/0x67/REP 付きは対象外 (従来経路へ)。prefixed_ops の観測も保たれる
+//! - ページを跨ぐ命令は控えない — 無効化の世代がページ単位のため
+//! - デバッガONのときは使わない (before_exec/トレースの意味を守る)
+//! - 16bitコードは対象外 (ELKS/FreeDOSは従来経路のまま)
+//!
+//! ## 自己書き換えは書き込みで受ける
+//!
+//! DOSどころかLinuxも起動時にコードを書き換える (alternatives/jump label)。
+//! TLB・VRAM検出と同じ発想で、**コードを控えたページへの書き込み**が
+//! そのページの世代を進め、古い控えは照合で外れる。データページへの
+//! 書き込みは has_code の1判定だけで素通りする。
+
+use super::CS;
+use crate::Machine;
+
+// 部屋割り: デコード (バイト列→Uop) と実行 (Uop→従来ヘルパ) は別ファイル。
+// B3 (ペア融合) や B4 (ブロック連結) が来てもここに部屋を足すだけで済む
+mod decode;
+mod exec;
+
+/// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
+/// ホストのキャッシュに収まる小ささの折り合い (768KB)。要調整なら実測で
+const SLOTS: usize = 32 * 1024;
+
+const TAG_INVALID: u32 = 0xFFFF_FFFF;
+
+/// メモリオペランドの形。**解決済みの番地ではなく作り方**を持つ —
+/// 実効アドレスはレジスタの今の値から実行のたびに組む
+#[derive(Clone, Copy)]
+pub(crate) struct MemRef {
+    /// 基底レジスタ (-1 = 無し)
+    base: i8,
+    /// インデックスレジスタ (-1 = 無し)
+    index: i8,
+    scale: u8,
+    /// セグメント (デコード時に上書き規則まで解決済み)
+    seg: u8,
+    disp: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Rm {
+    Reg(u8),
+    Mem(MemRef),
+}
+
+/// デコード済み命令。従来経路の各armと1対1で対応する
+#[derive(Clone, Copy)]
+pub(crate) enum Uop {
+    /// 89: mov r/m32, r32
+    MovRmR {
+        rm: Rm,
+        reg: u8,
+    },
+    /// 8B: mov r32, r/m32
+    MovRRm {
+        reg: u8,
+        rm: Rm,
+    },
+    /// 88 / 8A (8bit)
+    Mov8RmR {
+        rm: Rm,
+        reg: u8,
+    },
+    Mov8RRm {
+        reg: u8,
+        rm: Rm,
+    },
+    /// B8-BF: mov r32, imm32
+    MovRImm {
+        reg: u8,
+        imm: u32,
+    },
+    /// ALUグリッド op&7==1 (01/09/…/39): kind = (op>>3)&7
+    AluRmR {
+        kind: u8,
+        rm: Rm,
+        reg: u8,
+    },
+    /// op&7==3 (03/0B/…/3B)
+    AluRRm {
+        kind: u8,
+        reg: u8,
+        rm: Rm,
+    },
+    /// op&7==0 / 2 (8bit)
+    Alu8RmR {
+        kind: u8,
+        rm: Rm,
+        reg: u8,
+    },
+    Alu8RRm {
+        kind: u8,
+        reg: u8,
+        rm: Rm,
+    },
+    /// op&7==5: eAX, imm
+    AluAImm {
+        kind: u8,
+        imm: u32,
+    },
+    /// op&7==4: AL, imm8
+    Alu8AImm {
+        kind: u8,
+        imm: u8,
+    },
+    /// 81/83: GRP1 r/m32, imm (0x83の符号拡張はデコード時に済ませてある)
+    Grp1RmImm {
+        kind: u8,
+        rm: Rm,
+        imm: u32,
+    },
+    /// 80: GRP1 r/m8, imm8
+    Grp18RmImm {
+        kind: u8,
+        rm: Rm,
+        imm: u8,
+    },
+    /// 85 / 84: test
+    TestRmR {
+        rm: Rm,
+        reg: u8,
+    },
+    Test8RmR {
+        rm: Rm,
+        reg: u8,
+    },
+    /// 8D: lea (セグメントを適用しない実効オフセット)
+    Lea {
+        reg: u8,
+        mem: MemRef,
+    },
+    /// 70-7F: jcc rel8 / 0F 80-8F: jcc rel32 (relは拡張済み)
+    Jcc {
+        cc: u8,
+        rel: u32,
+    },
+    /// E9 / EB
+    JmpRel {
+        rel: u32,
+    },
+    /// E8
+    CallRel {
+        rel: u32,
+    },
+    /// C3
+    Ret,
+    /// 50-57 / 58-5F
+    PushR {
+        reg: u8,
+    },
+    PopR {
+        reg: u8,
+    },
+    /// C1: shift r/m32, imm8 / D3: shift r/m32, CL (kindはModRMのreg欄)
+    ShiftRmImm {
+        kind: u8,
+        rm: Rm,
+        count: u8,
+    },
+    ShiftRmCl {
+        kind: u8,
+        rm: Rm,
+    },
+    /// 0F B6: movzx r32, r/m8
+    MovzxB {
+        reg: u8,
+        rm: Rm,
+    },
+    // ---- ここから P1b (フォールバック43Mの実測上位から追加) ----
+    /// 40-47 / 48-4F: inc/dec r32 (CFを触らないのがADD/SUBとの違い)
+    IncR {
+        reg: u8,
+    },
+    DecR {
+        reg: u8,
+    },
+    /// C7 /any: mov r/m32, imm32 (regは無視 — 従来経路と同じ) / C6: 8bit
+    MovRmImm {
+        rm: Rm,
+        imm: u32,
+    },
+    MovRm8Imm {
+        rm: Rm,
+        imm: u8,
+    },
+    /// A1 / A3: mov eax↔moffs32 (segは解決済み)
+    MovAMoffs {
+        load: bool,
+        seg: u8,
+        off: u32,
+    },
+    /// A0 / A2 (8bit)
+    Mov8AMoffs {
+        load: bool,
+        seg: u8,
+        off: u32,
+    },
+    /// 68 / 6A: push imm (6Aの符号拡張はデコード時に済み)
+    PushImm {
+        imm: u32,
+    },
+    /// C9: leave
+    Leave,
+    /// 90-97: xchg eAX, r (90はnop = 自分と交換)
+    XchgAR {
+        reg: u8,
+    },
+    /// F6 / F7 の kind 0-3 (test imm / not / neg)。mul/divは従来経路
+    Grp3b {
+        kind: u8,
+        rm: Rm,
+        imm: u8,
+    },
+    Grp3w {
+        kind: u8,
+        rm: Rm,
+        imm: u32,
+    },
+    /// FF: inc/dec r/m (0/1)、call間接 (2)、jmp間接 (4)、push r/m (6)
+    Grp5 {
+        kind: u8,
+        rm: Rm,
+    },
+    /// 0F 90-9F: setcc r/m8
+    SetCC {
+        cc: u8,
+        rm: Rm,
+    },
+    /// 0F B7: movzx r32, r/m16
+    MovzxW {
+        reg: u8,
+        rm: Rm,
+    },
+    /// 0F AF: imul r32, r/m32
+    ImulRRm {
+        reg: u8,
+        rm: Rm,
+    },
+    /// A4-AF (REPなしの単発ストリング命令)。意味論は従来の string::exec に委譲
+    StrOne {
+        op: u8,
+        seg: i8,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Entry {
+    /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
+    tag: u32,
+    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
+    gen: u32,
+    len: u8,
+    uop: Uop,
+}
+
+pub struct DecodeCache {
+    /// 直接マップ。**最初の32bitデコードまで確保しない** —
+    /// 16bit機やcosimの単発Machineに768KBずつ払わせない
+    entries: Vec<Entry>,
+    /// 物理4Kページごとの世代。書き込みで進む
+    page_gen: Vec<u32>,
+    /// そのページにデコード済みコードがあるか。
+    /// データページへの書き込みをタダにするための1判定
+    page_has_code: Vec<bool>,
+    /// 観測: ヒット / 新規デコード / 対象外 (従来経路行き)
+    pub hits: u64,
+    pub fills: u64,
+    pub fallbacks: u64,
+}
+
+impl DecodeCache {
+    pub fn new(ram_bytes: usize) -> Self {
+        let pages = ram_bytes.div_ceil(4096);
+        DecodeCache {
+            entries: Vec::new(),
+            page_gen: vec![0; pages],
+            page_has_code: vec![false; pages],
+            hits: 0,
+            fills: 0,
+            fallbacks: 0,
+        }
+    }
+
+    /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める
+    #[inline]
+    pub(crate) fn note_write(&mut self, pa: u32) {
+        let p = (pa >> 12) as usize;
+        if let Some(has) = self.page_has_code.get_mut(p) {
+            if *has {
+                *has = false;
+                self.page_gen[p] = self.page_gen[p].wrapping_add(1);
+            }
+        }
+    }
+
+    /// 範囲書き込みの通知 (REP一括処理など、write_phys8を通らない道)
+    pub(crate) fn note_write_range(&mut self, pa: u32, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let first = (pa >> 12) as usize;
+        let last = ((pa as usize).saturating_add(len - 1)) >> 12;
+        for p in first..=last {
+            if let Some(has) = self.page_has_code.get_mut(p) {
+                if *has {
+                    *has = false;
+                    self.page_gen[p] = self.page_gen[p].wrapping_add(1);
+                }
+            }
+        }
+    }
+}
+
+/// キャッシュ経由の1命令実行。対象外は従来の [`super::step`] へ落ちる
+pub(crate) fn step_cached(m: &mut Machine) {
+    // 16bitコードは対象外 (ELKS/FreeDOSは従来経路)
+    if !m.cpu.seg_is32(CS) {
+        return super::step(m);
+    }
+    let lin = m.cpu.lin(CS, m.cpu.ip);
+    let Ok(pa) = m.translate_for(lin, false) else {
+        // フェッチがフォールトする状況は従来経路に任せる (#PF配送もそちら)
+        return super::step(m);
+    };
+    let page = (pa >> 12) as usize;
+    let slot = (pa as usize) & (SLOTS - 1);
+
+    if !m.dcache.entries.is_empty() {
+        let e = &m.dcache.entries[slot];
+        if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
+            let (len, uop) = (e.len, e.uop);
+            m.dcache.hits += 1;
+            m.cpu.advance_ip(len as u32);
+            exec::exec(m, uop);
+            return;
+        }
+    }
+
+    match decode::decode_at(m, pa) {
+        Some((len, uop)) => {
+            if m.dcache.entries.is_empty() {
+                m.dcache.entries = vec![
+                    Entry {
+                        tag: TAG_INVALID,
+                        gen: 0,
+                        len: 0,
+                        uop: Uop::Ret,
+                    };
+                    SLOTS
+                ];
+            }
+            let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+            m.dcache.entries[slot] = Entry {
+                tag: pa,
+                gen,
+                len,
+                uop,
+            };
+            if let Some(h) = m.dcache.page_has_code.get_mut(page) {
+                *h = true;
+            }
+            m.dcache.fills += 1;
+            m.cpu.advance_ip(len as u32);
+            exec::exec(m, uop);
+        }
+        None => {
+            m.dcache.fallbacks += 1;
+            super::step(m);
+        }
+    }
+}
