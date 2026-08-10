@@ -21,10 +21,7 @@ fn alu_lazy(c: &mut Cpu, op: u8, a: u32, b: u32, w: u8) -> u32 {
     let r = match op {
         0 | 2 => (a as u64 + b as u64 + cin as u64) & mask,
         1 => (a | b) as u64,
-        3 | 5 | 7 => (a as u64)
-            .wrapping_sub(b as u64)
-            .wrapping_sub(cin as u64)
-            & mask,
+        3 | 5 | 7 => (a as u64).wrapping_sub(b as u64).wrapping_sub(cin as u64) & mask,
         4 => (a & b) as u64,
         _ => (a ^ b) as u64, // 6 = XOR
     } as u32;
@@ -61,7 +58,12 @@ pub fn inc_dec8(c: &mut Cpu, a: u8, dec: bool) -> u8 {
     } else {
         a.wrapping_add(1)
     };
-    c.set_cc_incdec(if dec { super::CC_DEC } else { super::CC_INC }, 0, a as u32, r as u32);
+    c.set_cc_incdec(
+        if dec { super::CC_DEC } else { super::CC_INC },
+        0,
+        a as u32,
+        r as u32,
+    );
     r
 }
 
