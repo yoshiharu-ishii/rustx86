@@ -79,7 +79,13 @@ export function mountLinux(canvas, opts = {}) {
     return buf;
   }
 
-  async function boot() {
+  /**
+   * 起動する。既定はスナップショット優先 (数秒でシェル)。
+   * `{ full: true }` で**必ずフル起動** — カーネルログが流れる本物の起動を
+   * UI (電源ONボタン) から選べるようにする。スナップショットに乗っ取られて
+   * フルブートが見られない、を防ぐ
+   */
+  async function boot({ full = false } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -90,17 +96,19 @@ export function mountLinux(canvas, opts = {}) {
 
     // まず**起動済みスナップショット**を探す (tools/make-linux-snapshot.sh が作る)。
     // あれば数秒で立つ — 「シンプルなカーネルの起動に1分」への即効薬で、
-    // フル起動はスナップショットが無いときの道として残す
+    // フル起動は電源ONボタンとスナップショット不在時の道
     let snapshot = null;
     let kernel = null;
     let initrd = null;
-    try {
-      const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
-      status('スナップショットを展開中…');
-      const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
-      snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
-    } catch {
-      snapshot = null; // 無ければカーネルからのフル起動に落ちる
+    if (!full) {
+      try {
+        const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
+        status('スナップショットを展開中…');
+        const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+        snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
+      } catch {
+        snapshot = null; // 無ければカーネルからのフル起動に落ちる
+      }
     }
 
     if (!snapshot) {
