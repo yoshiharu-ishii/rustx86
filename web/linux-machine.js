@@ -40,11 +40,12 @@ export function mountLinux(canvas, opts = {}) {
   let mips = 0;
   /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
   let idle = false;
-  /** シリアル全文の控え (ブートログ)。「ログを保存」がこれを書き出す */
-  let serialLog = [];
   /** 「状態を保存」の控え。64MBあるので localStorage ではなくメモリに持つ
-      (ページを閉じると消える。永続化はJSON書き出しで) */
+      (ページを閉じると消える) */
   let savedState = null;
+  /** 保存時の端末の姿 (画面・カーソル・履歴)。機械の状態にシリアルの履歴は
+      入らないので、端末側の姿は端末側で控える — VGA機と使い勝手を揃えるため */
+  let savedTerm = null;
 
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
@@ -181,18 +182,20 @@ export function mountLinux(canvas, opts = {}) {
           opts.onState?.();
           break;
         }
-        case 'serial': {
-          const bytes = new Uint8Array(msg.bytes);
-          term.write(bytes);
-          serialLog.push(bytes);
+        case 'serial':
+          term.write(new Uint8Array(msg.bytes));
           break;
-        }
         case 'state':
           savedState = new Uint8Array(msg.bytes);
+          // ここまでのシリアルは全部適用済み (メッセージは順序を守る) なので、
+          // 端末の姿は機械の控えと同じ瞬間のもの
+          savedTerm = term.snapshot();
           status(`状態を保存した (${(savedState.length / 1e6).toFixed(1)}MB、このページの間だけ残る)`);
           opts.onState?.();
           break;
         case 'loaded':
+          // 機械が戻ったので端末も保存時の姿へ (画面・カーソル・履歴ごと)
+          if (savedTerm) term.restore(savedTerm);
           status('保存した状態に戻した');
           canvas.focus();
           break;
@@ -236,13 +239,10 @@ export function mountLinux(canvas, opts = {}) {
     get hasSaved() { return savedState !== null; },
     /** 控えた状態そのもの (JSON書き出し用)。無ければ null */
     get savedBytes() { return savedState; },
-    /** シリアル全文 (ブートログ) */
-    get log() {
-      const total = serialLog.reduce((a, c) => a + c.length, 0);
-      const out = new Uint8Array(total);
-      let o = 0;
-      for (const c of serialLog) { out.set(c, o); o += c.length; }
-      return out;
+    /** 端末が見た全文 (履歴1000行+今の画面)。VGA機の「ログを保存」と同じ意味論。
+        スナップショット起動でも画面に見えている分は必ず入る */
+    get logText() {
+      return term.allText();
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {

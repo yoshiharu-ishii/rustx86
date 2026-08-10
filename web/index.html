@@ -53,13 +53,13 @@
     max-width: calc((100vh - 15rem) * 730 / 400);
   }
   #screen:focus { outline: none; }
-  /* Linux のシリアル端末。作法は #screen と同じで、格子の比率だけ違う —
-     (80桁 x 9px) : (24行 x 16px) = 720 : 384。スクロールバーは無い */
+  /* Linux のシリアル端末。作法は #screen と同じで、行数だけ違う —
+     (80桁 x 9px + スクロールバー10px) : (24行 x 16px) = 730 : 384 */
   #linuxScreen {
     display: block; cursor: text; margin: 0 auto;
     width: 100%; height: auto;
-    aspect-ratio: 720 / 384;
-    max-width: calc((100vh - 15rem) * 720 / 384);
+    aspect-ratio: 730 / 384;
+    max-width: calc((100vh - 15rem) * 730 / 384);
   }
   #linuxScreen:focus { outline: none; }
   /* **hidden 属性を効かせる。** 上の #screen が display を指定しているので、
