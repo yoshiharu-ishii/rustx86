@@ -104,7 +104,6 @@ function syncControls() {
   for (const id of ['snap', 'restore', 'save']) {
     $(id).hidden = !!bench;
   }
-  $('snapfile').hidden = !!bench || !linux;
   // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!bench || !!linux;
   $('gauge').hidden = !!bench;
@@ -117,14 +116,12 @@ function syncControls() {
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
     $('snap').disabled = !linux.booted;
     $('restore').disabled = !linux.hasSaved;
-    $('snapfile').disabled = !linux.hasSaved;
     return;
   }
   $('pause').disabled = !on;
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
-  $('snapfile').disabled = !on;
   $('restore').disabled = !on || !localStorage.getItem(snapKey());
 }
 
@@ -315,37 +312,6 @@ $('restore').addEventListener('click', async () => {
   } catch (e) {
     setStatus(`復元できない: ${e.message}`, true);
   }
-});
-
-$('snapfile').addEventListener('click', async () => {
-  if (linux) {
-    // VGA機と同じ形式 (rustx86-snapshot / gzip+base64)。ドロップで読み戻せる
-    const bytes = linux.savedBytes;
-    if (!bytes) return;
-    const packed = await gzip(bytes);
-    const json = JSON.stringify({
-      format: SNAP_FORMAT,
-      version: 1,
-      created: new Date().toISOString(),
-      image: 'linux',
-      bytes: bytes.length,
-      encoding: 'gzip+base64',
-      state: toBase64(packed),
-    });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
-    a.download = `rustx86-linux-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    return;
-  }
-  if (!machine) return;
-  const blob = new Blob([await snapshotJson(lastLabel)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `rustx86-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
 });
 
 $('save').addEventListener('click', () => {
