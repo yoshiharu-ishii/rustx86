@@ -22,10 +22,12 @@ const CELL_W = 9;
 const CELL_H = 16;
 const FONT = '13px ui-monospace, Menlo, monospace';
 
-// xterm の16色 (0-7 通常、8-15 明色)
+// xterm の16色 (0-7 通常、8-15 明色) を、VGA端末と同じ Homebrew 緑燐光に寄せる。
+// **既定色 (7) と明るい白 (15) だけを緑にする**のが肝 — 全部緑にすると
+// ゲストが色分けした情報 (ls の青いディレクトリ、エラーの赤) が読めなくなる
 const PALETTE = [
-  '#000000', '#cd0000', '#00cd00', '#cdcd00', '#2222cc', '#cd00cd', '#00cdcd', '#e5e5e5',
-  '#7f7f7f', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#ffffff',
+  '#000000', '#cd0000', '#00cd00', '#cdcd00', '#3388ff', '#cd00cd', '#00cdcd', '#00ff00',
+  '#7f7f7f', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#7cff7c',
 ];
 
 export class AnsiTerminal {
@@ -297,7 +299,7 @@ export class AnsiTerminal {
     }
     // カーソル
     if (this.cursorVisible) {
-      ctx.fillStyle = 'rgba(230,230,230,0.7)';
+      ctx.fillStyle = '#23ff18'; // カーソルも燐光色 (VGA端末と同じ)
       ctx.fillRect(this.cx * CELL_W, this.cy * CELL_H + CELL_H - 2, CELL_W, 2);
     }
   }

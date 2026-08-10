@@ -98,10 +98,9 @@ function syncControls() {
   // 電源ON (フル起動) はLinuxだけの操作。再起動がスナップショット優先なので、
   // カーネルログの流れる本物の起動を選ぶ口がここ
   $('fullboot').hidden = !linux;
-  // スナップショットとログはVGA端末のもの。Linuxでは再起動と一時停止だけ残す
-  // (シリアル端末には履歴が無く、ワーカー越しのスナップショットはまだ無い)
+  // 状態の保存/復元/JSON/ログは、Linuxでもワーカー越しに同じ顔で使える
   for (const id of ['snap', 'restore', 'snapfile', 'save']) {
-    $(id).hidden = !!bench || !!linux;
+    $(id).hidden = !!bench;
   }
   // 配列の選択も端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!bench || !!linux;
@@ -114,6 +113,9 @@ function syncControls() {
     $('fullboot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
+    $('snap').disabled = !linux.booted;
+    $('restore').disabled = !linux.hasSaved;
+    $('snapfile').disabled = !linux.hasSaved;
     return;
   }
   $('pause').disabled = !on;
@@ -282,6 +284,10 @@ $('fullboot').addEventListener('click', () => {
 });
 
 $('snap').addEventListener('click', async () => {
+  if (linux) {
+    linux.saveState(); // 返事 ('state') が来たら status と hasSaved が更新される
+    return;
+  }
   if (!machine) return;
   try {
     const json = await snapshotJson(lastLabel);
@@ -295,6 +301,10 @@ $('snap').addEventListener('click', async () => {
 });
 
 $('restore').addEventListener('click', async () => {
+  if (linux) {
+    linux.restoreState();
+    return;
+  }
   const json = localStorage.getItem(SNAP_KEY);
   if (!machine || !json) return;
   try {
@@ -308,6 +318,27 @@ $('restore').addEventListener('click', async () => {
 });
 
 $('snapfile').addEventListener('click', async () => {
+  if (linux) {
+    // VGA機と同じ形式 (rustx86-snapshot / gzip+base64)。ドロップで読み戻せる
+    const bytes = linux.savedBytes;
+    if (!bytes) return;
+    const packed = await gzip(bytes);
+    const json = JSON.stringify({
+      format: SNAP_FORMAT,
+      version: 1,
+      created: new Date().toISOString(),
+      image: 'linux',
+      bytes: bytes.length,
+      encoding: 'gzip+base64',
+      state: toBase64(packed),
+    });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    a.download = `rustx86-linux-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return;
+  }
   if (!machine) return;
   const blob = new Blob([await snapshotJson(lastLabel)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -318,6 +349,15 @@ $('snapfile').addEventListener('click', async () => {
 });
 
 $('save').addEventListener('click', () => {
+  if (linux) {
+    // シリアル全文 = dmesg込みのブートログ (CIの証跡と同じもの)
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([linux.log], { type: 'text/plain' }));
+    a.download = 'linux-boot.log';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    return;
+  }
   const blob = new Blob([term.allLines().join('\n')], { type: 'text/plain' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);

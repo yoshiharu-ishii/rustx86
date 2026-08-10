@@ -7,6 +7,8 @@
 // メインとの約束 (postMessage):
 //   受信: {type:'boot', kernel, initrd, cmdline, ramMb}  カーネルから起動する
 //         {type:'boot', snapshot}                        起動済み控えから復元する
+//         {type:'save'}                                  今の状態を丸ごと控えて返す
+//         {type:'load', bytes}                           控えた状態へ戻す
 //         {type:'input', bytes}                          シリアルへ流す
 //         {type:'pause'} / {type:'resume'}
 //   送信: {type:'ready'}                     wasm初期化完了
@@ -52,6 +54,21 @@ self.onmessage = (e) => {
     case 'input':
       if (emu) emu.serial_in(new Uint8Array(msg.bytes));
       break;
+    case 'save': {
+      if (!emu) break;
+      // スライスの切れ目で呼ばれるので、機械は命令境界の綺麗な姿
+      const bytes = emu.save_state();
+      postMessage({ type: 'state', bytes: bytes.buffer }, [bytes.buffer]);
+      break;
+    }
+    case 'load': {
+      if (!emu) break;
+      emu.load_state(new Uint8Array(msg.bytes));
+      // 送信済みのシリアルは履歴なので控えに無い。改行でプロンプトを出させる
+      emu.serial_in(new TextEncoder().encode('\n'));
+      postMessage({ type: 'loaded' });
+      break;
+    }
     case 'pause':
       running = false;
       break;
