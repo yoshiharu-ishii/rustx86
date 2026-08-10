@@ -210,10 +210,25 @@ layoutSel.value = term.layout;
 layoutSel.addEventListener('change', () => {
   term.layout = layoutSel.value;
   localStorage.setItem(LAYOUT_KEY, term.layout);
-  $('screen').focus();
+  focusScreen();
 });
 
 // --- 操作 ---
+
+// いま見えている画面にフォーカスを返す。マシンが居なければ何もしない
+function focusScreen() {
+  if (linux) $('linuxScreen').focus();
+  else if (machine) $('screen').focus();
+}
+
+// ボタンを押した後はフォーカスを**画面に返す**。ボタンに残すと、直後の
+// Enter/Spaceがゲスト行きのつもりでボタンをもう一度押してしまう
+// (再起動の意図せぬ連打)。個々のハンドラではなくバブリングで一括して受ける。
+// デバッガだけは例外 — 子ウインドウに移った注意を奪い返さない
+document.querySelector('.toolbar').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b && b.id !== 'debug') focusScreen();
+});
 
 // --- デバッガの子ウインドウ ---
 //
@@ -263,14 +278,12 @@ $('pause').addEventListener('click', () => {
   if (linux) {
     linux.setPaused(!linux.paused);
     syncControls();
-    $('linuxScreen').focus();
     return;
   }
   if (!machine) return;
   if (machine.paused) machine.start();
   else machine.stop();
   syncControls();
-  $('screen').focus();
 });
 
 $('boot').addEventListener('click', () => {
@@ -312,7 +325,6 @@ $('restore').addEventListener('click', async () => {
     const o = await applySnapshotJson(json);
     term.reset();
     setStatus(`${o.created} の状態に戻した (${o.image})`);
-    $('screen').focus();
   } catch (e) {
     setStatus(`復元できない: ${e.message}`, true);
   }
