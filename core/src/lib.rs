@@ -169,6 +169,8 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// デコード済み命令キャッシュ (ADR-0007 P1a)。中身は cpu::dcache
+    pub dcache: cpu::dcache::DecodeCache,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -256,6 +258,7 @@ impl Machine {
             video_modes: std::collections::BTreeSet::new(),
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
+            dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
             op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
@@ -313,6 +316,8 @@ impl Machine {
             *b = val;
         }
         // 超えたら捨てる (未マップへの書き込みは実機でも消える)
+        // コードを控えたページへの書き込みは写しを無効化 (自己書き換え対策)
+        self.dcache.note_write(pa);
     }
 
     pub fn write_phys32(&mut self, pa: u32, val: u32) {
@@ -1236,6 +1241,8 @@ impl Machine {
         m.pic_service = m.devices.pic[0].has_pending();
         m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
         m.mem = mem;
+        // デコード済み命令の写しも同じ理由で総入れ替え (RAMサイズも変わりうる)
+        m.dcache = cpu::dcache::DecodeCache::new(m.mem.len());
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)
         } else {
@@ -1454,7 +1461,13 @@ impl Machine {
         } else {
             None
         };
-        cpu::step(self);
+        // デバッガが見ているときは従来経路 (before_exec/トレースの意味を守る)。
+        // 普段はデコード済み命令キャッシュ経由 — 対象外は中で従来経路に落ちる
+        if self.dbg.on {
+            cpu::step(self);
+        } else {
+            cpu::dcache::step_cached(self);
+        }
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
         // #PF を配送する。ハンドラがページを直して iret すれば、同じ命令が

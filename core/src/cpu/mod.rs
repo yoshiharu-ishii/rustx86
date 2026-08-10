@@ -28,6 +28,7 @@
 //! セグメントは segment、というふうに。
 
 pub mod alu;
+pub(crate) mod dcache;
 pub mod decimal;
 pub mod group;
 pub mod interrupt;
