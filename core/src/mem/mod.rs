@@ -3,7 +3,9 @@
 //! 読み出しは最も回数の多い経路なので分岐を足さない、書き込み側に
 //! 仕掛けを寄せる (VRAM検出・自己書き換え検出)、という非対称が設計の芯。
 
-use crate::{bus, cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
+pub mod bus;
+
+use crate::{cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
 
 impl Machine {
     /// TLBを全部空にする。mov cr3 (アドレス空間の切り替え) や CR0 の変更、
