@@ -259,6 +259,79 @@ pub(crate) enum Uop {
         op: u8,
         seg: i8,
     },
+    /// B3: 頻出ペアの融合 — cmp/test/inc/dec + jcc を1スロットで持つ。
+    ///
+    /// **1命令目はメモリを書かない形だけ** (cmp/testは読みのみ、inc/decは
+    /// レジスタのみ)。だから1命令目がjccのバイトを書き換えることはなく、
+    /// ペア内の世代再照合が要らない。実行は step_cached が2命令として行い、
+    /// **間に命令境界の帳簿 (IRQ受付・tsc・tick) を挟む** — 決定的命令数は
+    /// 2のまま、割り込みの受付点も非融合時と同一。
+    /// `Entry::len` は1命令目の長さ — 途中退出時に ip がjccの先頭を指し、
+    /// 次回は単独のjccとして普通に続きから走る。
+    /// **rel8のjccだけ融合する** — rel32を抱えるとこのenum自体が太り、
+    /// Entry×32Kのキャッシュ足跡が増えて逆に遅くなった (実測 -20%)
+    FusedJcc {
+        first: FusedFirst,
+        cc: u8,
+        rel8: i8,
+    },
+}
+
+/// 融合ペアの1命令目 (復元用の圧縮表現)。
+/// Uopを丸ごと抱えるとEntryが倍に太るので、許した形だけを詰める
+#[derive(Clone, Copy)]
+pub(crate) struct FusedFirst {
+    /// 形の番号 (下のreconstructと1対1)
+    form: u8,
+    rm: Rm,
+    /// reg番号か即値 (formによる)
+    val: u32,
+}
+
+impl FusedFirst {
+    /// Uopが融合できる形なら圧縮する。**メモリを書かない形だけ**許す
+    pub(crate) fn compress(u: &Uop) -> Option<FusedFirst> {
+        Some(match *u {
+            Uop::AluRmR { kind: 7, rm, reg } => FusedFirst { form: 0, rm, val: reg as u32 },
+            Uop::AluRRm { kind: 7, reg, rm } => FusedFirst { form: 1, rm, val: reg as u32 },
+            Uop::Grp1RmImm { kind: 7, rm, imm } => FusedFirst { form: 2, rm, val: imm },
+            Uop::AluAImm { kind: 7, imm } => FusedFirst { form: 3, rm: Rm::Reg(0), val: imm },
+            Uop::TestRmR { rm, reg } => FusedFirst { form: 4, rm, val: reg as u32 },
+            Uop::Alu8RmR { kind: 7, rm, reg } => FusedFirst { form: 5, rm, val: reg as u32 },
+            Uop::Alu8RRm { kind: 7, reg, rm } => FusedFirst { form: 6, rm, val: reg as u32 },
+            Uop::Grp18RmImm { kind: 7, rm, imm } => FusedFirst { form: 7, rm, val: imm as u32 },
+            Uop::Alu8AImm { kind: 7, imm } => FusedFirst { form: 8, rm: Rm::Reg(0), val: imm as u32 },
+            Uop::Test8RmR { rm, reg } => FusedFirst { form: 9, rm, val: reg as u32 },
+            Uop::IncR { reg } => FusedFirst { form: 10, rm: Rm::Reg(reg), val: 0 },
+            Uop::DecR { reg } => FusedFirst { form: 11, rm: Rm::Reg(reg), val: 0 },
+            _ => return None,
+        })
+    }
+
+    /// 圧縮を元のUopへ戻す。実行は元のUopの経路をそのまま使う —
+    /// 意味論をここに二重実装しない
+    pub(crate) fn reconstruct(&self) -> Uop {
+        match self.form {
+            0 => Uop::AluRmR { kind: 7, rm: self.rm, reg: self.val as u8 },
+            1 => Uop::AluRRm { kind: 7, reg: self.val as u8, rm: self.rm },
+            2 => Uop::Grp1RmImm { kind: 7, rm: self.rm, imm: self.val },
+            3 => Uop::AluAImm { kind: 7, imm: self.val },
+            4 => Uop::TestRmR { rm: self.rm, reg: self.val as u8 },
+            5 => Uop::Alu8RmR { kind: 7, rm: self.rm, reg: self.val as u8 },
+            6 => Uop::Alu8RRm { kind: 7, reg: self.val as u8, rm: self.rm },
+            7 => Uop::Grp18RmImm { kind: 7, rm: self.rm, imm: self.val as u8 },
+            8 => Uop::Alu8AImm { kind: 7, imm: self.val as u8 },
+            9 => Uop::Test8RmR { rm: self.rm, reg: self.val as u8 },
+            10 => match self.rm {
+                Rm::Reg(r) => Uop::IncR { reg: r },
+                _ => unreachable!(),
+            },
+            _ => match self.rm {
+                Rm::Reg(r) => Uop::DecR { reg: r },
+                _ => unreachable!(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -327,6 +400,50 @@ impl DecodeCache {
             }
         }
     }
+}
+
+/// 融合ペアの実行: 1命令目 → 命令境界の帳簿 → jcc rel8。
+/// 帳簿の順序も支払いのタイミングも非融合の2周と同一に保つ —
+/// これを崩すと決定的命令数と割り込みの受付点がずれる。
+/// 戻り値 false = 途中退出 (ip はjccの先頭、次回は単独jccとして続く)。
+/// **inline(never)**: 連結ループの中に展開するとループ本体が太り、
+/// 生成コードの質が落ちて全体が2割遅くなった (実測)
+#[inline(never)]
+fn exec_fused(m: &mut Machine, first: FusedFirst, cc: u8, rel8: i8, len1: u8, extra: &mut u64) -> bool {
+    let u1 = first.reconstruct();
+    if exec::may_touch_memory(&u1) {
+        m.guard_save();
+    }
+    m.cpu.advance_ip(len1 as u32); // ip = jcc の先頭
+    exec::exec(m, u1);
+    // --- ペアの間の命令境界 (非融合時の連結判定と同じ並び) ---
+    if *extra == 0 {
+        return false;
+    }
+    if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+        return false;
+    }
+    if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+        return false;
+    }
+    *extra -= 1;
+    m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+    m.tick_countdown -= 1;
+    if m.tick_countdown == 0 {
+        m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+        m.tick_devices(1);
+    }
+    // --- 2命令目 (jcc)。1命令目はメモリを書かない形だけを融合しているので
+    //     jccのバイトが変わっている可能性はない
+    m.cpu.advance_ip(2);
+    exec::exec(
+        m,
+        Uop::Jcc {
+            cc,
+            rel: rel8 as i32 as u32,
+        },
+    );
+    true
 }
 
 /// キャッシュ経由の実行。対象外は従来の [`super::step`] へ落ちる。
@@ -420,15 +537,27 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             },
         };
 
-        // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
-        // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
-        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
-        if exec::may_touch_memory(&uop) {
-            m.guard_save();
+        // 直線続行時の総前進量 (融合ペアは2命令ぶん)。判定は下のif-letと共有
+        let mut total = len as u32;
+        let ip_before = m.cpu.ip;
+
+        // 融合ペア (B3): 実体は exec_fused (ループ本体を太らせない)
+        if let Uop::FusedJcc { first, cc, rel8 } = uop {
+            total += 2; // rel8のjccは常に2バイト
+            if !exec_fused(m, first, cc, rel8, len, &mut extra) {
+                return;
+            }
+        } else {
+            // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
+            // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
+            // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
+            if exec::may_touch_memory(&uop) {
+                m.guard_save();
+            }
+            m.cpu.advance_ip(len as u32);
+            exec::exec(m, uop);
         }
-        let ip_linear = m.cpu.ip.wrapping_add(len as u32);
-        m.cpu.advance_ip(len as u32);
-        exec::exec(m, uop);
+        let ip_linear = ip_before.wrapping_add(total);
 
         // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
         if extra == 0 {
@@ -444,7 +573,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         }
         // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
         let new_lin = if m.cpu.ip == ip_linear {
-            lin.wrapping_add(len as u32)
+            lin.wrapping_add(total)
         } else {
             m.cpu.lin(CS, m.cpu.ip)
         };
@@ -461,5 +590,21 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
             m.tick_devices(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Uopのサイズの見張り。融合uopを足したときに膨らませない —
+    /// Entry×32Kの直接マップはキャッシュ足跡が命 (太らせて-20%を実測した)
+    #[test]
+    fn uop_stays_small() {
+        assert!(
+            std::mem::size_of::<Uop>() <= 24,
+            "Uop = {}B (24Bを超えたらEntryのキャッシュ足跡を疑う)",
+            std::mem::size_of::<Uop>()
+        );
     }
 }
