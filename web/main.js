@@ -187,7 +187,9 @@ setInterval(() => {
   }
   if (!machine) return;
   const parts = [];
-  parts.push(machine.paused ? '停止中' : `${machine.mips.toFixed(0)} MIPS`);
+  parts.push(
+    machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`,
+  );
   if (term.scrollback.length) parts.push(`履歴 ${term.scrollback.length}行`);
   if (term.offset) parts.push(`▲${term.offset}行前`);
   $('gauge').textContent = parts.join('   ');
