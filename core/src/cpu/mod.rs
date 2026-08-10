@@ -390,8 +390,8 @@ fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
 
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
-                                           // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
-                                           // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
+    // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
+    // 0x66/0x67 は「反転」なので、32bitセグメントでは逆に16bitへ倒す
     let cs32 = m.cpu.seg_is32(CS);
     let mut d = Decoder {
         seg_override: None,

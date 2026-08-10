@@ -518,7 +518,12 @@ impl Machine {
         // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
         let a = pa as usize;
         if a + 4 <= self.mem.len() {
-            u32::from_le_bytes([self.mem[a], self.mem[a + 1], self.mem[a + 2], self.mem[a + 3]])
+            u32::from_le_bytes([
+                self.mem[a],
+                self.mem[a + 1],
+                self.mem[a + 2],
+                self.mem[a + 3],
+            ])
         } else {
             u32::from_le_bytes([
                 self.read_phys8(pa),
@@ -576,10 +581,18 @@ impl Machine {
         let user = self.cpu.cpl() == 3 && !self.sys_access.get();
         let wp = self.cpu.cr0 & 0x0001_0000 != 0;
         if write && !writable && (user || wp) {
-            return Err(PageFault { la, write, present: true });
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
+            });
         }
         if user && !user_ok {
-            return Err(PageFault { la, write, present: true });
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
+            });
         }
         Ok(base | (la & 0xFFF))
     }
@@ -588,7 +601,11 @@ impl Machine {
     /// 返すのは (4K境界の物理先頭, 書けるか, ユーザーで触れるか)。
     /// **不在は Err(present:false)** — これは TLB に載せない (次回また歩く)
     fn walk_page(&self, la: u32) -> Result<(u32, bool, bool), PageFault> {
-        let notp = || PageFault { la, write: false, present: false };
+        let notp = || PageFault {
+            la,
+            write: false,
+            present: false,
+        };
         let dir = (la >> 22) & 0x3FF;
         let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
         if pde & 1 == 0 {
@@ -643,9 +660,6 @@ impl Machine {
     /// VRAMやデバッガの都合は呼び出し側が事前に外す
     pub(crate) fn mem_slice_mut(&mut self) -> &mut [u8] {
         &mut self.mem
-    }
-    pub(crate) fn mem_slice(&self) -> &[u8] {
-        &self.mem
     }
 
     /// メモリ書き込み。
