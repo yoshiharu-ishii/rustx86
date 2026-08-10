@@ -184,6 +184,188 @@ pub fn read_header(r: &mut Reader) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- Machine 全体の書き出しと復元 ----------
+//
+// Writer/Reader (上) が「バイト列の刻み方」、ここが「何をどの順で刻むか」。
+
+use crate::{cpu, Disk, Machine, MachineProfile, MEM_SIZE};
+
+impl Machine {
+    /// 機械の状態をまるごと書き出す。
+    ///
+    /// **CPUだけでは足りない。** PICのマスクが失われれば以後の割り込みが
+    /// 来なくなり、PITのカウンタが戻れば時計が飛ぶ。装置もメモリも
+    /// ディスクも含めて初めて「あの瞬間から再開」ができる。
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        write_header(&mut w);
+
+        // CPU
+        for r in self.cpu.regs {
+            w.u32(r);
+        }
+        for s in self.cpu.sregs {
+            w.u16(s);
+        }
+        w.u32(self.cpu.ip);
+        w.u32(self.cpu.flags);
+        // プロテクトモードの状態 (v2)。隠しレジスタを落とすと、復元した瞬間に
+        // 全アドレスが嘘になる — セレクタだけでは base を再構成できない
+        w.u32(self.cpu.cr0);
+        w.u32(self.cpu.gdtr_base);
+        w.u16(self.cpu.gdtr_limit);
+        w.u32(self.cpu.idtr_base);
+        w.u16(self.cpu.idtr_limit);
+        w.u16(self.cpu.tr_sel);
+        w.u32(self.cpu.tr_base);
+        w.u32(self.cpu.tr_limit);
+        w.u32(self.cpu.cr2);
+        w.u32(self.cpu.cr3);
+        w.u32(self.cpu.cr4); // v7
+        w.u16(self.cpu.ldtr_sel); // v7
+        for d in self.cpu.dr {
+            w.u32(d);
+        }
+        w.u16(self.cpu.fpu_cw); // v7
+        w.u32(self.cpu.mxcsr); // v7
+        for x in self.cpu.xmm {
+            w.u32(x as u32);
+            w.u32((x >> 32) as u32);
+            w.u32((x >> 64) as u32);
+            w.u32((x >> 96) as u32);
+        }
+        w.u32(self.cpu.tsc as u32); // v7 (下位のみ。较正はやり直せるので十分)
+        w.u32((self.cpu.tsc >> 32) as u32);
+        for h in self.cpu.hidden {
+            w.u32(h.base);
+            w.u32(h.limit);
+            w.u8(h.access);
+            w.bool(h.big);
+        }
+
+        // 機械の進行状態
+        w.bool(self.halted);
+        w.opt_u8(self.pending_irq);
+
+        // 装置
+        for p in &self.devices.pic {
+            p.save(&mut w);
+        }
+        self.devices.pit.save(&mut w);
+        self.devices.uart.save(&mut w);
+        self.devices.keyboard.save(&mut w);
+        self.devices.cmos.save(&mut w);
+        self.devices.crtc.save(&mut w);
+
+        // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
+        w.rle(&self.mem);
+        match &self.disk {
+            Some(d) => {
+                w.bool(true);
+                w.rle(&d.data);
+            }
+            None => w.bool(false),
+        }
+        w.buf
+    }
+
+    /// 書き出した状態へ戻す。
+    ///
+    /// 途中で失敗すると**半端に書き換わった機械**が残るので、
+    /// まず新しい機械の上に組み立ててから丸ごと差し替える
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut m = Machine::new();
+        let mut r = Reader::new(data);
+        read_header(&mut r)?;
+
+        for i in 0..8 {
+            m.cpu.regs[i] = r.u32()?;
+        }
+        for i in 0..6 {
+            m.cpu.sregs[i] = r.u16()?;
+        }
+        m.cpu.ip = r.u32()?;
+        m.cpu.flags = r.u32()?;
+        m.cpu.cr0 = r.u32()?;
+        m.cpu.gdtr_base = r.u32()?;
+        m.cpu.gdtr_limit = r.u16()?;
+        m.cpu.idtr_base = r.u32()?;
+        m.cpu.idtr_limit = r.u16()?;
+        m.cpu.tr_sel = r.u16()?;
+        m.cpu.tr_base = r.u32()?;
+        m.cpu.tr_limit = r.u32()?;
+        m.cpu.cr2 = r.u32()?;
+        m.cpu.cr3 = r.u32()?;
+        m.cpu.cr4 = r.u32()?; // v7
+        m.cpu.ldtr_sel = r.u16()?; // v7
+        for i in 0..8 {
+            m.cpu.dr[i] = r.u32()?;
+        }
+        m.cpu.fpu_cw = r.u16()?; // v7
+        m.cpu.mxcsr = r.u32()?; // v7
+        for i in 0..8 {
+            let a = r.u32()? as u128;
+            let b = r.u32()? as u128;
+            let c = r.u32()? as u128;
+            let d = r.u32()? as u128;
+            m.cpu.xmm[i] = a | b << 32 | c << 64 | d << 96;
+        }
+        m.cpu.tsc = r.u32()? as u64 | ((r.u32()? as u64) << 32);
+        for i in 0..6 {
+            m.cpu.hidden[i] = cpu::SegHidden {
+                base: r.u32()?,
+                limit: r.u32()?,
+                access: r.u8()?,
+                big: r.bool()?,
+            };
+        }
+
+        m.halted = r.bool()?;
+        m.pending_irq = r.opt_u8()?;
+        // pic_service は派生状態なのでPICから作り直す
+
+        for i in 0..2 {
+            m.devices.pic[i].load(&mut r)?;
+        }
+        m.devices.pit.load(&mut r)?;
+        m.devices.uart.load(&mut r)?;
+        m.devices.keyboard.load(&mut r)?;
+        m.devices.cmos.load(&mut r)?;
+        m.devices.crtc.load(&mut r)?;
+
+        // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
+        // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
+        // 別マシンとして復元したことを覗き窓に映すため profile も合わせる
+        let mem = r.rle()?;
+        if !mem.len().is_power_of_two() {
+            return Err(format!("RAMサイズが2の冪でない ({})", mem.len()));
+        }
+        m.profile = if mem.len() == MEM_SIZE {
+            MachineProfile::PC_16BIT
+        } else {
+            MachineProfile {
+                name: "32bit PC",
+                ram_bytes: mem.len(),
+                has_fpu: true,
+                has_cpuid: true,
+            }
+        };
+        m.pic_service = m.devices.pic[0].has_pending();
+        m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
+        m.mem = mem;
+        // デコード済み命令の写しも同じ理由で総入れ替え (RAMサイズも変わりうる)
+        m.dcache = cpu::dcache::DecodeCache::new(m.mem.len());
+        m.disk = if r.bool()? {
+            Some(Disk::from_image(r.rle()?)?)
+        } else {
+            None
+        };
+
+        *self = m;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
