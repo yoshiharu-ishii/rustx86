@@ -1,6 +1,61 @@
 # CPU最適化ロードマップ
 
-判断の記録は [ADR-0007](adr/0007-cpu-optimization-steps.md)。ここは数字と進捗の生きた台帳。
+判断の記録は [ADR-0007](adr/0007-cpu-optimization-steps.md) (段階方針) と
+[ADR-0008](adr/0008-template-jit.md) (JIT設計)。ここは数字と進捗の生きた台帳。
+
+## 地図 — どの順で何をやって、いまどこか
+
+### 道のり (13 → 79 MIPS、ネイティブvmlinux基準)
+
+| 手 | 中身 | 結果 | PR |
+|---|---|---|---|
+| P0 | TLB・幅アクセス単一変換・REP一括 | 13 → 23.5 MIPS | Tier 3b期 |
+| E6/E1/E2 | HLT早送り・vmlinux直接ロード (-40%命令)・スナップショット起動 | 起動の55%を実行しない | [#37](https://github.com/yoshiharu-ishii/rustx86/pull/37) |
+| B1/B2 | デコード済み命令キャッシュ (dcache) + カバレッジ99% | -25%、wasm約2倍 | [#38](https://github.com/yoshiharu-ishii/rustx86/pull/38) |
+| C4+B4 | 条件付き控え + **ブロック連結** (同一ページ内は分岐もまたぐ) | **-43%**、66 MIPS到達 | [#40](https://github.com/yoshiharu-ishii/rustx86/pull/40) |
+| C1 | lazy flags (cc_op方式 — JITの土台を兼ねる) | -3〜4% | [#46](https://github.com/yoshiharu-ishii/rustx86/pull/46) |
+| C4b | 控えの薄切り (Cpu丸ごと400B→触る76Bだけ) | **-17%**、79 MIPS / wasm 63 | [#47](https://github.com/yoshiharu-ishii/rustx86/pull/47) |
+
+戦死者 (測って悪化・差なし、全部台帳に理由つきで記録済み): B3ペア融合 (+20〜28%)、
+B5ブロック配列化 (+8%)、C5 tick一括払い (+10%)、D2 TLBサイズ、TLB/表の固定長配列化、
+E3 quiet、C6フェッチ窓。**教訓: M1のOoOは毎命令の照合も帳簿も既に隠蔽している —
+インタプリタ内の再配置は40サイクル/命令の壁を動かせない。**
+
+### いまの実行経路 — どこにどの最適化が住んでいるか
+
+```mermaid
+flowchart TD
+    RUN["run / step_inner — 外側の帳簿<br>IRQ受付・TSC/tick・HLT判定"] --> HLT{"HLT中?"}
+    HLT -- はい --> FF["E6: アイドル早送り<br>次のPITパルスまで時計ごと飛ぶ"]
+    HLT -- いいえ --> SEG{"32bitコード?"}
+    SEG -- "いいえ (ELKS/FreeDOS)" --> STEP["従来経路 cpu::step<br>毎命令フェッチ+デコード"]
+    SEG -- はい --> CHAIN["B4: 連結ループ step_cached<br>同一ページ内は分岐もまたいで居座る"]
+    CHAIN --> LOOKUP["B1/B2: スロット照合<br>物理番地→デコード済みUop (99%ヒット)"]
+    LOOKUP -- ミス --> DEC["デコード1回だけ<br>(自己書き換えはページ世代で失効)"]
+    LOOKUP -- ヒット --> GUARD{"メモリに触るuop?"}
+    DEC --> GUARD
+    GUARD -- "はい" --> SLIM["C4/C4b: 薄切り控え<br>regs/ip/フラグ76Bだけ (#PF巻き戻し用)"]
+    GUARD -- いいえ --> EXEC
+    SLIM --> EXEC["実行 — 意味論は従来と同じヘルパ<br>C1: フラグは材料だけ控える (lazy)"]
+    EXEC --> MEM["メモリはTLB経由 (P0)<br>ページ内なら変換1回で4バイト"]
+    STEP -.->|"未対応命令のフォールバック先"| STEP
+```
+
+### これからのフロー — 100 MIPSまでとその先
+
+```mermaid
+flowchart LR
+    NOW["いま: 79 MIPS<br>(wasm 63)"] --> ADR{"ADR-0008の分岐点<br>割り込み受付点: 案A/案B"}
+    ADR --> F1A["F1a: JIT骨格 (wasm生成)<br>レジスタ間mov/ALU/jccのみ"]
+    F1A --> GATE{"関門: 生成+呼び出しの<br>固定費を回収できるか"}
+    GATE -- 回収不能 --> RETREAT["台帳に記録して撤退<br>(退路=インタプリタ、常に動く)"]
+    GATE -- 回収できる --> F1B["F1b: メモリアクセスの<br>テンプレート化"]
+    F1B --> GOAL(["🎯 100 MIPS — 店じまい"])
+    GOAL --> DOOM["ANSI端末DOOM<br>(マイルストーン)"]
+    DOOM --> T6["Tier 6a: フレームバッファ<br>→ VGA DOOM = Tier 6合格"]
+```
+
+各段の関門は変わらず: **cosim全緑 + kernel_lockstep + 命令数不変 (580M/1000M) + 交互A/B**。
 
 目標: **フルブート10秒** (Tier 3d)。GUI (Tier 6) で「使い物になる」ための地力であり、
 マイクロVM (Tier 8) の50台並行の分母でもある。
