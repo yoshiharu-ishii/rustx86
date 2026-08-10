@@ -28,7 +28,6 @@ export const MACHINES = [
     group: '',
     id: 'start',
     label: 'スタート',
-    sub: 'このアプリについて',
     kind: 'welcome',
   },
   {
