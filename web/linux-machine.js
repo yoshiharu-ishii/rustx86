@@ -38,6 +38,8 @@ export function mountLinux(canvas, opts = {}) {
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
   let busy = false;
   let mips = 0;
+  /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
+  let idle = false;
 
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
@@ -134,6 +136,7 @@ export function mountLinux(canvas, opts = {}) {
           break;
         case 'status':
           mips = msg.mips || 0;
+          idle = !!msg.idle;
           break;
         case 'trap':
           booted = false;
@@ -150,6 +153,7 @@ export function mountLinux(canvas, opts = {}) {
     get busy() { return busy; },
     get paused() { return paused; },
     get mips() { return mips; },
+    get idle() { return idle; },
     setPaused(v) {
       if (!worker || !booted || paused === v) return;
       paused = v;

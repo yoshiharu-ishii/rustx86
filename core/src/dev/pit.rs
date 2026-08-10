@@ -180,6 +180,20 @@ impl Pit8254 {
         pulses
     }
 
+    /// カウンタ0が次のパルスを出すまでのクロック数。止まっていれば None。
+    /// アイドル (HLT) の早送りが「どこまで飛べるか」を知るために使う
+    pub fn clocks_until_irq0(&self) -> Option<u32> {
+        let c = &self.counters[0];
+        if !c.running {
+            return None;
+        }
+        Some(if c.count == 0 {
+            c.reload_value()
+        } else {
+            c.count as u32
+        })
+    }
+
     /// カウンタ0の割り込み周波数 (Hz)。設定を確認するための補助
     pub fn irq0_hz(&self) -> f64 {
         let c = &self.counters[0];

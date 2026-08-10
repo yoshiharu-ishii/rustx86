@@ -68,7 +68,11 @@ fn main() {
         // 刻みは20万命令 ≒ 数ms — **これより粗いと打鍵の間隔がつぶれる**。
         // Escと次のキーが同じバッチで届くと、viがエスケープシーケンスの
         // 断片と解釈して両方を飲み込む (実機のシリアルはキー間に必ず隙間がある)
-        for _ in 0..200_000u32 {
+        //
+        // 予算は**仮想時間 (TSCの進み)** で数える。アイドル (HLT) の早送りが
+        // 入ったので、暇なときは数回のstepで20万命令ぶんの時間が流れる
+        let start_tsc = m.cpu.tsc;
+        while m.cpu.tsc.wrapping_sub(start_tsc) < 200_000 {
             m.step();
             if m.trap.is_some() {
                 break;
@@ -96,6 +100,14 @@ fn main() {
         if m.halted && !m.cpu.flag(cpu::IF) {
             eprintln!("\r\n[DEAD HALT at {:08x}]", m.cpu.ip);
             break;
+        }
+        // アイドル (HLT) の早送りが飛ばした仮想時間ぶんだけ、実時間で待つ。
+        // 待たずに回すとゲストの時計だけが実時間の何百倍も速く進む
+        // (snakeが目で追えなくなる)。忙しい実行は1命令も飛ばさないので
+        // 待ちゼロ = 全力で回る。換算は 1ゲスト秒 ≒ 1.193182MHz × 64命令
+        let skipped = std::mem::take(&mut m.idle_skipped);
+        if skipped > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(skipped * 1000 / 76_364));
         }
     }
 
