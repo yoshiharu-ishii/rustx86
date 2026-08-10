@@ -174,9 +174,7 @@ pub(crate) fn grp3_word(m: &mut Machine, d: &Decoder, start_ip: u32) {
 pub(crate) fn grp4(m: &mut Machine, d: &Decoder) {
     let (kind, rm) = modrm(m, d);
     let a = read_op8(m, &rm);
-    let cf = m.cpu.flag(CF);
-    let r = alu8(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1);
-    m.cpu.set_flag(CF, cf); // INC/DECはCFを変更しない
+    let r = super::alu::inc_dec8(&mut m.cpu, a, kind != 0); // INC/DECはCFを変更しない
     write_op8(m, &rm, r);
 }
 
@@ -187,9 +185,7 @@ pub(crate) fn grp5(m: &mut Machine, d: &Decoder, start_ip: u32) {
     match kind {
         0 | 1 => {
             let a = read_op_w(m, &rm, w);
-            let cf = m.cpu.flag(CF);
-            let r = alu_w(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1, w);
-            m.cpu.set_flag(CF, cf);
+            let r = super::alu::inc_dec_w(&mut m.cpu, a, kind != 0, w);
             write_op_w(m, &rm, r, w);
         }
         2 => {

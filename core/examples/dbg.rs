@@ -338,7 +338,7 @@ fn info(m: &Machine) {
         c.sregs[ES],
         c.sregs[SS],
         c.ip,
-        c.flags,
+        c.eflags(),
         flag_names(c),
     );
     // モードと、その根拠。保護モードで死ぬときの手掛かりは大抵ここにある

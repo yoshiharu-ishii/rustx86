@@ -35,7 +35,7 @@ pub fn interrupt(m: &mut Machine, n: u8) {
     }
 
     // --- リアルモード: IVT (0番地の 4バイト×256) を引く ---
-    let f = (m.cpu.flags as u16) | 0xF002;
+    let f = (m.cpu.eflags() as u16) | 0xF002;
     push16(m, f);
     // ハンドラ実行中は多重割り込みとシングルステップを止める。
     // 必要ならハンドラ側が STI で開け直す (これが「割り込み禁止区間」の正体)
@@ -151,7 +151,7 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
     }
 
     // EFLAGS, CS, EIP を32bitで積む (32bitゲート)
-    push32(m, m.cpu.flags);
+    push32(m, m.cpu.eflags());
     push32(m, m.cpu.sregs[CS] as u32);
     push32(m, m.cpu.ip);
     if let Some(e) = err {
@@ -192,7 +192,7 @@ pub fn iret(m: &mut Machine) {
         load_seg_raw(m, CS, sel);
         m.cpu.set_ip(ip);
         // 復元するフラグの範囲は POPFD と同じ (IOPL/NT/AC/ID まで)
-        m.cpu.flags = (f & 0x0024_7FD5) | 0x0002;
+        m.cpu.set_eflags((f & 0x0024_7FD5) | 0x0002);
         if let Some((esp, ss)) = outer {
             load_seg_raw(m, SS, ss);
             m.cpu.regs[SP] = esp;
@@ -202,7 +202,7 @@ pub fn iret(m: &mut Machine) {
     m.cpu.ip = pop16(m) as u32;
     m.cpu.sregs[CS] = pop16(m);
     let f = pop16(m);
-    m.cpu.flags = (f as u32 & 0x0FD5) | 0x0002;
+    m.cpu.set_eflags((f as u32 & 0x0FD5) | 0x0002);
 }
 
 /// ページフォールト (#PF, vector 14) の配送。

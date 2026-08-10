@@ -292,7 +292,7 @@ fn main() {
         m.cpu.sregs[rustx86_core::cpu::CS],
         m.cpu.ip,
         m.cpu.regs[rustx86_core::cpu::SP] as u16,
-        m.cpu.flags
+        m.cpu.eflags()
     );
 
     // ベクタごとの回数と初出。実OSのデバッグはここから始まる

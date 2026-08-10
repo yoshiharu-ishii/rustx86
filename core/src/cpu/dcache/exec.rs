@@ -4,10 +4,10 @@
 //! (alu8/alu_w/shift_rot/condition/push_w/pop_w、string::exec) を呼ぶ。
 //! ここにあるのは「オペランドの取り回し」だけである。
 
-use super::super::alu::{alu8, alu_w, condition, set_szp_w};
+use super::super::alu::{alu8, alu_w, condition, inc_dec_w};
 use super::super::operand::{pop_w, push_w};
 use super::super::shift::shift_rot;
-use super::super::{sp_write, string, Decoder, AF, AX, BP, CF, OF};
+use super::super::{sp_write, string, Decoder, AX, BP, CF, OF};
 use super::{MemRef, Rm, Uop};
 use crate::Machine;
 
@@ -295,20 +295,12 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         }
         Uop::IncR { reg } => {
             let a = m.cpu.regs[reg as usize];
-            let v = a.wrapping_add(1);
-            m.cpu.regs[reg as usize] = v;
-            // CFは触らない (従来経路と同じ)
-            m.cpu.set_flag(OF, a == 0x7FFF_FFFF);
-            m.cpu.set_flag(AF, a & 0xF == 0xF);
-            set_szp_w(&mut m.cpu, v, true);
+            // CFは触らない (従来経路と同じヘルパ)
+            m.cpu.regs[reg as usize] = inc_dec_w(&mut m.cpu, a, false, true);
         }
         Uop::DecR { reg } => {
             let a = m.cpu.regs[reg as usize];
-            let v = a.wrapping_sub(1);
-            m.cpu.regs[reg as usize] = v;
-            m.cpu.set_flag(OF, a == 0x8000_0000);
-            m.cpu.set_flag(AF, a & 0xF == 0);
-            set_szp_w(&mut m.cpu, v, true);
+            m.cpu.regs[reg as usize] = inc_dec_w(&mut m.cpu, a, true, true);
         }
         Uop::MovRmImm { rm, imm } => match rm {
             Rm::Reg(r) => m.cpu.regs[r as usize] = imm,
@@ -389,11 +381,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         }
         Uop::Grp5 { kind, rm } => match kind {
             0 | 1 => {
-                // inc/dec r/m: CFを保存して足し引き (従来経路の写し)
+                // inc/dec r/m: CF不変 (従来経路と同じヘルパ)
                 let (a, addr) = read_rm32_addr(m, rm);
-                let cf = m.cpu.flag(CF);
-                let r = alu_w(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1, true);
-                m.cpu.set_flag(CF, cf);
+                let r = inc_dec_w(&mut m.cpu, a, kind != 0, true);
                 match addr {
                     Some(a2) => m.write32(a2, r),
                     None => {
