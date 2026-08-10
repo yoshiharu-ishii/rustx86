@@ -10,7 +10,7 @@
 
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
-import { MACHINES, byGroup, statusLabel } from './machines.js';
+import { MACHINES, byGroup } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 
@@ -430,13 +430,10 @@ function renderMachines() {
       // 中身は本物の <a> — 新しいタブで開く・URLをコピーする、が普通にできる
       const b = document.createElement(m.href ? 'a' : 'button');
       b.title = m.note ?? '';
-      // 状態の丸と状態語はマシンだけ (「スタート」はマシンではない)
+      // 緑ランプ + 名前だけの1行。「動く」は色で分かるので言葉にしない。
+      // ランプはマシンだけ (「スタート」はマシンではない)
       const dot = m.status ? `<span class="dot ${m.status}"></span>` : '';
-      const meta = [m.sub, m.status && statusLabel(m.status)].filter(Boolean).join(' · ');
-      b.innerHTML =
-        `<span class="name">${dot}${m.label}</span>` +
-        `<span class="meta">${meta}</span>`;
-      b.querySelector('.meta').style.display = 'block';
+      b.innerHTML = `<span class="name">${dot}${m.label}</span>`;
       if (m.href) {
         b.href = m.href;
       } else {
