@@ -147,20 +147,21 @@ export function mountLinux(canvas, opts = {}) {
     }
 
     if (!snapshot) {
-      // ?kernel=bzimage で自己解凍経路を強制 (経路比較の計測用、docs/perf.md)。
-      // 普段は vmlinux 優先 — ホスト側で展開する方が起動の4割速い
-      const forceBz = new URLSearchParams(location.search).get('kernel') === 'bzimage';
+      // **既定は bzImage — 自己解凍ステブごと実行する本物のフル起動。**
+      // 実機がやることを全部やるのがこのエミュレータの意味なので、
+      // 速さのための近道 (vmlinux直接ロード) は ?kernel=vmlinux の
+      // 明示指定に格下げした (経路比較の計測用、docs/perf.md)
+      const wantVmlinux = new URLSearchParams(location.search).get('kernel') === 'vmlinux';
       try {
-        // vmlinux (非圧縮ELF) があればそちら — 自己解凍ステブが無いぶん
-        // 起動が4割速く、無言の黒画面が1/3になる (tools/extract-vmlinux.sh)
         try {
-          if (forceBz) throw new Error('bzImage強制');
+          if (!wantVmlinux) throw new Error('既定はbzImage');
+          // vmlinux (非圧縮ELF): 自己解凍ステブをホスト側の展開で飛ばす近道
           const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
           status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
           const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
           kernel = new Uint8Array(await new Response(ds).arrayBuffer());
         } catch {
-          kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル');
+          kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル (bzImage)');
         }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
