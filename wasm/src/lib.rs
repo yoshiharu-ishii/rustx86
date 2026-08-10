@@ -336,11 +336,17 @@ impl Emulator {
         )
     }
 
-    /// メモリを読む。**デバッガ用なので副作用は無い**
+    /// メモリを読む (線形アドレス — ページング有効ならページ表を通る)。
+    /// **デバッガ用なので副作用は無い。** read8 は未マップの読みで
+    /// pending_fault を植える (実行系はそれを命令末で#PFにする) ので、
+    /// 覗き見がそれを残さないよう前後で退避する。未マップは 0xFF で見える
     pub fn read_mem(&self, addr: u32, len: u32) -> Vec<u8> {
-        (0..len)
+        let saved = self.m.pending_fault.get();
+        let v = (0..len)
             .map(|i| self.m.read8(addr.wrapping_add(i)))
-            .collect()
+            .collect();
+        self.m.pending_fault.set(saved);
+        v
     }
 
     pub fn set_break(&mut self, lin: u32) {
@@ -458,7 +464,9 @@ impl Emulator {
             .iter()
             .map(|s| {
                 let b: Vec<String> = s.bytes.iter().map(|v| format!("{v:02x}")).collect();
-                let asm = rustx86_disasm::one(&s.bytes, bits, s.ip as u64).replace('"', "'");
+                let asm = rustx86_disasm::one(&s.bytes, bits, s.ip as u64)
+                    .replace('\\', "\\\\")
+                    .replace('"', "'");
                 format!(
                     r#"{{"i":{},"cs":{},"ip":{},"b":"{}","asm":"{}"}}"#,
                     s.instr,
