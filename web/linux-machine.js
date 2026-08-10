@@ -147,10 +147,14 @@ export function mountLinux(canvas, opts = {}) {
     }
 
     if (!snapshot) {
+      // ?kernel=bzimage で自己解凍経路を強制 (経路比較の計測用、docs/perf.md)。
+      // 普段は vmlinux 優先 — ホスト側で展開する方が起動の4割速い
+      const forceBz = new URLSearchParams(location.search).get('kernel') === 'bzimage';
       try {
         // vmlinux (非圧縮ELF) があればそちら — 自己解凍ステブが無いぶん
         // 起動が4割速く、無言の黒画面が1/3になる (tools/extract-vmlinux.sh)
         try {
+          if (forceBz) throw new Error('bzImage強制');
           const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
           status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
           const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
