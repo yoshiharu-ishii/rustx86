@@ -308,7 +308,7 @@ impl Emulator {
                 .collect::<Vec<_>>()
                 .join(","),
             c.ip,
-            c.flags,
+            c.eflags(),
             flags.join(" "),
             bytes.join(" "),
             asm.replace('\\', "\\\\").replace('"', "'"),
