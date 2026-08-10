@@ -3,6 +3,10 @@ name = "rustx86-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# オペコード実行回数の計測 (デコードキャッシュの対象選定用)。通常ビルドは数えない
+opstats = []
+
 [dependencies]
 
 [dev-dependencies]

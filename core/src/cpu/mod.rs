@@ -436,6 +436,10 @@ pub fn step(m: &mut Machine) {
         m.prefixed_ops.insert(op);
     }
 
+    if cfg!(feature = "opstats") {
+        m.op_counts[op as usize] += 1;
+    }
+
     match op {
         // --- ALUグリッド: 0x00-0x3D (演算3bit x 形式3bit) ---
         0x00..=0x3F if op & 7 <= 5 && (op & 0x27) != 0x26 && (op & 0x27) != 0x27 => {
