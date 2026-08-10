@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod debug;
 pub mod dev;
 pub mod disk;
+pub mod elf;
 pub mod snapshot;
 
 pub use bios::BIOS_SEG;
@@ -123,6 +124,9 @@ pub struct Machine {
     /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
     /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
     pub prefixed_ops: std::collections::BTreeSet<u8>,
+    /// `prefixed_ops` の「もう控えたか」を配列で持つ。
+    /// ホットパス (毎プレフィクス命令) で BTreeSet を歩かないため
+    pub prefixed_seen: [bool; 256],
     /// ユーザー空間で #UD にした未実装命令の理由 (観測用)。
     /// 機械は止めない — OSがSIGILLで裁く。実装すべきものの一覧になる
     pub ud_user: std::collections::BTreeSet<String>,
@@ -165,6 +169,13 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
+    ///
+    /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
+    /// ない (スナップショットに入れない)。ランナーはスライスごとにこれを
+    /// 読み取って、「飛ばした時間ぶんだけ実時間で待つ」ことでゲストの時計を
+    /// 実時間に繋ぎ止める。忙しい実行は自由に速く、暇は実時間どおりに流れる
+    pub idle_skipped: u64,
     /// TLB — 線形→物理の変換の写し。**ページングの最大のボトルネックを消す。**
     ///
     /// ページング有効時、変換1回は2段の表 (PDE→PTE) を読む = 物理メモリ2回。
@@ -237,6 +248,7 @@ impl Machine {
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
+            prefixed_seen: [false; 256],
             video_modes: std::collections::BTreeSet::new(),
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
@@ -251,6 +263,7 @@ impl Machine {
             trap_ip: 0,
             trap: None,
             halted: false,
+            idle_skipped: 0,
             tlb: (0..TLB_SLOTS)
                 .map(|_| {
                     std::cell::Cell::new(TlbEntry {
@@ -332,13 +345,15 @@ impl Machine {
     /// PITがカウンタ0を下ろしきってIRQ0を出す → PICが優先順位を見て受理し、
     /// ICW2で設定されたベースから割り込みベクタを決める → CPUが命令境界で受け取る。
     /// この経路のどこか1つでも欠けるとOSのスケジューラが動かない。
-    fn tick_devices(&mut self) {
-        if self.devices.pit.tick(PIT_CLOCKS_PER_TICK) > 0 {
+    /// 装置を `ticks` 回ぶん進める。通常経路は1、アイドルの早送りだけが
+    /// まとめて渡す。クロックはまとめても1回ずつでも同じ数だけ進む
+    fn tick_devices(&mut self, ticks: u32) {
+        if self.devices.pit.tick(ticks * PIT_CLOCKS_PER_TICK) > 0 {
             self.devices.pic[0].raise(IRQ_TIMER);
         }
         // 時計もPITと同じクロックで進める。**ここで進めるのが要点**で、
         // INT 08h の中で進めるとOSが自前のハンドラを入れた瞬間に時計が止まる
-        self.devices.cmos.tick(PIT_CLOCKS_PER_TICK);
+        self.devices.cmos.tick(ticks * PIT_CLOCKS_PER_TICK);
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
@@ -356,6 +371,42 @@ impl Machine {
     /// PICに未処理の要求があるか (CPUが受けにいくべきか)
     fn pic_has_service(&self) -> bool {
         self.pic_service
+    }
+
+    /// アイドル (HLT) の早送り。
+    ///
+    /// HLT中のCPUは命令を実行しない。次に何かが起きるとしたら装置イベント
+    /// だけなので、1命令ぶんずつ空回りせず、**次のPITパルスまで時計と装置を
+    /// 一気に進める**。シェルのプロンプトで待っているだけの機械が、
+    /// ホストのCPUを食いつぶすのをやめる。
+    ///
+    /// 約束は一つ: **飛ばした分だけTSCと装置のクロックも進める。**
+    /// 止まるのはCPUであって時計ではない。時計を置き去りにすると、
+    /// nanosleep したプロセスが永遠に起きない罠 (Tier 3bで実際に踏んだ) を
+    /// 逆向きにもう一度踏むことになる。
+    fn idle_fast_forward(&mut self) {
+        // 既に挙手があるなら飛ばさない。IF=1なら次のstepで配送されて起きるし、
+        // IF=0で寝ている機械の時計だけが暴走するのも防ぐ (従来の1刻みに落とす)
+        if self.pending_irq.is_some() || self.pic_service {
+            return;
+        }
+        // タイマが止まっているなら、起こせるのは外部入力 (キー・シリアル) だけ。
+        // それはスライスの外から来るので、run() 側の「タイマも止まっていれば
+        // 抜ける」判定に任せ、ここでは飛ばさない
+        let Some(clocks) = self.devices.pit.clocks_until_irq0() else {
+            return;
+        };
+        // クロック → tick数 (切り上げ)。パルスが出る tick まで飛ぶ
+        let ticks = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1);
+        // 命令数に換算: 次のtickまでの残り + そこから先のtick分。
+        // この間 step() は呼ばれなかったことになるので、TSCをまとめて進める
+        let skip = self.tick_countdown as u64 + (ticks as u64 - 1) * INSTRUCTIONS_PER_TICK as u64;
+        self.cpu.tsc = self.cpu.tsc.wrapping_add(skip);
+        self.idle_skipped = self.idle_skipped.wrapping_add(skip);
+        self.tick_countdown = INSTRUCTIONS_PER_TICK;
+        // 装置をまとめて進める。PITはここで丁度1パルス出し、次のstepの
+        // 冒頭で割り込みとして配送されて目が覚める
+        self.tick_devices(ticks);
     }
 
     /// ディスクイメージを入れ、その先頭セクタからブートする
@@ -388,6 +439,66 @@ impl Machine {
         self.boot_bzimage_with_initrd(image, cmdline, None)
     }
 
+    /// Linux を起動する (bzImage / vmlinux の自動判別)。
+    ///
+    /// 先頭が ELF なら vmlinux 直接ロード (解凍ステブ無し = 起動が半分)、
+    /// そうでなければ bzImage。呼ぶ側はファイルの中身を気にしなくてよい
+    pub fn boot_linux_with_initrd(
+        &mut self,
+        image: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+    ) -> Result<(), String> {
+        if elf::is_elf(image) {
+            self.boot_vmlinux_with_initrd(image, cmdline, initrd)
+        } else {
+            self.boot_bzimage_with_initrd(image, cmdline, initrd)
+        }
+    }
+
+    /// 非圧縮の vmlinux (ELF32) を直接ロードして起動する。
+    ///
+    /// bzImage の自己解凍ステブは**起動全体の55% (540M命令) を無言で食う**。
+    /// 展開済みのカーネルをこちらで物理メモリに置けば、その区間は丸ごと消える。
+    /// Firecracker が bzImage ではなく vmlinux を要求するのと同じ判断。
+    /// vmlinux は tools/extract-vmlinux.sh で bzImage から取り出せる
+    pub fn boot_vmlinux_with_initrd(
+        &mut self,
+        image: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let v = elf::parse_vmlinux(image)?;
+        self.power_on_self_test();
+
+        // セグメントを物理メモリへ。解凍ステブがやっていた仕事の代行:
+        // ファイルの中身を写し、memsz までの残り (BSS) をゼロで埋める
+        for s in &v.segments {
+            let end = s.paddr as usize + s.memsz;
+            if end > self.mem.len() {
+                return Err(format!(
+                    "vmlinux のセグメント (物理 0x{:08x}..0x{end:08x}) がRAM ({}MB) に収まらない",
+                    s.paddr,
+                    self.mem.len() >> 20
+                ));
+            }
+            let dst = s.paddr as usize;
+            self.mem[dst..dst + s.filesz].copy_from_slice(&image[s.offset..s.offset + s.filesz]);
+            self.mem[dst + s.filesz..end].fill(0);
+        }
+
+        // zero page に写すセットアップヘッダが vmlinux には無いので合成する。
+        // カーネルが読み返して意味を持つ欄だけ: マジック・版・LOADED_HIGH。
+        // (type_of_loader / ramdisk / cmdline は build_zero_page 自身が書く)
+        let mut hdr_src = vec![0u8; 0x268];
+        hdr_src[0x202..0x206].copy_from_slice(b"HdrS");
+        hdr_src[0x206..0x208].copy_from_slice(&0x020Cu16.to_le_bytes());
+        hdr_src[0x211] = 0x01; // LOADED_HIGH
+        hdr_src[0x214..0x218].copy_from_slice(&v.entry.to_le_bytes());
+
+        self.finish_linux_boot(&hdr_src, cmdline, initrd, v.entry)
+    }
+
     /// initrd (initramfs) 付きの bzImage 起動。
     /// initrd は**RAMの高い方**に置く — カーネル本体 (1MB〜) と展開作業域から
     /// 遠ざけるのが慣習で、実ブートローダも同じことをする
@@ -397,7 +508,6 @@ impl Machine {
         cmdline: &str,
         initrd: Option<&[u8]>,
     ) -> Result<(), String> {
-        use cpu::{CS, DS, ES, FS, GS, SS};
         let hdr = bzimage::SetupHeader::parse(image)?;
         if !hdr.loaded_high() {
             return Err("LOADED_HIGH でない (bzImage ではなく zImage?)".into());
@@ -411,6 +521,23 @@ impl Machine {
         for (i, b) in kbody.iter().enumerate() {
             self.write_phys8(KERNEL_BASE + i as u32, *b);
         }
+
+        self.finish_linux_boot(image, cmdline, initrd, hdr.code32_start)
+    }
+
+    /// Linux 起動の共通の尾部 — カーネル本体を置いた後の仕事。
+    /// cmdline / initrd / zero page を配り、フラット32bitの姿勢を作って
+    /// `entry` へ飛ぶ。bzImage と vmlinux の両経路がここへ合流する。
+    /// `hdr_src` は zero page に写すセットアップヘッダの持ち主
+    /// (bzImage ならファイル先頭、vmlinux なら合成したもの)
+    fn finish_linux_boot(
+        &mut self,
+        hdr_src: &[u8],
+        cmdline: &str,
+        initrd: Option<&[u8]>,
+        entry: u32,
+    ) -> Result<(), String> {
+        use cpu::{CS, DS, ES, FS, GS, SS};
 
         // cmdline を低位に置く (慣習の 0x2_0000)
         const CMDLINE_ADDR: u32 = 0x0002_0000;
@@ -440,7 +567,7 @@ impl Machine {
 
         // zero page を組んで低位に置く (慣習の 0x1_0000)
         const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(image, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
+        let zp = bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }
@@ -478,7 +605,7 @@ impl Machine {
 
         // 規約: %esi = zero page、エントリへ
         self.cpu.regs[cpu::SI] = ZERO_PAGE_ADDR;
-        self.cpu.set_ip(hdr.code32_start);
+        self.cpu.set_ip(entry);
         self.cpu.set_flag(cpu::IF, false); // カーネルが自分でSTIするまで割り込み禁止
         Ok(())
     }
@@ -518,7 +645,12 @@ impl Machine {
         // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
         let a = pa as usize;
         if a + 4 <= self.mem.len() {
-            u32::from_le_bytes([self.mem[a], self.mem[a + 1], self.mem[a + 2], self.mem[a + 3]])
+            u32::from_le_bytes([
+                self.mem[a],
+                self.mem[a + 1],
+                self.mem[a + 2],
+                self.mem[a + 3],
+            ])
         } else {
             u32::from_le_bytes([
                 self.read_phys8(pa),
@@ -576,10 +708,18 @@ impl Machine {
         let user = self.cpu.cpl() == 3 && !self.sys_access.get();
         let wp = self.cpu.cr0 & 0x0001_0000 != 0;
         if write && !writable && (user || wp) {
-            return Err(PageFault { la, write, present: true });
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
+            });
         }
         if user && !user_ok {
-            return Err(PageFault { la, write, present: true });
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
+            });
         }
         Ok(base | (la & 0xFFF))
     }
@@ -588,7 +728,11 @@ impl Machine {
     /// 返すのは (4K境界の物理先頭, 書けるか, ユーザーで触れるか)。
     /// **不在は Err(present:false)** — これは TLB に載せない (次回また歩く)
     fn walk_page(&self, la: u32) -> Result<(u32, bool, bool), PageFault> {
-        let notp = || PageFault { la, write: false, present: false };
+        let notp = || PageFault {
+            la,
+            write: false,
+            present: false,
+        };
         let dir = (la >> 22) & 0x3FF;
         let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
         if pde & 1 == 0 {
@@ -643,9 +787,6 @@ impl Machine {
     /// VRAMやデバッガの都合は呼び出し側が事前に外す
     pub(crate) fn mem_slice_mut(&mut self) -> &mut [u8] {
         &mut self.mem
-    }
-    pub(crate) fn mem_slice(&self) -> &[u8] {
-        &self.mem
     }
 
     /// メモリ書き込み。
@@ -1232,10 +1373,11 @@ impl Machine {
         self.tick_countdown -= 1;
         if self.tick_countdown == 0 {
             self.tick_countdown = INSTRUCTIONS_PER_TICK;
-            self.tick_devices();
+            self.tick_devices(1);
         }
 
         if self.halted {
+            self.idle_fast_forward();
             return;
         }
 
@@ -1295,7 +1437,18 @@ impl Machine {
         // レジスタを残すと、再実行が汚れの上に積む。実際に `add mem,reg` の
         // 読みがデマンドページングに当たり、フォールトの器 0xFFFFFFFF を
         // 足した EDX (-1) のまま再実行して、muslのELF解析が1バイトずれた
-        let saved = self.cpu.clone();
+        //
+        // ただし**要るときだけ控える**。控えの使い道は #PF の巻き戻し
+        // (ページング有効時しか起きない) と、ユーザー空間 (CPL=3) の #UD
+        // 巻き戻しの2つ。どちらも起き得ない「ページングOFFかつリング0」—
+        // bzImage の解凍ステブや16bit機の全域 — では、毎命令352バイトの
+        // 複写が純粋な無駄になる。PGは命令の途中で変わらない (mov cr0 は
+        // その後にメモリを触らない) ので、命令の頭の判定で足りる
+        let saved = if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+            Some(self.cpu.clone())
+        } else {
+            None
+        };
         cpu::step(self);
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
@@ -1311,7 +1464,8 @@ impl Machine {
             if self.cpu.cpl() == 3 && self.pending_fault.get().is_none() {
                 self.ud_user.insert(t.reason.clone());
                 self.trap = None;
-                self.cpu = saved;
+                // CPL=3 で実行した命令なら、頭の判定で必ず控えている
+                self.cpu = saved.expect("CPL=3 の命令に控えが無い");
                 cpu::interrupt(self, 6);
                 return;
             }
@@ -1329,7 +1483,8 @@ impl Machine {
             // デコードし、偽の「未実装」トラップが立つことがある。
             // 本当の事件は #PF の方 — トラップは取り消して配送する
             self.trap = None;
-            self.cpu = saved;
+            // #PF はページング有効時にしか起きず、そのときは必ず控えている
+            self.cpu = saved.expect("#PF なのに控えが無い (ページングOFFで#PF?)");
             self.cpu.cr2 = f.la;
             let err = (f.present as u32)
                 | ((f.write as u32) << 1)
@@ -1347,9 +1502,21 @@ impl Machine {
 
     /// HLTするか命令数上限まで実行。
     /// 割り込みが保留されていればHLTでも止まらない (目を覚ますため)
+    ///
+    /// 上限も戻り値も**仮想時間 (TSCの進み)** で数える。忙しいときは
+    /// 1命令=1なので従来と同じだが、アイドルの早送りが飛ばした分も含む。
+    /// ここを呼んだ回数 (実仕事) で数えると、アイドル中は1回でPIT1周期ぶん
+    /// 時間が飛ぶので、同じ予算でゲストの時計が何百倍も速く回ってしまう —
+    /// DOSの時計が暴走し、snakeが目で追えない速さになる。
+    /// 「予算=仮想時間」にしておけば、呼ぶ側は実時間に合わせて予算を配る
+    /// だけで、忙しくても暇でもゲストの時計は同じ速さで流れる。
     pub fn run(&mut self, max_instructions: u64) -> u64 {
-        let mut n = 0;
-        while n < max_instructions {
+        let start_tsc = self.cpu.tsc;
+        loop {
+            let elapsed = self.cpu.tsc.wrapping_sub(start_tsc);
+            if elapsed >= max_instructions {
+                return elapsed;
+            }
             // HLT中でも装置は動き続ける。タイマ割り込みで目を覚ますため、
             // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
             if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
@@ -1359,7 +1526,6 @@ impl Machine {
                 break; // 未実装にぶつかった。生きたまま止まっている
             }
             self.step();
-            n += 1;
             // デバッガが止めたら抜ける。**見張っていなければ真偽値1つ**なので
             // 計測経路には効かない。
             //
@@ -1370,7 +1536,7 @@ impl Machine {
                 break;
             }
         }
-        n
+        self.cpu.tsc.wrapping_sub(start_tsc)
     }
 
     pub fn console_string(&self) -> String {

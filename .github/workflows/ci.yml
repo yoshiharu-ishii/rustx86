@@ -1,19 +1,23 @@
-# PRと、mainへのマージで回すCI。
+# CI パイプライン — コードチェック → (CPU照合 ∥ OS起動回帰) → OK
 #
 # 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
 #
 # 要点:
-# - Checksタブに出すのは「CI」(ジョブ、消せない) と「CI 結果」(本文つき) の2つ
+# - **段構え**: 安いコードチェックが先に走り、通ったときだけ重い検査
+#   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を
+#   払わない。最後の OK は全段の合流点
 # - レポートは**何をしたかと結果だけ**。説明の文章は docs/ci.md に書く
 # - 各ステージは continue-on-error で最後まで走らせてから束ねる
 #   (テストが落ちてもビルドの結果は見たい)
-# - cosim (CPU照合) は別ワークフロー。CPUを触ったPRでだけ回る
+# - CPU照合は以前 paths で「CPUを触ったPRだけ」に絞っていたが、段構えに
+#   したので常に回す — 回る時間は起動回帰と並行で隠れ、条件が単純になる
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,8 +27,8 @@ env:
   CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
 
 jobs:
-  ci:
-    name: CI
+  check:
+    name: コードチェック
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,3 +140,109 @@ jobs:
             && test "${{ steps.wasm.outcome }}" = "success" \
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"
+
+  # ---- 段2: 重い検査。コードチェックが通ったときだけ、並行して走る ----
+
+  cosim:
+    name: CPU照合
+    needs: check
+    runs-on: ubuntu-latest
+    # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unicornとの突き合わせ
+        id: cosim
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## CPU照合 — `cargo test -p rustx86-cosim` (Unicornと毎命令比較)'
+            echo '```'
+            cargo test -p rustx86-cosim > raw.log 2>&1 || RC=$?
+            grep -vE '^(   Compiling|    Finished|     Running)' raw.log | tee /dev/stderr || true
+            echo '```'
+            exit ${RC:-0}
+          } > cosim-report.md
+      - uses: ./.github/actions/publish-check
+        with:
+          name: CPU照合 結果
+          title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
+          outcome: ${{ steps.cosim.outcome }}
+          report-file: cosim-report.md
+
+      - name: 合否判定
+        run: test "${{ steps.cosim.outcome }}" = "success"
+
+  regress:
+    name: OS起動回帰
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
+      # 入手経路は tools/fetch-images.sh ただ一つ — CIだけの取り方を作ると
+      # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/fetch-images.sh elks
+          tools/fetch-images.sh freedos-boot
+          tools/fetch-images.sh linux
+          tools/extract-vmlinux.sh
+          tools/make-mini-initramfs.sh
+
+      - name: 起動回帰 (プロンプト到達 + 画面のスクショ)
+        id: regress
+        continue-on-error: true
+        run: cargo run --release --example regress | tee regress.md
+
+      # ブートログを証跡として残す。ゲストの時計は決定的なので、
+      # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
+      # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
+      - name: ブートログを証跡に残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-logs
+          path: regress-out/
+          if-no-files-found: warn
+
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: OS起動回帰 結果
+          title: ${{ steps.regress.outcome == 'success' && 'ELKS / FreeDOS / Linux 合格' || '失敗あり' }}
+          outcome: ${{ steps.regress.outcome }}
+          report-file: regress.md
+
+      - name: 合否判定
+        run: test "${{ steps.regress.outcome }}" = "success"
+
+  # ---- 合流点。全部通って初めて OK ----
+
+  ok:
+    name: OK
+    if: always()
+    needs: [check, cosim, regress]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 全段の合否
+        run: |
+          test "${{ needs.check.result }}" = "success" \
+            && test "${{ needs.cosim.result }}" = "success" \
+            && test "${{ needs.regress.result }}" = "success"

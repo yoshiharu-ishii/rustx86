@@ -12,7 +12,8 @@ cd "$(dirname "$0")/.."
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 # busybox と musl (Alpineのbusyboxは**動的リンク** — ローダとlibcも要る。
 # 最初これを忘れて "No working init found" で1敗した)
-(cd "$work" && gzcat "$OLDPWD/images/initramfs-lts" | cpio -idm --quiet 2>/dev/null)
+# gzcat は macOS の名前で Linux (CI) には無い。gunzip -c は両方に居る
+(cd "$work" && gunzip -c "$OLDPWD/images/initramfs-lts" | cpio -idm --quiet 2>/dev/null)
 [ -f "$work/bin/busybox" ] || { echo "busyboxが取り出せない"; exit 1; }
 [ -f "$work/lib/ld-musl-i386.so.1" ] || { echo "ld-muslが取り出せない"; exit 1; }
 

@@ -9,3 +9,8 @@ web/initramfs-mini
 web/initramfs-lts
 # セッション間の引き継ぎメモ (内部文書。積み上げず、片付いたら消す)
 HANDOFF.md
+# 起動済みLinuxスナップショット (配布物。tools/make-linux-snapshot.sh で作る)
+web/linux-booted.snap.gz
+web/vmlinux-lts.gz
+# 起動回帰の証跡 (CIアーティファクト用の一時出力)
+regress-out/

@@ -81,6 +81,15 @@ impl Emulator {
         self.m.run(max_instructions as u64) as f64
     }
 
+    /// 直近の呼び出し以降に、アイドル (HLT) の早送りが飛ばした仮想命令数。
+    /// 読むとゼロに戻る。ランナーはこれを実時間に換算して待ち、
+    /// **暇なゲストの時計が実時間より速く回らないように**する
+    pub fn take_idle_skipped(&mut self) -> f64 {
+        let v = self.m.idle_skipped;
+        self.m.idle_skipped = 0;
+        v as f64
+    }
+
     pub fn halted(&self) -> bool {
         self.m.halted
     }
@@ -120,8 +129,9 @@ impl Emulator {
         Ok(Emulator { m })
     }
 
-    /// bzImage (+ initramfs) から 32bit Linux を起動する。
-    /// `ram_mb` はRAMサイズ (MB)、`cmdline` はカーネルコマンドライン。
+    /// カーネルイメージ (+ initramfs) から 32bit Linux を起動する。
+    /// bzImage / vmlinux (ELF) は中身で自動判別 — vmlinux なら自己解凍ステブが
+    /// 無いぶん起動が4割速い。`ram_mb` はRAMサイズ (MB)。
     /// コンソールはシリアル (ttyS0) — `serial_out` / `serial_in` で読み書きする
     pub fn from_bzimage(
         kernel: &[u8],
@@ -130,8 +140,19 @@ impl Emulator {
         ram_mb: usize,
     ) -> Result<Emulator, JsError> {
         let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
-        m.boot_bzimage_with_initrd(kernel, cmdline, initrd.as_deref())
+        m.boot_linux_with_initrd(kernel, cmdline, initrd.as_deref())
             .map_err(|e| JsError::new(&e))?;
+        Ok(Emulator { m })
+    }
+
+    /// 起動済みスナップショットから機械を丸ごと復元する。
+    ///
+    /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を
+    /// 控えておき、次からはそこから始める (Firecrackerのsnapshot相当)。
+    /// RAMサイズはスナップショットが暗黙に持つので引数は要らない
+    pub fn from_snapshot(data: &[u8]) -> Result<Emulator, JsError> {
+        let mut m = Machine::new();
+        m.load_state(data).map_err(|e| JsError::new(&e))?;
         Ok(Emulator { m })
     }
 
@@ -155,13 +176,19 @@ impl Emulator {
             .unwrap_or_default()
     }
 
-    /// 指定した命令数だけ進める。**1フレーム分の仕事**として呼ぶ。
+    /// 指定した仮想時間 (命令数換算) だけ進める。**1フレーム分の仕事**として呼ぶ。
     ///
     /// HLTで止まっていても抜けない — タイマ割り込みで起きるのを待つ必要があるため。
-    /// アイドル中のOSは「HLTして割り込みを待つ」を繰り返している
+    /// アイドル中のOSは「HLTして割り込みを待つ」を繰り返している。
+    ///
+    /// 予算は**TSCの進み**で数える。忙しいときは1命令=1で従来どおりだが、
+    /// アイドル (HLT) の早送りが飛ばした時間も含む。step の回数で数えると、
+    /// 暇なときは1回でPIT1周期ぶん時間が飛ぶので、同じ予算でゲストの時計が
+    /// 何百倍も速く回ってしまう
     pub fn run_slice(&mut self, instructions: f64) {
-        let n = instructions as u64;
-        for _ in 0..n {
+        let budget = instructions as u64;
+        let start = self.m.cpu.tsc;
+        while self.m.cpu.tsc.wrapping_sub(start) < budget {
             self.m.step();
             // デバッガが止めたらフレームを打ち切る。**見張っていなければ
             // この判定は真偽値1つ**なので、通常の実行には効かない

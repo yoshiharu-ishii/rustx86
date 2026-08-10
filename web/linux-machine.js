@@ -38,6 +38,8 @@ export function mountLinux(canvas, opts = {}) {
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
   let busy = false;
   let mips = 0;
+  /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
+  let idle = false;
 
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
@@ -86,28 +88,57 @@ export function mountLinux(canvas, opts = {}) {
     term.reset();
     opts.onState?.();
 
-    let kernel, initrd;
+    // まず**起動済みスナップショット**を探す (tools/make-linux-snapshot.sh が作る)。
+    // あれば数秒で立つ — 「シンプルなカーネルの起動に1分」への即効薬で、
+    // フル起動はスナップショットが無いときの道として残す
+    let snapshot = null;
+    let kernel = null;
+    let initrd = null;
     try {
-      kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル');
-      // initramfs は無くてもよい (無ければルートFS無しで止まる)
+      const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
+      status('スナップショットを展開中…');
+      const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+      snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
+    } catch {
+      snapshot = null; // 無ければカーネルからのフル起動に落ちる
+    }
+
+    if (!snapshot) {
       try {
-        initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
-      } catch {
-        initrd = null;
+        // vmlinux (非圧縮ELF) があればそちら — 自己解凍ステブが無いぶん
+        // 起動が4割速く、無言の黒画面が1/3になる (tools/extract-vmlinux.sh)
+        try {
+          const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
+          status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
+          const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+          kernel = new Uint8Array(await new Response(ds).arrayBuffer());
+        } catch {
+          kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル');
+        }
+        // initramfs は無くてもよい (無ければルートFS無しで止まる)
+        try {
+          initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+        } catch {
+          initrd = null;
+        }
+      } catch (e) {
+        status(
+          `イメージが読めない: ${e.message}。` +
+            'tools/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
+          true,
+        );
+        busy = false;
+        opts.onState?.();
+        return;
       }
-    } catch (e) {
-      status(
-        `イメージが読めない: ${e.message}。` +
-          'tools/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
-        true,
-      );
-      busy = false;
-      opts.onState?.();
-      return;
     }
     if (!alive) return; // fetch の間に別のマシンへ切り替えられた
 
-    status('ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)');
+    status(
+      snapshot
+        ? '起動済みの機械を復元中…'
+        : 'ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)',
+    );
 
     // 前のワーカーがあれば止める
     if (worker) worker.terminate();
@@ -118,13 +149,21 @@ export function mountLinux(canvas, opts = {}) {
       switch (msg.type) {
         case 'ready': {
           // 転送可能オブジェクトで渡す (コピーを避ける)
-          worker.postMessage(
-            { type: 'boot', kernel: kernel.buffer, initrd: initrd?.buffer, cmdline: 'console=ttyS0', ramMb: 128 },
-            initrd ? [kernel.buffer, initrd.buffer] : [kernel.buffer],
-          );
+          if (snapshot) {
+            worker.postMessage({ type: 'boot', snapshot: snapshot.buffer }, [snapshot.buffer]);
+          } else {
+            worker.postMessage(
+              { type: 'boot', kernel: kernel.buffer, initrd: initrd?.buffer, cmdline: 'console=ttyS0', ramMb: 128 },
+              initrd ? [kernel.buffer, initrd.buffer] : [kernel.buffer],
+            );
+          }
           booted = true;
           busy = false;
-          status('起動中… 画面をクリックするとキー入力できます');
+          status(
+            snapshot
+              ? '起動済みの状態から再開した。画面をクリックするとキー入力できます'
+              : '起動中… 画面をクリックするとキー入力できます',
+          );
           canvas.focus();
           opts.onState?.();
           break;
@@ -134,6 +173,7 @@ export function mountLinux(canvas, opts = {}) {
           break;
         case 'status':
           mips = msg.mips || 0;
+          idle = !!msg.idle;
           break;
         case 'trap':
           booted = false;
@@ -150,6 +190,7 @@ export function mountLinux(canvas, opts = {}) {
     get busy() { return busy; },
     get paused() { return paused; },
     get mips() { return mips; },
+    get idle() { return idle; },
     setPaused(v) {
       if (!worker || !booted || paused === v) return;
       paused = v;
