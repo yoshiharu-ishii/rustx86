@@ -1,5 +1,7 @@
 # CPU最適化ロードマップ
 
+判断の記録は [ADR-0007](adr/0007-cpu-optimization-steps.md)。ここは数字と進捗の生きた台帳。
+
 目標: **フルブート10秒** (Tier 3d)。GUI (Tier 6) で「使い物になる」ための地力であり、
 マイクロVM (Tier 8) の50台並行の分母でもある。
 
@@ -38,6 +40,11 @@
 - [x] vmlinux 直接ロード — 自己解凍ステブ540M命令 (起動の55%) を消す
 - [x] 条件付きCPU控え — ページングOFF+リング0では複写しない (解凍ステブ -15%)
 - [x] スナップショット起動 — そもそも起動しない (Tier 8c の前倒し)
+
+残る小ネタ (P1と独立にいつでも試せる):
+- cmdline に earlyprintk=serial,ttyS0 — コンソール登録前の無言150M命令の体感を削る (未検証)
+- linux-boot.log に MSR 0x8b (microcode) への unchecked WRMSR/RDMSR 警告が
+  記録されている — rdmsr_safe の fixup 対象として潰せるはず (実害は無い)
 
 ### P1: デコード済み命令キャッシュ — 本丸 (次のPR)
 
