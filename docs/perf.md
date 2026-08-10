@@ -182,8 +182,8 @@ dcacheは32bit専用)。16bit機の体感には足りているので投資はし
 
 | 経路 | 中身 | 命令数の目安 |
 |---|---|---|
-| vmlinux | 非圧縮ELFを**ホスト側で展開して**直接ロード (既定・速い) | 600M |
-| bzImage (vmlinuz) | ゲストの中で自己解凍ステブが走る | 1000M |
+| bzImage (vmlinuz) | ゲストの中で自己解凍ステブが走る。**既定** — 実機がやることを全部やる本物のフル起動 | 1000M |
+| vmlinux | 非圧縮ELFを**ホスト側で展開して**直接ロードする近道。計測・比較用のopt-in | 600M |
 
 ### コマンドで測る (ネイティブ)
 
@@ -198,8 +198,8 @@ cargo run --release --example bootphase -- images/vmlinux-lts  # vmlinux 直接�
 ### コマンドで測る (wasm、ブラウザ既定と同じ経路)
 
 ```bash
-node tools/webtest/headless.mjs                 # vmlinux があればそちら (既定)
-KERNEL=bzimage node tools/webtest/headless.mjs  # 自己解凍経路を強制
+node tools/webtest/headless.mjs                 # bzImage (既定 — 本物のフル起動)
+KERNEL=vmlinux node tools/webtest/headless.mjs  # 直接ロードの近道を測る
 ```
 
 タブのスロットリングが無いぶん、ブラウザ実測より数字が安定する。
@@ -207,15 +207,13 @@ KERNEL=bzimage node tools/webtest/headless.mjs  # 自己解凍経路を強制
 ### GUIで測る (ブラウザ実機)
 
 ```
-http://localhost:8001/                 # 既定: vmlinux優先
-http://localhost:8001/?kernel=bzimage  # 自己解凍経路を強制
+http://localhost:8001/                 # 既定: bzImage (本物のフル起動)
+http://localhost:8001/?kernel=vmlinux  # 直接ロードの近道を測る
 ```
 
 Linuxを選び「再起動」(=フル起動) を押してから、右上のゲージが
 **アイドル**に変わるまでがシェル到達。どちらの経路かは起動中の
-ステータス表示で分かる — 「カーネル (vmlinux)」と出れば直接ロード、
-「カーネル」だけなら bzImage (vmlinux-lts.gz が無いときは黙って
-こちらへ落ちるので、遅いと感じたらまずここを見る)。
+ステータス表示で分かる — 「カーネル (bzImage)」か「カーネル (vmlinux)」。
 
 ## 測定の規律 (これを破った測定は信用しない)
 

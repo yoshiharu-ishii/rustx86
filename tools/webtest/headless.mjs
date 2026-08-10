@@ -11,13 +11,12 @@ const wasm = readFileSync(join(root, 'web/pkg/rustx86_wasm_bg.wasm'));
 const mod = await import(join(root, 'web/pkg/rustx86_wasm.js'));
 await mod.default({ module_or_path: wasm });
 
-// vmlinux (非圧縮ELF) があればそちら — ブラウザの既定経路と同じもの。
-// KERNEL=bzimage で自己解凍経路を強制できる (経路比較の計測用、docs/perf.md)
+// 既定は bzImage — ブラウザの既定と同じ、自己解凍ステブごと実行する本物の起動。
+// KERNEL=vmlinux で直接ロードの近道を測れる (経路比較用、docs/perf.md)
 const kernel = new Uint8Array(
   (() => {
-    if (process.env.KERNEL !== 'bzimage') {
-      try { return readFileSync(join(root, 'images/vmlinux-lts')); }
-      catch { /* 無ければ bzImage へ */ }
+    if (process.env.KERNEL === 'vmlinux') {
+      return readFileSync(join(root, 'images/vmlinux-lts'));
     }
     return readFileSync(join(root, 'images/vmlinuz-lts'));
   })(),
