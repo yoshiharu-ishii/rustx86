@@ -11,6 +11,61 @@ use super::super::{sp_write, string, Decoder, AF, AX, BP, CF, OF};
 use super::{MemRef, Rm, Uop};
 use crate::Machine;
 
+/// このuopがメモリ (線形アドレス) に触り得るか。
+///
+/// **#PF巻き戻しの控え (guard_save) を省いてよいかの判定**なので、
+/// 迷ったら true に倒す (保守的に正しく)。フェッチは対象外 —
+/// キャッシュ済み命令はページ内で完結し、番地は実行前に変換済み。
+pub(super) fn may_touch_memory(u: &Uop) -> bool {
+    let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
+    match u {
+        // レジスタとフラグしか触らない組 — #PFは起き得ない
+        Uop::MovRImm { .. }
+        | Uop::Lea { .. }
+        | Uop::Jcc { .. }
+        | Uop::JmpRel { .. }
+        | Uop::IncR { .. }
+        | Uop::DecR { .. }
+        | Uop::XchgAR { .. }
+        | Uop::AluAImm { .. }
+        | Uop::Alu8AImm { .. } => false,
+        // r/m形: メモリオペランドのときだけ
+        Uop::MovRmR { rm, .. }
+        | Uop::MovRRm { rm, .. }
+        | Uop::Mov8RmR { rm, .. }
+        | Uop::Mov8RRm { rm, .. }
+        | Uop::AluRmR { rm, .. }
+        | Uop::AluRRm { rm, .. }
+        | Uop::Alu8RmR { rm, .. }
+        | Uop::Alu8RRm { rm, .. }
+        | Uop::Grp1RmImm { rm, .. }
+        | Uop::Grp18RmImm { rm, .. }
+        | Uop::TestRmR { rm, .. }
+        | Uop::Test8RmR { rm, .. }
+        | Uop::MovRmImm { rm, .. }
+        | Uop::MovRm8Imm { rm, .. }
+        | Uop::Grp3b { rm, .. }
+        | Uop::Grp3w { rm, .. }
+        | Uop::SetCC { rm, .. }
+        | Uop::MovzxB { rm, .. }
+        | Uop::MovzxW { rm, .. }
+        | Uop::ImulRRm { rm, .. }
+        | Uop::ShiftRmImm { rm, .. }
+        | Uop::ShiftRmCl { rm, .. } => mem(rm),
+        // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
+        Uop::CallRel { .. }
+        | Uop::Ret
+        | Uop::PushR { .. }
+        | Uop::PopR { .. }
+        | Uop::PushImm { .. }
+        | Uop::Leave
+        | Uop::MovAMoffs { .. }
+        | Uop::Mov8AMoffs { .. }
+        | Uop::Grp5 { .. }
+        | Uop::StrOne { .. } => true,
+    }
+}
+
 // ---------- 実行 (従来経路と同じヘルパで) ----------
 
 /// 実効アドレス。レジスタの**今の**値から組む
