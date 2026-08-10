@@ -14,11 +14,14 @@ use rustx86_core::{Machine, MachineProfile};
 const SNAP: &str = "images/linux-booted.snap";
 
 fn boot_to_shell() -> Machine {
-    let kernel = std::fs::read("images/vmlinuz-lts").expect("images/vmlinuz-lts");
+    // vmlinux があればそちら (解凍ステブ無しで4割速い)。無ければ bzImage
+    let kernel = std::fs::read("images/vmlinux-lts")
+        .or_else(|_| std::fs::read("images/vmlinuz-lts"))
+        .expect("images/vmlinux-lts か vmlinuz-lts");
     let initrd = std::fs::read("images/initramfs-mini").expect("images/initramfs-mini");
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
-    m.boot_bzimage_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
-        .expect("bzImage");
+    m.boot_linux_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
+        .expect("boot");
     let t0 = std::time::Instant::now();
     // シェルのバナーが出るまで回す (番人: 3G命令)
     let mut n: u64 = 0;

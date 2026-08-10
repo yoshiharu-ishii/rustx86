@@ -105,7 +105,16 @@ export function mountLinux(canvas, opts = {}) {
 
     if (!snapshot) {
       try {
-        kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル');
+        // vmlinux (非圧縮ELF) があればそちら — 自己解凍ステブが無いぶん
+        // 起動が4割速く、無言の黒画面が1/3になる (tools/extract-vmlinux.sh)
+        try {
+          const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
+          status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
+          const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+          kernel = new Uint8Array(await new Response(ds).arrayBuffer());
+        } catch {
+          kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル');
+        }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
           initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');

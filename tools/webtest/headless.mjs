@@ -11,7 +11,13 @@ const wasm = readFileSync(join(root, 'web/pkg/rustx86_wasm_bg.wasm'));
 const mod = await import(join(root, 'web/pkg/rustx86_wasm.js'));
 await mod.default({ module_or_path: wasm });
 
-const kernel = new Uint8Array(readFileSync(join(root, 'images/vmlinuz-lts')));
+// vmlinux (非圧縮ELF) があればそちら — ブラウザの既定経路と同じもの
+const kernel = new Uint8Array(
+  (() => {
+    try { return readFileSync(join(root, 'images/vmlinux-lts')); }
+    catch { return readFileSync(join(root, 'images/vmlinuz-lts')); }
+  })(),
+);
 const initrd = new Uint8Array(readFileSync(join(root, 'images/initramfs-mini')));
 console.log(`kernel ${(kernel.length/1e6).toFixed(1)}MB, initrd ${(initrd.length/1e6).toFixed(1)}MB`);
 
