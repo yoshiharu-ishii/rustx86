@@ -35,9 +35,18 @@ use crate::Machine;
 mod decode;
 mod exec;
 
-/// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
-/// ホストのキャッシュに収まる小ささの折り合い (768KB)。要調整なら実測で
-const SLOTS: usize = 32 * 1024;
+/// ブロック表 (直接マップ) のスロット数。キーは**ブロック先頭**の物理アドレス —
+/// 分岐の着地点と再開点だけなので、バイト番地ごとに1部屋要った旧方式より疎でよい
+const BLOCK_SLOTS: usize = 32 * 1024;
+
+/// 1ブロックに控えるuop数の上限。長い直線コードは複数ブロックに割れるだけ
+const BLOCK_CAP: usize = 32;
+
+/// uopプールの上限 (これを超えたら**全部捨てて**作り直す)。
+/// ブロックは追記専用でプールを埋めるので、無効化や衝突で見捨てられた
+/// uopは溜まる一方 — JITのコードキャッシュと同じで、たまの全フラッシュが
+/// 個別の回収より安くて単純。1Muop ≒ 24MB
+const POOL_MAX: usize = 1 << 20;
 
 const TAG_INVALID: u32 = 0xFFFF_FFFF;
 
@@ -261,20 +270,38 @@ pub(crate) enum Uop {
     },
 }
 
+/// プールに並ぶデコード済み1命令 (B5: ブロックの中身)
 #[derive(Clone, Copy)]
-struct Entry {
-    /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
-    tag: u32,
-    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
-    gen: u32,
+struct PoolUop {
     len: u8,
     uop: Uop,
 }
 
+/// ブロックの見出し。中身はプールの連続区間 [start, start+n)
+///
+/// **なぜブロックか (B5)**: 旧方式は命令のバイト番地ごとに32Bのエントリを
+/// 直接マップで持っていた — 4KBのコードページが表の128KBに散り、
+/// 毎命令のエントリloadがL1に乗らないランダムアクセスになっていた。
+/// ブロックにすると、照合はブロック頭で1回、中身は**連続読み** —
+/// プリフェッチが効く形になる。実CPUのuopキュー、QEMU TCGのTBと同じ答え
+#[derive(Clone, Copy)]
+struct BlockHead {
+    /// ブロック先頭の物理アドレス (TAG_INVALID = 空き)
+    tag: u32,
+    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
+    gen: u32,
+    /// プール内の開始位置
+    start: u32,
+    /// uop数 (1..=BLOCK_CAP)
+    n: u16,
+}
+
 pub struct DecodeCache {
-    /// 直接マップ。**最初の32bitデコードまで確保しない** —
-    /// 16bit機やcosimの単発Machineに768KBずつ払わせない
-    entries: Vec<Entry>,
+    /// ブロック表 (直接マップ)。**最初の32bitデコードまで確保しない** —
+    /// 16bit機やcosimの単発Machineに払わせない
+    blocks: Vec<BlockHead>,
+    /// デコード済みuopの置き場 (追記専用、溢れたら全フラッシュ)
+    pool: Vec<PoolUop>,
     /// 物理4Kページごとの世代。書き込みで進む
     page_gen: Vec<u32>,
     /// そのページにデコード済みコードがあるか。
@@ -290,7 +317,8 @@ impl DecodeCache {
     pub fn new(ram_bytes: usize) -> Self {
         let pages = ram_bytes.div_ceil(4096);
         DecodeCache {
-            entries: Vec::new(),
+            blocks: Vec::new(),
+            pool: Vec::new(),
             page_gen: vec![0; pages],
             page_has_code: vec![false; pages],
             hits: 0,
@@ -369,97 +397,148 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         chain_extra
     };
 
-    loop {
-        let page = (pa >> 12) as usize;
-        let slot = (pa as usize) & (SLOTS - 1);
+    let page = (pa >> 12) as usize;
+    if m.dcache.blocks.is_empty() {
+        m.dcache.blocks = vec![
+            BlockHead {
+                tag: TAG_INVALID,
+                gen: 0,
+                start: 0,
+                n: 0,
+            };
+            BLOCK_SLOTS
+        ];
+    }
 
-        let mut cached = None;
-        if !m.dcache.entries.is_empty() {
-            let e = &m.dcache.entries[slot];
-            if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
-                cached = Some((e.len, e.uop));
-                m.dcache.hits += 1;
-            }
-        }
-        let (len, uop) = match cached {
-            Some(x) => x,
-            None => match decode::decode_at(m, pa) {
-                Some((len, uop)) => {
-                    if m.dcache.entries.is_empty() {
-                        m.dcache.entries = vec![
-                            Entry {
-                                tag: TAG_INVALID,
-                                gen: 0,
-                                len: 0,
-                                uop: Uop::Ret,
-                            };
-                            SLOTS
-                        ];
-                    }
-                    let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-                    m.dcache.entries[slot] = Entry {
-                        tag: pa,
-                        gen,
-                        len,
-                        uop,
-                    };
-                    if let Some(h) = m.dcache.page_has_code.get_mut(page) {
-                        *h = true;
-                    }
-                    m.dcache.fills += 1;
-                    (len, uop)
-                }
+    // 外側: ブロック単位。照合 (タグ+世代) はブロック頭で1回
+    'blocks: loop {
+        let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+        let bslot = (pa as usize) & (BLOCK_SLOTS - 1);
+        let h = m.dcache.blocks[bslot];
+        let (start, n) = if h.tag == pa && h.gen == gen {
+            m.dcache.hits += h.n as u64;
+            (h.start as usize, h.n as usize)
+        } else {
+            match build_block(m, pa, page, gen, bslot) {
+                Some(x) => x,
                 None => {
+                    // 先頭からデコードできない → 従来経路へ (#UD報告もそちら)
                     m.dcache.fallbacks += 1;
-                    // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
-                    // ブロック先頭のIP)
                     m.trap_ip = m.cpu.ip;
                     m.guard_save();
                     return super::step(m);
                 }
-            },
+            }
         };
 
-        // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
-        // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
-        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
-        if exec::may_touch_memory(&uop) {
-            m.guard_save_slim();
-        }
-        let ip_linear = m.cpu.ip.wrapping_add(len as u32);
-        m.cpu.advance_ip(len as u32);
-        exec::exec(m, uop);
+        // 内側: プールの連続区間を順に実行。分岐はブロック終端にしか無いので、
+        // 途中のuopは必ず直線で次へ落ちる
+        for i in start..start + n {
+            let PoolUop { len, uop } = m.dcache.pool[i];
 
-        // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
-        if extra == 0 {
-            return;
+            // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
+            // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
+            // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
+            let touches = exec::may_touch_memory(&uop);
+            if touches {
+                m.guard_save_slim();
+            }
+            let ip_linear = m.cpu.ip.wrapping_add(len as u32);
+            m.cpu.advance_ip(len as u32);
+            exec::exec(m, uop);
+
+            // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
+            // 順序も判定も旧・毎命令方式と同一 — 割り込みの受付点・
+            // フォールトの境界・時計の刻みは1命令粒度のまま動かさない
+            if extra == 0 {
+                return;
+            }
+            if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+                return;
+            }
+            if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+                return;
+            }
+            // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
+            let new_lin = if m.cpu.ip == ip_linear {
+                lin.wrapping_add(len as u32)
+            } else {
+                m.cpu.lin(CS, m.cpu.ip)
+            };
+            if new_lin >> 12 != lin >> 12 {
+                return; // ページを跨いだら外へ (変換からやり直し)
+            }
+            pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+            lin = new_lin;
+            // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
+            extra -= 1;
+            m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+            m.tick_countdown -= 1;
+            if m.tick_countdown == 0 {
+                m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                m.tick_devices(1);
+            }
+            // 自己書き換えの見張り: このページに書いたかもしれないuopの後だけ
+            // 世代を見直す。動いていたら残りは古い — ブロックを引き直す
+            // (次の照合が失敗して、新しいバイト列から組み直される)
+            if touches && m.dcache.page_gen.get(page).copied().unwrap_or(0) != gen {
+                continue 'blocks;
+            }
         }
-        // フォールトの巻き戻しと#UDの裁きは外側の担当。割り込みが受けられる
-        // 状態になったら境界で外へ返す (配送点は非連結時と同じ)
-        if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
-            return;
-        }
-        if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
-            return;
-        }
-        // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
-        let new_lin = if m.cpu.ip == ip_linear {
-            lin.wrapping_add(len as u32)
-        } else {
-            m.cpu.lin(CS, m.cpu.ip)
-        };
-        if new_lin >> 12 != lin >> 12 {
-            return; // ページを跨いだら外へ (変換からやり直し)
-        }
-        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-        lin = new_lin;
-        // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
-        extra -= 1;
-        m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
-        m.tick_countdown -= 1;
-        if m.tick_countdown == 0 {
-            m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
-            m.tick_devices(1);
+        // ブロックを走り切った (終端は分岐かページ末)。次のブロックへ
+    }
+}
+
+/// ブロックを組む: `head_pa` から直線にデコードして、分岐 (IPを書くuop) か
+/// ページ末か BLOCK_CAP で切る。1命令も取れなければ None (従来経路行き)
+fn build_block(
+    m: &mut Machine,
+    head_pa: u32,
+    page: usize,
+    gen: u32,
+    bslot: usize,
+) -> Option<(usize, usize)> {
+    // プールが一杯なら全部捨てる (見出しも道連れ)。個別回収より安くて単純
+    if m.dcache.pool.len() + BLOCK_CAP > POOL_MAX {
+        m.dcache.pool.clear();
+        for b in &mut m.dcache.blocks {
+            b.tag = TAG_INVALID;
         }
     }
+    let start = m.dcache.pool.len();
+    let mut pa = head_pa;
+    while m.dcache.pool.len() - start < BLOCK_CAP {
+        let Some((len, uop)) = decode::decode_at(m, pa) else {
+            break; // デコードできない所の手前まででブロックにする
+        };
+        m.dcache.pool.push(PoolUop { len, uop });
+        // IPを書き得るuopはブロックの終端 — これより先は着地次第
+        let is_branch = matches!(
+            uop,
+            Uop::Jcc { .. }
+                | Uop::JmpRel { .. }
+                | Uop::CallRel { .. }
+                | Uop::Ret
+                | Uop::Grp5 { kind: 2 | 4, .. }
+        );
+        pa = pa.wrapping_add(len as u32);
+        if is_branch || pa & 0xFFF == 0 {
+            break; // 分岐 or ページ末に達した (跨ぎ命令はdecode_atが拒否済み)
+        }
+    }
+    let n = m.dcache.pool.len() - start;
+    if n == 0 {
+        return None;
+    }
+    m.dcache.fills += n as u64;
+    m.dcache.blocks[bslot] = BlockHead {
+        tag: head_pa,
+        gen,
+        start: start as u32,
+        n: n as u16,
+    };
+    if let Some(has) = m.dcache.page_has_code.get_mut(page) {
+        *has = true;
+    }
+    Some((start, n))
 }
