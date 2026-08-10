@@ -64,6 +64,23 @@ self.onmessage = (e) => {
 // 目標8ms・上限5Mに抑えて、応答性を優先する
 let sliceSize = 1_000_000;
 
+// 1ゲストミリ秒に相当する仮想命令数。
+//
+// このエミュレータの時間は「1命令 ≒ 一定時間」の勘定で、PITの入力
+// 1.193182 MHz が 64命令 (INSTRUCTIONS_PER_TICK) に1クロック刻まれる。
+// つまりゲストの1秒 = 1,193,182 × 64 ≒ 76.4M 仮想命令。
+//
+// コア側にアイドル (HLT) の早送りが入ったので、run_slice の予算 (仮想時間) は
+// 暇なら一瞬で消化される。**そのまま次を回すとゲストの時計だけが実時間の
+// 何百倍も速く進む** — DOSの時計が暴走し、snakeが目で追えなくなる。
+// 実時間との釣り合いはここ (ランナー) の仕事:
+// **飛ばした仮想時間 (take_idle_skipped) だけ、実時間で待ってから次を回す。**
+// 忙しい実行は1命令も飛ばさないので待ちゼロ = 今までどおり全力で回る。
+// 「halted で終わったかどうか」で判別しないのは、スライスの切れ目が
+// たまたま割り込みハンドラの中だと全力モードに化けて、snake が2〜3倍速に
+// なったため (実際になった)。飛ばした量そのものを数えるのが正確である
+const INSTR_PER_GUEST_MS = (1_193_182 * 64) / 1000;
+
 function loop() {
   if (!running || !emu) return;
   const t0 = performance.now();
@@ -91,20 +108,34 @@ function loop() {
     return;
   }
 
-  // スライス時間を測って ~20ms に寄せる
-  const dt = performance.now() - t0;
+  const now = performance.now();
+  const dt = now - t0;
+  // このスライスで早送りが飛ばした仮想時間 (ミリ秒)
+  const skippedMs = emu.take_idle_skipped() / INSTR_PER_GUEST_MS;
+  const idle = skippedMs > dt;
+
+  // 定期的に状態を報告 (MIPS)。アイドル中の数字は「時計を流しただけ」なので
+  // idle を添えて、見せ方は画面側に任せる
+  if (now - lastMeasure >= 500) {
+    const mips = instrs / (now - lastMeasure) / 1000;
+    postMessage({ type: 'status', mips, idle });
+    instrs = 0;
+    lastMeasure = now;
+  }
+
+  if (idle) {
+    // アイドル: 飛ばした時間から実際に使った時間を引いた分だけ実時間で待つ。
+    // CPUはこの間まったく回らない (キーはワーカーのメッセージで届く)。
+    // 次のスライスは短く戻す — 5Mのまま寝ると65ms待ちになり打鍵が鈍る
+    sliceSize = Math.round(INSTR_PER_GUEST_MS * 16);
+    setTimeout(loop, Math.min(50, skippedMs - dt));
+    return;
+  }
+
+  // 忙しい: スライス時間を測って ~8ms に寄せ、全力で回す
   if (dt > 0) {
     const target = 8;
     sliceSize = Math.max(100_000, Math.min(5_000_000, Math.round((sliceSize * target) / dt)));
-  }
-
-  // 定期的に状態を報告 (MIPS)
-  const now = performance.now();
-  if (now - lastMeasure >= 500) {
-    const mips = instrs / (now - lastMeasure) / 1000;
-    postMessage({ type: 'status', mips });
-    instrs = 0;
-    lastMeasure = now;
   }
 
   // 次のスライス。setTimeout(0) でメッセージを捌く隙を作る

@@ -81,6 +81,15 @@ impl Emulator {
         self.m.run(max_instructions as u64) as f64
     }
 
+    /// 直近の呼び出し以降に、アイドル (HLT) の早送りが飛ばした仮想命令数。
+    /// 読むとゼロに戻る。ランナーはこれを実時間に換算して待ち、
+    /// **暇なゲストの時計が実時間より速く回らないように**する
+    pub fn take_idle_skipped(&mut self) -> f64 {
+        let v = self.m.idle_skipped;
+        self.m.idle_skipped = 0;
+        v as f64
+    }
+
     pub fn halted(&self) -> bool {
         self.m.halted
     }
@@ -155,13 +164,19 @@ impl Emulator {
             .unwrap_or_default()
     }
 
-    /// 指定した命令数だけ進める。**1フレーム分の仕事**として呼ぶ。
+    /// 指定した仮想時間 (命令数換算) だけ進める。**1フレーム分の仕事**として呼ぶ。
     ///
     /// HLTで止まっていても抜けない — タイマ割り込みで起きるのを待つ必要があるため。
-    /// アイドル中のOSは「HLTして割り込みを待つ」を繰り返している
+    /// アイドル中のOSは「HLTして割り込みを待つ」を繰り返している。
+    ///
+    /// 予算は**TSCの進み**で数える。忙しいときは1命令=1で従来どおりだが、
+    /// アイドル (HLT) の早送りが飛ばした時間も含む。step の回数で数えると、
+    /// 暇なときは1回でPIT1周期ぶん時間が飛ぶので、同じ予算でゲストの時計が
+    /// 何百倍も速く回ってしまう
     pub fn run_slice(&mut self, instructions: f64) {
-        let n = instructions as u64;
-        for _ in 0..n {
+        let budget = instructions as u64;
+        let start = self.m.cpu.tsc;
+        while self.m.cpu.tsc.wrapping_sub(start) < budget {
             self.m.step();
             // デバッガが止めたらフレームを打ち切る。**見張っていなければ
             // この判定は真偽値1つ**なので、通常の実行には効かない

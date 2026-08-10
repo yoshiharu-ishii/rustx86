@@ -165,6 +165,13 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
+    ///
+    /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
+    /// ない (スナップショットに入れない)。ランナーはスライスごとにこれを
+    /// 読み取って、「飛ばした時間ぶんだけ実時間で待つ」ことでゲストの時計を
+    /// 実時間に繋ぎ止める。忙しい実行は自由に速く、暇は実時間どおりに流れる
+    pub idle_skipped: u64,
     /// TLB — 線形→物理の変換の写し。**ページングの最大のボトルネックを消す。**
     ///
     /// ページング有効時、変換1回は2段の表 (PDE→PTE) を読む = 物理メモリ2回。
@@ -251,6 +258,7 @@ impl Machine {
             trap_ip: 0,
             trap: None,
             halted: false,
+            idle_skipped: 0,
             tlb: (0..TLB_SLOTS)
                 .map(|_| {
                     std::cell::Cell::new(TlbEntry {
@@ -332,13 +340,15 @@ impl Machine {
     /// PITがカウンタ0を下ろしきってIRQ0を出す → PICが優先順位を見て受理し、
     /// ICW2で設定されたベースから割り込みベクタを決める → CPUが命令境界で受け取る。
     /// この経路のどこか1つでも欠けるとOSのスケジューラが動かない。
-    fn tick_devices(&mut self) {
-        if self.devices.pit.tick(PIT_CLOCKS_PER_TICK) > 0 {
+    /// 装置を `ticks` 回ぶん進める。通常経路は1、アイドルの早送りだけが
+    /// まとめて渡す。クロックはまとめても1回ずつでも同じ数だけ進む
+    fn tick_devices(&mut self, ticks: u32) {
+        if self.devices.pit.tick(ticks * PIT_CLOCKS_PER_TICK) > 0 {
             self.devices.pic[0].raise(IRQ_TIMER);
         }
         // 時計もPITと同じクロックで進める。**ここで進めるのが要点**で、
         // INT 08h の中で進めるとOSが自前のハンドラを入れた瞬間に時計が止まる
-        self.devices.cmos.tick(PIT_CLOCKS_PER_TICK);
+        self.devices.cmos.tick(ticks * PIT_CLOCKS_PER_TICK);
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
@@ -356,6 +366,42 @@ impl Machine {
     /// PICに未処理の要求があるか (CPUが受けにいくべきか)
     fn pic_has_service(&self) -> bool {
         self.pic_service
+    }
+
+    /// アイドル (HLT) の早送り。
+    ///
+    /// HLT中のCPUは命令を実行しない。次に何かが起きるとしたら装置イベント
+    /// だけなので、1命令ぶんずつ空回りせず、**次のPITパルスまで時計と装置を
+    /// 一気に進める**。シェルのプロンプトで待っているだけの機械が、
+    /// ホストのCPUを食いつぶすのをやめる。
+    ///
+    /// 約束は一つ: **飛ばした分だけTSCと装置のクロックも進める。**
+    /// 止まるのはCPUであって時計ではない。時計を置き去りにすると、
+    /// nanosleep したプロセスが永遠に起きない罠 (Tier 3bで実際に踏んだ) を
+    /// 逆向きにもう一度踏むことになる。
+    fn idle_fast_forward(&mut self) {
+        // 既に挙手があるなら飛ばさない。IF=1なら次のstepで配送されて起きるし、
+        // IF=0で寝ている機械の時計だけが暴走するのも防ぐ (従来の1刻みに落とす)
+        if self.pending_irq.is_some() || self.pic_service {
+            return;
+        }
+        // タイマが止まっているなら、起こせるのは外部入力 (キー・シリアル) だけ。
+        // それはスライスの外から来るので、run() 側の「タイマも止まっていれば
+        // 抜ける」判定に任せ、ここでは飛ばさない
+        let Some(clocks) = self.devices.pit.clocks_until_irq0() else {
+            return;
+        };
+        // クロック → tick数 (切り上げ)。パルスが出る tick まで飛ぶ
+        let ticks = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1);
+        // 命令数に換算: 次のtickまでの残り + そこから先のtick分。
+        // この間 step() は呼ばれなかったことになるので、TSCをまとめて進める
+        let skip = self.tick_countdown as u64 + (ticks as u64 - 1) * INSTRUCTIONS_PER_TICK as u64;
+        self.cpu.tsc = self.cpu.tsc.wrapping_add(skip);
+        self.idle_skipped = self.idle_skipped.wrapping_add(skip);
+        self.tick_countdown = INSTRUCTIONS_PER_TICK;
+        // 装置をまとめて進める。PITはここで丁度1パルス出し、次のstepの
+        // 冒頭で割り込みとして配送されて目が覚める
+        self.tick_devices(ticks);
     }
 
     /// ディスクイメージを入れ、その先頭セクタからブートする
@@ -1246,10 +1292,11 @@ impl Machine {
         self.tick_countdown -= 1;
         if self.tick_countdown == 0 {
             self.tick_countdown = INSTRUCTIONS_PER_TICK;
-            self.tick_devices();
+            self.tick_devices(1);
         }
 
         if self.halted {
+            self.idle_fast_forward();
             return;
         }
 
@@ -1361,9 +1408,21 @@ impl Machine {
 
     /// HLTするか命令数上限まで実行。
     /// 割り込みが保留されていればHLTでも止まらない (目を覚ますため)
+    ///
+    /// 上限も戻り値も**仮想時間 (TSCの進み)** で数える。忙しいときは
+    /// 1命令=1なので従来と同じだが、アイドルの早送りが飛ばした分も含む。
+    /// ここを呼んだ回数 (実仕事) で数えると、アイドル中は1回でPIT1周期ぶん
+    /// 時間が飛ぶので、同じ予算でゲストの時計が何百倍も速く回ってしまう —
+    /// DOSの時計が暴走し、snakeが目で追えない速さになる。
+    /// 「予算=仮想時間」にしておけば、呼ぶ側は実時間に合わせて予算を配る
+    /// だけで、忙しくても暇でもゲストの時計は同じ速さで流れる。
     pub fn run(&mut self, max_instructions: u64) -> u64 {
-        let mut n = 0;
-        while n < max_instructions {
+        let start_tsc = self.cpu.tsc;
+        loop {
+            let elapsed = self.cpu.tsc.wrapping_sub(start_tsc);
+            if elapsed >= max_instructions {
+                return elapsed;
+            }
             // HLT中でも装置は動き続ける。タイマ割り込みで目を覚ますため、
             // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
             if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
@@ -1373,7 +1432,6 @@ impl Machine {
                 break; // 未実装にぶつかった。生きたまま止まっている
             }
             self.step();
-            n += 1;
             // デバッガが止めたら抜ける。**見張っていなければ真偽値1つ**なので
             // 計測経路には効かない。
             //
@@ -1384,7 +1442,7 @@ impl Machine {
                 break;
             }
         }
-        n
+        self.cpu.tsc.wrapping_sub(start_tsc)
     }
 
     pub fn console_string(&self) -> String {
