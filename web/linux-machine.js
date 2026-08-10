@@ -40,6 +40,11 @@ export function mountLinux(canvas, opts = {}) {
   let mips = 0;
   /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
   let idle = false;
+  /** シリアル全文の控え (ブートログ)。「ログを保存」がこれを書き出す */
+  let serialLog = [];
+  /** 「状態を保存」の控え。64MBあるので localStorage ではなくメモリに持つ
+      (ページを閉じると消える。永続化はJSON書き出しで) */
+  let savedState = null;
 
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
@@ -176,8 +181,20 @@ export function mountLinux(canvas, opts = {}) {
           opts.onState?.();
           break;
         }
-        case 'serial':
-          term.write(new Uint8Array(msg.bytes));
+        case 'serial': {
+          const bytes = new Uint8Array(msg.bytes);
+          term.write(bytes);
+          serialLog.push(bytes);
+          break;
+        }
+        case 'state':
+          savedState = new Uint8Array(msg.bytes);
+          status(`状態を保存した (${(savedState.length / 1e6).toFixed(1)}MB、このページの間だけ残る)`);
+          opts.onState?.();
+          break;
+        case 'loaded':
+          status('保存した状態に戻した');
+          canvas.focus();
           break;
         case 'status':
           mips = msg.mips || 0;
@@ -203,6 +220,29 @@ export function mountLinux(canvas, opts = {}) {
       if (!worker || !booted || paused === v) return;
       paused = v;
       worker.postMessage({ type: v ? 'pause' : 'resume' });
+    },
+    /** 今の状態をワーカーに控えさせる (返事は 'state' で届く) */
+    saveState() {
+      if (worker && booted) worker.postMessage({ type: 'save' });
+    },
+    /** 控えた状態へ戻す */
+    restoreState() {
+      if (worker && booted && savedState) {
+        // 転送で手放すと二度目が失敗する。写しを渡す
+        const copy = savedState.slice();
+        worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
+      }
+    },
+    get hasSaved() { return savedState !== null; },
+    /** 控えた状態そのもの (JSON書き出し用)。無ければ null */
+    get savedBytes() { return savedState; },
+    /** シリアル全文 (ブートログ) */
+    get log() {
+      const total = serialLog.reduce((a, c) => a + c.length, 0);
+      const out = new Uint8Array(total);
+      let o = 0;
+      for (const c of serialLog) { out.set(c, o); o += c.length; }
+      return out;
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {
