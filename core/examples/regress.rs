@@ -82,6 +82,10 @@ struct Outcome {
     passed: Option<bool>, // None = スキップ
     detail: String,
     shot: String,
+    /// 証跡としてファイルに残すログ (ファイル名, 中身)。
+    /// スクショが「プロンプトの瞬間の静止画」なら、こちらは走行全体のドラレコ。
+    /// ゲストの時計は決定的なので、**マージ前後のログはdiffできる回帰資料**になる
+    logs: Vec<(&'static str, String)>,
 }
 
 fn report(o: &Outcome) {
@@ -108,22 +112,28 @@ fn elks() -> Outcome {
             passed: None,
             detail: String::new(),
             shot: String::new(),
+            logs: vec![],
         };
     };
     let mut m = Machine::new();
     m.boot_from_disk(image).expect("boot");
-    match run_until_screen(&mut m, "login:", 200_000_000) {
+    let reached = run_until_screen(&mut m, "login:", 200_000_000);
+    let shot = screenshot_vram(&m);
+    let logs = vec![("elks-screen.txt", shot.clone())];
+    match reached {
         Some(n) => Outcome {
             name,
             passed: Some(true),
             detail: format!("login: 到達 ({}M命令)", n / 1_000_000),
-            shot: screenshot_vram(&m),
+            shot,
+            logs,
         },
         None => Outcome {
             name,
             passed: Some(false),
             detail: format!("login: に到達せず。trap={:?}", m.trap),
-            shot: screenshot_vram(&m),
+            shot,
+            logs,
         },
     }
 }
@@ -137,6 +147,7 @@ fn freedos() -> Outcome {
             passed: None,
             detail: String::new(),
             shot: String::new(),
+            logs: vec![],
         };
     };
     let mut m = Machine::new();
@@ -147,11 +158,19 @@ fn freedos() -> Outcome {
             passed: Some(false),
             detail: format!("言語選択メニューに到達せず。trap={:?}", m.trap),
             shot: screenshot_vram(&m),
+            logs: vec![("freedos-console.log", m.console_string())],
         };
     };
     // メニューをEnterで抜けると FreeCOM が立つ (BIOS経由のキー入力の検証を兼ねる)
     m.devices.keyboard.type_ascii("\n");
-    match run_until_screen(&mut m, "FreeCom version", 300_000_000) {
+    let reached = run_until_screen(&mut m, "FreeCom version", 300_000_000);
+    let shot = screenshot_vram(&m);
+    // console は INT 10h テレタイプの全履歴 — DOSのブートログに相当する
+    let logs = vec![
+        ("freedos-screen.txt", shot.clone()),
+        ("freedos-console.log", m.console_string()),
+    ];
+    match reached {
         Some(n2) => Outcome {
             name,
             passed: Some(true),
@@ -160,13 +179,15 @@ fn freedos() -> Outcome {
                 n1 / 1_000_000,
                 n2 / 1_000_000
             ),
-            shot: screenshot_vram(&m),
+            shot,
+            logs,
         },
         None => Outcome {
             name,
             passed: Some(false),
             detail: format!("FreeCOMが起動せず。trap={:?}", m.trap),
-            shot: screenshot_vram(&m),
+            shot,
+            logs,
         },
     }
 }
@@ -186,6 +207,7 @@ fn linux() -> Outcome {
                     passed: None,
                     detail: String::new(),
                     shot: String::new(),
+                    logs: vec![],
                 }
             }
         },
@@ -196,26 +218,35 @@ fn linux() -> Outcome {
             passed: None,
             detail: String::new(),
             shot: String::new(),
+            logs: vec![],
         };
     };
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
     m.boot_linux_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
         .expect("boot");
-    match run_until_serial(&mut m, "busybox shell", budget) {
-        Some(n) => {
-            // プロンプトまでもう少し流す
-            let _ = run_until_serial(&mut m, "~ #", 100_000_000);
-            Outcome {
-                name,
-                passed: Some(true),
-                detail: format!(
-                    "シェル到達 ({}M命令、上限{}M — 決定的なので大きな増加は意味の後退)",
-                    n / 1_000_000,
-                    budget / 1_000_000
-                ),
-                shot: screenshot_serial(&m, 25),
-            }
-        }
+    let reached = run_until_serial(&mut m, "busybox shell", budget);
+    if reached.is_some() {
+        // プロンプトまでもう少し流す
+        let _ = run_until_serial(&mut m, "~ #", 100_000_000);
+    }
+    // シリアル全文 = dmesg込みのブートログ。ゲスト時計は決定的なので
+    // タイムスタンプごと diff できる回帰資料になる
+    let logs = vec![(
+        "linux-boot.log",
+        String::from_utf8_lossy(&m.devices.uart.tx).into_owned(),
+    )];
+    match reached {
+        Some(n) => Outcome {
+            name,
+            passed: Some(true),
+            detail: format!(
+                "シェル到達 ({}M命令、上限{}M — 決定的なので大きな増加は意味の後退)",
+                n / 1_000_000,
+                budget / 1_000_000
+            ),
+            shot: screenshot_serial(&m, 25),
+            logs,
+        },
         None => Outcome {
             name,
             passed: Some(false),
@@ -225,6 +256,7 @@ fn linux() -> Outcome {
                 m.trap
             ),
             shot: screenshot_serial(&m, 25),
+            logs,
         },
     }
 }
@@ -232,8 +264,16 @@ fn linux() -> Outcome {
 fn main() {
     println!("# OS起動回帰 — プロンプト到達とスクショ\n");
     let outcomes = [elks(), freedos(), linux()];
+    // ブートログを証跡として regress-out/ に残す (CIがアーティファクトに上げる)
+    let outdir = format!("{ROOT}/regress-out");
+    let _ = std::fs::create_dir_all(&outdir);
     for o in &outcomes {
         report(o);
+        for (file, content) in &o.logs {
+            if let Err(e) = std::fs::write(format!("{outdir}/{file}"), content) {
+                eprintln!("ログを書けない {file}: {e}");
+            }
+        }
     }
     let failed = outcomes.iter().filter(|o| o.passed == Some(false)).count();
     let skipped = outcomes.iter().filter(|o| o.passed.is_none()).count();

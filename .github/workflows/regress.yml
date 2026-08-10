@@ -57,6 +57,17 @@ jobs:
         continue-on-error: true
         run: cargo run --release --example regress | tee regress.md
 
+      # ブートログを証跡として残す。ゲストの時計は決定的なので、
+      # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
+      # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
+      - name: ブートログを証跡に残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-logs
+          path: regress-out/
+          if-no-files-found: warn
+
       - uses: ./.github/actions/publish-check
         if: always()
         with:
