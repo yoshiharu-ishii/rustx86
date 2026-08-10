@@ -169,6 +169,10 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
+    /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
+    /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
+    pub op_counts: Vec<u64>,
     /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
     ///
     /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
@@ -252,6 +256,7 @@ impl Machine {
             video_modes: std::collections::BTreeSet::new(),
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
+            op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
             first_fault: None,
