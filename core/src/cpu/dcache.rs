@@ -27,10 +27,10 @@
 //! そのページの世代を進め、古い控えは照合で外れる。データページへの
 //! 書き込みは has_code の1判定だけで素通りする。
 
-use super::alu::{alu8, alu_w, condition};
+use super::alu::{alu8, alu_w, condition, set_szp_w};
 use super::operand::{pop_w, push_w};
 use super::shift::shift_rot;
-use super::{AX, BP, CS, DS, SP, SS};
+use super::{Decoder, AF, AX, BP, CF, CS, DS, OF, SP, SS};
 use crate::Machine;
 
 /// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
@@ -181,6 +181,81 @@ pub(crate) enum Uop {
     MovzxB {
         reg: u8,
         rm: Rm,
+    },
+    // ---- ここから P1b (フォールバック43Mの実測上位から追加) ----
+    /// 40-47 / 48-4F: inc/dec r32 (CFを触らないのがADD/SUBとの違い)
+    IncR {
+        reg: u8,
+    },
+    DecR {
+        reg: u8,
+    },
+    /// C7 /any: mov r/m32, imm32 (regは無視 — 従来経路と同じ) / C6: 8bit
+    MovRmImm {
+        rm: Rm,
+        imm: u32,
+    },
+    MovRm8Imm {
+        rm: Rm,
+        imm: u8,
+    },
+    /// A1 / A3: mov eax↔moffs32 (segは解決済み)
+    MovAMoffs {
+        load: bool,
+        seg: u8,
+        off: u32,
+    },
+    /// A0 / A2 (8bit)
+    Mov8AMoffs {
+        load: bool,
+        seg: u8,
+        off: u32,
+    },
+    /// 68 / 6A: push imm (6Aの符号拡張はデコード時に済み)
+    PushImm {
+        imm: u32,
+    },
+    /// C9: leave
+    Leave,
+    /// 90-97: xchg eAX, r (90はnop = 自分と交換)
+    XchgAR {
+        reg: u8,
+    },
+    /// F6 / F7 の kind 0-3 (test imm / not / neg)。mul/divは従来経路
+    Grp3b {
+        kind: u8,
+        rm: Rm,
+        imm: u8,
+    },
+    Grp3w {
+        kind: u8,
+        rm: Rm,
+        imm: u32,
+    },
+    /// FF: inc/dec r/m (0/1)、call間接 (2)、jmp間接 (4)、push r/m (6)
+    Grp5 {
+        kind: u8,
+        rm: Rm,
+    },
+    /// 0F 90-9F: setcc r/m8
+    SetCC {
+        cc: u8,
+        rm: Rm,
+    },
+    /// 0F B7: movzx r32, r/m16
+    MovzxW {
+        reg: u8,
+        rm: Rm,
+    },
+    /// 0F AF: imul r32, r/m32
+    ImulRRm {
+        reg: u8,
+        rm: Rm,
+    },
+    /// A4-AF (REPなしの単発ストリング命令)。意味論は従来の string::exec に委譲
+    StrOne {
+        op: u8,
+        seg: i8,
     },
 }
 
@@ -461,8 +536,20 @@ fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
                 }
             }
         }
+        0x40..=0x47 => Uop::IncR { reg: op & 7 },
+        0x48..=0x4F => Uop::DecR { reg: op & 7 },
         0x50..=0x57 => Uop::PushR { reg: op & 7 },
         0x58..=0x5F => Uop::PopR { reg: op & 7 },
+        0x68 => {
+            let imm = u32le(b, i)?;
+            i += 4;
+            Uop::PushImm { imm }
+        }
+        0x6A => {
+            let imm = *b.get(i)? as i8 as i32 as u32;
+            i += 1;
+            Uop::PushImm { imm }
+        }
         0x70..=0x7F => {
             let rel = *b.get(i)? as i8 as i32 as u32;
             i += 1;
@@ -512,6 +599,24 @@ fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
             Uop::MovRRm { reg, rm }
         }
+        0x90..=0x97 => Uop::XchgAR { reg: op & 7 },
+        0xA0..=0xA3 => {
+            let off = u32le(b, i)?;
+            i += 4;
+            let seg = seg_override.unwrap_or(DS as u8);
+            let load = op & 2 == 0; // A0/A1 = 読む、A2/A3 = 書く
+            if op & 1 == 0 {
+                Uop::Mov8AMoffs { load, seg, off }
+            } else {
+                Uop::MovAMoffs { load, seg, off }
+            }
+        }
+        // REPなしの単発ストリング命令。意味論は従来の string::exec に丸ごと
+        // 委譲する (二重実装しない)。REP付きはプレフィクスで弾かれ従来経路へ
+        0xA4..=0xA7 | 0xAA..=0xAF => Uop::StrOne {
+            op,
+            seg: seg_override.map(|s| s as i8).unwrap_or(-1),
+        },
         0x8D => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
             match rm {
@@ -524,17 +629,64 @@ fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             i += 4;
             Uop::MovRImm { reg: op & 7, imm }
         }
-        0xC1 | 0xD3 => {
+        0xC1 | 0xD1 | 0xD3 => {
             let (kind, rm) = dec_modrm(b, &mut i, seg_override)?;
             if op == 0xC1 {
                 let count = *b.get(i)?;
                 i += 1;
                 Uop::ShiftRmImm { kind, rm, count }
+            } else if op == 0xD1 {
+                Uop::ShiftRmImm { kind, rm, count: 1 }
             } else {
                 Uop::ShiftRmCl { kind, rm }
             }
         }
         0xC3 => Uop::Ret,
+        0xC6 => {
+            let (_, rm) = dec_modrm(b, &mut i, seg_override)?;
+            let imm = *b.get(i)?;
+            i += 1;
+            Uop::MovRm8Imm { rm, imm }
+        }
+        0xC7 => {
+            let (_, rm) = dec_modrm(b, &mut i, seg_override)?;
+            let imm = u32le(b, i)?;
+            i += 4;
+            Uop::MovRmImm { rm, imm }
+        }
+        0xC9 => Uop::Leave,
+        0xF6 | 0xF7 => {
+            let (kind, rm) = dec_modrm(b, &mut i, seg_override)?;
+            if kind > 3 {
+                return None; // mul/div は divide_error の配送ごと従来経路に任せる
+            }
+            if op == 0xF6 {
+                let imm = if kind <= 1 {
+                    let v = *b.get(i)?;
+                    i += 1;
+                    v
+                } else {
+                    0
+                };
+                Uop::Grp3b { kind, rm, imm }
+            } else {
+                let imm = if kind <= 1 {
+                    let v = u32le(b, i)?;
+                    i += 4;
+                    v
+                } else {
+                    0
+                };
+                Uop::Grp3w { kind, rm, imm }
+            }
+        }
+        0xFF => {
+            let (kind, rm) = dec_modrm(b, &mut i, seg_override)?;
+            match kind {
+                0 | 1 | 2 | 4 | 6 => Uop::Grp5 { kind, rm },
+                _ => return None, // far call/jmp と予約は従来経路
+            }
+        }
         0xE8 => {
             let rel = u32le(b, i)?;
             i += 4;
@@ -559,9 +711,21 @@ fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
                     i += 4;
                     Uop::Jcc { cc: op2 & 0xF, rel }
                 }
+                0x90..=0x9F => {
+                    let (_, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::SetCC { cc: op2 & 0xF, rm }
+                }
+                0xAF => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::ImulRRm { reg, rm }
+                }
                 0xB6 => {
                     let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
                     Uop::MovzxB { reg, rm }
+                }
+                0xB7 => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::MovzxW { reg, rm }
                 }
                 _ => return None,
             }
@@ -797,6 +961,204 @@ fn exec(m: &mut Machine, u: Uop) {
                 Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
             };
             m.cpu.regs[reg as usize] = v as u32;
+        }
+        Uop::IncR { reg } => {
+            let a = m.cpu.regs[reg as usize];
+            let v = a.wrapping_add(1);
+            m.cpu.regs[reg as usize] = v;
+            // CFは触らない (従来経路と同じ)
+            m.cpu.set_flag(OF, a == 0x7FFF_FFFF);
+            m.cpu.set_flag(AF, a & 0xF == 0xF);
+            set_szp_w(&mut m.cpu, v, true);
+        }
+        Uop::DecR { reg } => {
+            let a = m.cpu.regs[reg as usize];
+            let v = a.wrapping_sub(1);
+            m.cpu.regs[reg as usize] = v;
+            m.cpu.set_flag(OF, a == 0x8000_0000);
+            m.cpu.set_flag(AF, a & 0xF == 0);
+            set_szp_w(&mut m.cpu, v, true);
+        }
+        Uop::MovRmImm { rm, imm } => match rm {
+            Rm::Reg(r) => m.cpu.regs[r as usize] = imm,
+            Rm::Mem(mr) => {
+                let a = addr_of(m, &mr);
+                m.write32(a, imm);
+            }
+        },
+        Uop::MovRm8Imm { rm, imm } => match rm {
+            Rm::Reg(r) => m.cpu.set_reg8(r as usize, imm),
+            Rm::Mem(mr) => {
+                let a = addr_of(m, &mr);
+                m.write8(a, imm);
+            }
+        },
+        Uop::MovAMoffs { load, seg, off } => {
+            let a = m.cpu.lin(seg as usize, off);
+            if load {
+                let v = m.read32(a);
+                m.cpu.regs[AX] = v;
+            } else {
+                m.write32(a, m.cpu.regs[AX]);
+            }
+        }
+        Uop::Mov8AMoffs { load, seg, off } => {
+            let a = m.cpu.lin(seg as usize, off);
+            if load {
+                let v = m.read8(a);
+                m.cpu.set_reg8(0, v);
+            } else {
+                m.write8(a, m.cpu.reg8(0));
+            }
+        }
+        Uop::PushImm { imm } => push_w(m, imm, true),
+        Uop::Leave => {
+            // LEAVE: SP←BP、そしてBPをpop (従来経路の写し)
+            let bp = m.cpu.regs[BP];
+            super::sp_write(m, bp);
+            let v = pop_w(m, true);
+            m.cpu.regs[BP] = v;
+        }
+        Uop::XchgAR { reg } => {
+            m.cpu.regs.swap(AX, reg as usize);
+        }
+        Uop::Grp3b { kind, rm, imm } => {
+            let a = match rm {
+                Rm::Reg(r) => m.cpu.reg8(r as usize),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+            };
+            match kind {
+                0 | 1 => {
+                    alu8(&mut m.cpu, 4, a, imm);
+                }
+                2 => write_rm8(m, rm, !a),
+                _ => {
+                    let r = alu8(&mut m.cpu, 5, 0, a);
+                    m.cpu.set_flag(CF, a != 0);
+                    write_rm8(m, rm, r);
+                }
+            }
+        }
+        Uop::Grp3w { kind, rm, imm } => {
+            let a = match rm {
+                Rm::Reg(r) => m.cpu.regs[r as usize],
+                Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+            };
+            match kind {
+                0 | 1 => {
+                    alu_w(&mut m.cpu, 4, a, imm, true);
+                }
+                2 => write_rm32(m, rm, !a),
+                _ => {
+                    let r = alu_w(&mut m.cpu, 5, 0, a, true);
+                    m.cpu.set_flag(CF, a != 0);
+                    write_rm32(m, rm, r);
+                }
+            }
+        }
+        Uop::Grp5 { kind, rm } => match kind {
+            0 | 1 => {
+                // inc/dec r/m: CFを保存して足し引き (従来経路の写し)
+                let (a, addr) = read_rm32_addr(m, rm);
+                let cf = m.cpu.flag(CF);
+                let r = alu_w(&mut m.cpu, if kind == 0 { 0 } else { 5 }, a, 1, true);
+                m.cpu.set_flag(CF, cf);
+                match addr {
+                    Some(a2) => m.write32(a2, r),
+                    None => {
+                        if let Rm::Reg(rr) = rm {
+                            m.cpu.regs[rr as usize] = r;
+                        }
+                    }
+                }
+            }
+            2 => {
+                let t = read_rm32(m, rm);
+                let ret = m.cpu.ip;
+                push_w(m, ret, true);
+                m.cpu.set_ip(t);
+            }
+            4 => {
+                let t = read_rm32(m, rm);
+                m.cpu.set_ip(t);
+            }
+            _ => {
+                let v = read_rm32(m, rm);
+                push_w(m, v, true);
+            }
+        },
+        Uop::SetCC { cc, rm } => {
+            let v = u8::from(condition(&m.cpu, cc));
+            write_rm8(m, rm, v);
+        }
+        Uop::MovzxW { reg, rm } => {
+            let v = match rm {
+                Rm::Reg(r) => m.cpu.regs[r as usize] as u16,
+                Rm::Mem(mr) => m.read16(addr_of(m, &mr)),
+            };
+            m.cpu.regs[reg as usize] = v as u32;
+        }
+        Uop::ImulRRm { reg, rm } => {
+            // IMUL r32, r/m32 (従来経路 twobyte 0xAF の写し)
+            let a = m.cpu.regs[reg as usize] as i32 as i64;
+            let b = read_rm32(m, rm) as i32 as i64;
+            let r = a * b;
+            m.cpu.regs[reg as usize] = r as u32;
+            let ext = (r as i32 as i64) != r;
+            m.cpu.set_flag(CF, ext);
+            m.cpu.set_flag(OF, ext);
+        }
+        Uop::StrOne { op, seg } => {
+            // 単発ストリング命令。従来の string::exec に丸ごと委譲 (二重実装しない)
+            let d = Decoder {
+                seg_override: if seg >= 0 { Some(seg as usize) } else { None },
+                rep: None,
+                opsize32: true,
+                addrsize32: true,
+            };
+            super::string::exec(m, &d, op);
+        }
+    }
+}
+
+/// r/m32 の読み。メモリなら番地も返す (RMWで再変換しないため)
+#[inline]
+fn read_rm32_addr(m: &Machine, rm: Rm) -> (u32, Option<u32>) {
+    match rm {
+        Rm::Reg(r) => (m.cpu.regs[r as usize], None),
+        Rm::Mem(mr) => {
+            let a = addr_of(m, &mr);
+            (m.read32(a), Some(a))
+        }
+    }
+}
+
+#[inline]
+fn read_rm32(m: &Machine, rm: Rm) -> u32 {
+    match rm {
+        Rm::Reg(r) => m.cpu.regs[r as usize],
+        Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+    }
+}
+
+#[inline]
+fn write_rm8(m: &mut Machine, rm: Rm, v: u8) {
+    match rm {
+        Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
+        Rm::Mem(mr) => {
+            let a = addr_of(m, &mr);
+            m.write8(a, v);
+        }
+    }
+}
+
+#[inline]
+fn write_rm32(m: &mut Machine, rm: Rm, v: u32) {
+    match rm {
+        Rm::Reg(r) => m.cpu.regs[r as usize] = v,
+        Rm::Mem(mr) => {
+            let a = addr_of(m, &mr);
+            m.write32(a, v);
         }
     }
 }
