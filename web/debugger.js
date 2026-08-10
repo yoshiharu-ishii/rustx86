@@ -500,7 +500,9 @@ export class Debugger {
     this.$('rxMl').oninput = () => this.dump();
     this.$('rxRec').onclick = () => {
       emu()?.record_trace(256);
-      this.$('rxTrace').textContent = '直近256命令を残し始めた';
+      this.$('rxTrace').textContent =
+        '直近256命令を残し始めた。残るのは実行した命令だけ — アイドル (HLT) 中は' +
+        '1命令も実行していないので増えない。キーを打つなどして働かせてから Show';
     };
     this.$('rxShowT').onclick = () => this.showTrace();
   }
@@ -700,7 +702,9 @@ export class Debugger {
     if (!tj || !this.open) return;
     const t = JSON.parse(tj);
     if (!t.length) {
-      this.$('rxTrace').textContent = 'まだ何も残していない。Start recording を押してから走らせる';
+      this.$('rxTrace').textContent =
+        'まだ何も残していない。Start recording のあと、機械に仕事をさせる' +
+        ' (アイドル中は1命令も実行しない — キー入力やコマンドで起こす)';
       return;
     }
     this.$('rxTrace').innerHTML = t
