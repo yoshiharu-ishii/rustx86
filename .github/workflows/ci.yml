@@ -206,9 +206,13 @@ jobs:
           tools/extract-vmlinux.sh
           tools/make-mini-initramfs.sh
 
-      - name: 起動回帰 (プロンプト到達 + 画面のスクショ)
+      - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
         id: regress
         continue-on-error: true
+        # MIPS下限は「壊滅の検出」用の粗い値。共有ランナーは±10〜30%揺れるので、
+        # きつくするとランナーの運で赤くなる。日々の推移はレポートの数字を見る
+        env:
+          REGRESS_MIN_MIPS: 10
         run: cargo run --release --example regress | tee regress.md
 
       # ブートログを証跡として残す。ゲストの時計は決定的なので、

@@ -10,6 +10,11 @@
 // `\x1b[H` でホームへ、`\x1b[2J` で全消し、`\x1b[1;31m` で赤太字。
 // vi も snake も、この作法で画面を描く。だから受け手側に**状態機械**が要る。
 //
+// 使い勝手は terminal.js に合わせてある: スクロールバック1000行 (ホイールと
+// 右端のスクロールバー、キーを打つと最新へ)、カーソルの点滅。
+// **シリアルコンソールを外から覗いている**という意味づけなので、
+// 流れて消えた行を端末側が控えるのは実物の端末エミュレータと同じ振る舞い。
+//
 // ## 実装の範囲
 //
 // busybox・vi・snake が実際に吐くものだけ実装する。全 VT100 は追わない:
@@ -20,13 +25,25 @@
 
 const CELL_W = 9;
 const CELL_H = 16;
+const SCROLLBAR_W = 10;
 const FONT = '13px ui-monospace, Menlo, monospace';
+/** カーソルの点滅周期 (terminal.js と同じ) */
+const BLINK_MS = 530;
 
-// xterm の16色 (0-7 通常、8-15 明色)
+// xterm の16色 (0-7 通常、8-15 明色) を、VGA端末と同じ Homebrew 緑燐光に寄せる。
+// **既定色 (7) と明るい白 (15) だけを緑にする**のが肝 — 全部緑にすると
+// ゲストが色分けした情報 (ls の青いディレクトリ、エラーの赤) が読めなくなる
 const PALETTE = [
-  '#000000', '#cd0000', '#00cd00', '#cdcd00', '#2222cc', '#cd00cd', '#00cdcd', '#e5e5e5',
-  '#7f7f7f', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#ffffff',
+  '#000000', '#cd0000', '#00cd00', '#cdcd00', '#3388ff', '#cd00cd', '#00cdcd', '#00ff00',
+  '#7f7f7f', '#ff5555', '#55ff55', '#ffff55', '#5555ff', '#ff55ff', '#55ffff', '#7cff7c',
 ];
+
+const SCROLL = {
+  banner: 'rgba(0, 90, 0, 0.85)',
+  bannerText: '#7cff7c',
+  track: 'rgba(0, 255, 0, 0.10)',
+  thumb: 'rgba(0, 255, 0, 0.45)',
+};
 
 export class AnsiTerminal {
   constructor(canvas, opts = {}) {
@@ -34,11 +51,16 @@ export class AnsiTerminal {
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
-    canvas.width = this.cols * CELL_W;
+    this.scrollbackLimit = opts.scrollback ?? 1000;
+    canvas.width = this.cols * CELL_W + SCROLLBAR_W;
     canvas.height = this.rows * CELL_H;
 
     // 各セル: {ch, fg, bg, bold, inv}
     this.grid = null;
+    /** 画面上端から流れて消えた行の控え (セルごと持つので色も残る) */
+    this.scrollback = [];
+    /** 何行さかのぼって見ているか (0 = 最新) */
+    this.offset = 0;
     this.reset();
 
     // パーサの状態
@@ -58,12 +80,48 @@ export class AnsiTerminal {
       if (t) this.onData?.(t);
       e.preventDefault();
     });
+
+    // 過去を見る: ホイールと右端のスクロールバー (terminal.js と同じ操作感)
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        this.scrollTo(this.offset + (e.deltaY > 0 ? -3 : 3));
+      },
+      { passive: false },
+    );
+    let draggingBar = false;
+    canvas.addEventListener('mousedown', (e) => {
+      const r = canvas.getBoundingClientRect();
+      const x = ((e.clientX - r.left) * canvas.width) / r.width;
+      if (x >= this.cols * CELL_W) {
+        draggingBar = true;
+        this._scrollbarTo(e);
+        e.preventDefault();
+      }
+      canvas.focus();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (draggingBar) this._scrollbarTo(e);
+    });
+    window.addEventListener('mouseup', () => {
+      draggingBar = false;
+    });
+
+    // カーソルの点滅 (VGA端末と同じ周期)
+    this.blinkOn = true;
+    setInterval(() => {
+      this.blinkOn = !this.blinkOn;
+      if (this.offset === 0 && this.cursorVisible) this.dirty = true;
+    }, BLINK_MS);
   }
 
   reset() {
     this.grid = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => this._blank()),
     );
+    this.scrollback = [];
+    this.offset = 0;
     this.cx = 0;
     this.cy = 0;
     this.fg = 7;
@@ -76,6 +134,56 @@ export class AnsiTerminal {
 
   _blank() {
     return { ch: ' ', fg: 7, bg: 0, bold: false, inv: false };
+  }
+
+  // ---- 端末自体の状態の写し (機械のスナップショットに添える) ----
+  //
+  // 機械の状態にシリアルの**履歴**は入らない (送信済みは状態ではない)。
+  // でも「状態を復元」で画面とカーソルが保存時の姿に戻らないと、
+  // VGA機 (画面がメモリの中にある) と使い勝手が揃わない。
+  // だから端末側の姿は端末側で控えて、機械の控えと一緒に出し入れする。
+
+  snapshot() {
+    const copyRows = (rows) => rows.map((row) => row.map((c) => ({ ...c })));
+    return {
+      grid: copyRows(this.grid),
+      scrollback: copyRows(this.scrollback),
+      cx: this.cx,
+      cy: this.cy,
+      fg: this.fg,
+      bg: this.bg,
+      bold: this.bold,
+      inv: this.inv,
+      cursorVisible: this.cursorVisible,
+    };
+  }
+
+  restore(snap) {
+    const copyRows = (rows) => rows.map((row) => row.map((c) => ({ ...c })));
+    this.grid = copyRows(snap.grid);
+    this.scrollback = copyRows(snap.scrollback);
+    this.cx = snap.cx;
+    this.cy = snap.cy;
+    this.fg = snap.fg;
+    this.bg = snap.bg;
+    this.bold = snap.bold;
+    this.inv = snap.inv;
+    this.cursorVisible = snap.cursorVisible;
+    this.offset = 0;
+    this.state = 'text';
+    this.params = '';
+    this._utf8 = [];
+    this.dirty = true;
+  }
+
+  /** 全文 (履歴+画面) をテキストで。「ログを保存」の材料 */
+  allText() {
+    const rowText = (row) =>
+      row
+        .map((c) => c.ch)
+        .join('')
+        .replace(/\s+$/, '');
+    return [...this.scrollback, ...this.grid].map(rowText).join('\n');
   }
 
   // ---- 受信: ゲスト → 画面 ----
@@ -122,7 +230,7 @@ export class AnsiTerminal {
         }
         break;
       case 'csi':
-        if ((b >= 0x30 && b <= 0x3f)) {
+        if (b >= 0x30 && b <= 0x3f) {
           this.params += c; // パラメータ (数字・; ・ ?)
         } else {
           this._csi(c);
@@ -171,7 +279,17 @@ export class AnsiTerminal {
   _newline() {
     this.cy++;
     if (this.cy >= this.rows) {
-      this.grid.shift();
+      // 上端から消える行を控える (シリアルを外から覗く端末の流儀)。
+      // vi や snake はカーソル移動で描き直すのでここは通らず、
+      // 履歴に積もるのはシェルと dmesg の流れだけ — それでよい
+      const gone = this.grid.shift();
+      this.scrollback.push(gone);
+      while (this.scrollback.length > this.scrollbackLimit) {
+        this.scrollback.shift();
+      }
+      if (this.offset > 0) {
+        this.offset = Math.min(this.offset + 1, this.scrollback.length);
+      }
       this.grid.push(Array.from({ length: this.cols }, () => this._blank()));
       this.cy = this.rows - 1;
     }
@@ -270,6 +388,23 @@ export class AnsiTerminal {
     }
   }
 
+  // ---- スクロールバック ----
+
+  scrollTo(offset) {
+    const next = Math.max(0, Math.min(this.scrollback.length, offset));
+    if (next !== this.offset) {
+      this.offset = next;
+      this.dirty = true;
+    }
+  }
+
+  _scrollbarTo(ev) {
+    const r = this.canvas.getBoundingClientRect();
+    const y = ((ev.clientY - r.top) * this.canvas.height) / r.height;
+    const ratio = 1 - Math.max(0, Math.min(1, y / this.canvas.height));
+    this.scrollTo(Math.round(ratio * this.scrollback.length));
+  }
+
   // ---- 描画 ----
 
   render() {
@@ -279,10 +414,22 @@ export class AnsiTerminal {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.textBaseline = 'top';
-    for (let y = 0; y < this.rows; y++) {
+
+    // 見せる行: 最新なら画面そのもの、遡っていれば履歴+画面の窓
+    let view;
+    if (this.offset === 0) {
+      view = this.grid;
+    } else {
+      const all = [...this.scrollback, ...this.grid];
+      const start = Math.max(0, all.length - this.rows - this.offset);
+      view = all.slice(start, start + this.rows);
+    }
+
+    for (let y = 0; y < view.length; y++) {
       for (let x = 0; x < this.cols; x++) {
-        const cell = this.grid[y][x];
-        let fg = cell.fg, bg = cell.bg;
+        const cell = view[y][x];
+        let fg = cell.fg,
+          bg = cell.bg;
         if (cell.inv) [fg, bg] = [bg, fg];
         if (bg !== 0) {
           ctx.fillStyle = PALETTE[bg];
@@ -295,11 +442,32 @@ export class AnsiTerminal {
         }
       }
     }
-    // カーソル
-    if (this.cursorVisible) {
-      ctx.fillStyle = 'rgba(230,230,230,0.7)';
-      ctx.fillRect(this.cx * CELL_W, this.cy * CELL_H + CELL_H - 2, CELL_W, 2);
+
+    if (this.offset === 0) {
+      if (this.cursorVisible && this.blinkOn) {
+        ctx.fillStyle = '#23ff18'; // カーソルも燐光色 (VGA端末と同じ)
+        ctx.fillRect(this.cx * CELL_W, this.cy * CELL_H + CELL_H - 2, CELL_W, 2);
+      }
+    } else {
+      // 遡り中の目印 (VGA端末と同じ)
+      ctx.fillStyle = SCROLL.banner;
+      ctx.fillRect(0, 0, this.cols * CELL_W, CELL_H);
+      ctx.font = FONT;
+      ctx.fillStyle = SCROLL.bannerText;
+      ctx.fillText(`▲ ${this.offset}行前  (キーを打つと最新へ)`, 4, 1);
     }
+
+    // 右端のスクロールバー (これがあればログを別枠に出す必要が無い)
+    const x = this.cols * CELL_W;
+    const h = this.canvas.height;
+    ctx.fillStyle = SCROLL.track;
+    ctx.fillRect(x, 0, SCROLLBAR_W, h);
+    const total = this.scrollback.length + this.rows;
+    const thumbH = Math.max(20, (h * this.rows) / total);
+    const maxOffset = this.scrollback.length;
+    const pos = maxOffset === 0 ? 1 : 1 - this.offset / maxOffset;
+    ctx.fillStyle = SCROLL.thumb;
+    ctx.fillRect(x + 1, (h - thumbH) * pos, SCROLLBAR_W - 2, thumbH);
   }
 
   // ---- 入力: キー → ゲスト ----
@@ -326,6 +494,8 @@ export class AnsiTerminal {
       s = k;
     }
     if (s !== null) {
+      // 打ったら最新へ戻る (VGA端末と同じ)
+      if (this.offset !== 0) this.scrollTo(0);
       this.onData?.(s);
       e.preventDefault();
     }

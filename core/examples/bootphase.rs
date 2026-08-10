@@ -39,6 +39,45 @@ fn main() {
                 total_t - fs_t
             );
             println!("合計:               {}M命令 {:.1}s", n / 1_000_000, total_t);
+            // デコードキャッシュの効き具合 (カバレッジ)
+            let d = &m.dcache;
+            let covered = d.hits + d.fills;
+            let seen = covered + d.fallbacks;
+            if seen > 0 {
+                println!(
+                    "dcache: ヒット{}M + 新規{}M = 対象{:.1}% / 従来経路{}M",
+                    d.hits / 1_000_000,
+                    d.fills / 1_000_000,
+                    covered as f64 * 100.0 / seen as f64,
+                    d.fallbacks / 1_000_000
+                );
+            }
+            // opstats フィーチャ付きなら、実行回数の上位を出す
+            // (デコードキャッシュの対象選定は推測でなくこの実測で行う)
+            let total: u64 = m.op_counts.iter().sum();
+            if total > 0 {
+                let mut idx: Vec<usize> = (0..512).collect();
+                idx.sort_by_key(|&i| std::cmp::Reverse(m.op_counts[i]));
+                println!("\n実行回数の上位 (全{}M命令):", total / 1_000_000);
+                let mut cum = 0.0;
+                for &i in idx.iter().take(30) {
+                    let c = m.op_counts[i];
+                    if c == 0 {
+                        break;
+                    }
+                    let pct = c as f64 * 100.0 / total as f64;
+                    cum += pct;
+                    let name = if i < 256 {
+                        format!("{:02X}", i)
+                    } else {
+                        format!("0F{:02X}", i - 256)
+                    };
+                    println!(
+                        "  {name:>5}  {:>8}M  {pct:5.1}%  累積{cum:5.1}%",
+                        c / 1_000_000
+                    );
+                }
+            }
             return;
         }
     }

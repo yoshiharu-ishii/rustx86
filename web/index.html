@@ -42,6 +42,16 @@
   #benchPane input, #benchPane select { background: #0d1117; color: #c9d1d9;
                                         border: 1px solid #30363d; border-radius: 4px;
                                         padding: .2rem .4rem; }
+  /* オープニング。マシンを選ぶまで端末の代わりにここが出る */
+  #welcomePane { padding: 2.2rem 2rem; color: #5dbb5d;
+                 font-family: ui-monospace, Menlo, monospace; }
+  #welcomePane .logo { color: #23ff18; font-size: 1.6rem; letter-spacing: .12em;
+                       margin: 0 0 .4rem; }
+  #welcomePane p { margin: .4rem 0; font-size: .92rem; }
+  #welcomePane ul { margin: .8rem 0; padding-left: 1.2rem; font-size: .88rem;
+                    line-height: 1.9; }
+  #welcomePane .hint { color: #7cff7c; margin-top: 1.4rem; }
+
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
      アスペクト比を固定してあるので、縮んでも文字が潰れない。
@@ -53,13 +63,13 @@
     max-width: calc((100vh - 15rem) * 730 / 400);
   }
   #screen:focus { outline: none; }
-  /* Linux のシリアル端末。作法は #screen と同じで、格子の比率だけ違う —
-     (80桁 x 9px) : (24行 x 16px) = 720 : 384。スクロールバーは無い */
+  /* Linux のシリアル端末。作法は #screen と同じで、行数だけ違う —
+     (80桁 x 9px + スクロールバー10px) : (24行 x 16px) = 730 : 384 */
   #linuxScreen {
     display: block; cursor: text; margin: 0 auto;
     width: 100%; height: auto;
-    aspect-ratio: 720 / 384;
-    max-width: calc((100vh - 15rem) * 720 / 384);
+    aspect-ratio: 730 / 384;
+    max-width: calc((100vh - 15rem) * 730 / 384);
   }
   #linuxScreen:focus { outline: none; }
   /* **hidden 属性を効かせる。** 上の #screen が display を指定しているので、
@@ -87,6 +97,8 @@
   .gauge {
     font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
     color: #5dbb5d; font-variant-numeric: tabular-nums; white-space: nowrap;
+    /* ボタンが折り返して2行になっても、MIPSは常に右端に居る */
+    margin-left: auto;
   }
   #status {
     padding: .45rem .7rem; font-size: .85rem; color: #9a9a9a; min-height: 2.1em;
@@ -145,7 +157,6 @@
       <button id="pause" disabled>一時停止</button>
       <button id="snap" disabled>状態を保存</button>
       <button id="restore" disabled>状態を復元</button>
-      <button id="snapfile" disabled>状態をJSONで書き出す</button>
       <button id="save">ログを保存</button>
       <button id="debug" disabled>デバッガ</button>
       <label class="sel">配列
@@ -157,7 +168,18 @@
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
     </div>
-    <canvas id="screen" tabindex="0"></canvas>
+    <!-- オープニング。いきなりOSが立ち上がるのではなく、まず選んでもらう -->
+    <div id="welcomePane">
+      <p class="logo">rustx86</p>
+      <p>Rustで書いたx86エミュレータ。8086から386まで、本物のOSがブラウザの中で動く。</p>
+      <ul>
+        <li><b>ELKS 0.9.1</b> — 16bit UNIX。8042とテキストVRAMを直接叩く。tetris入り</li>
+        <li><b>FreeDOS 1.4</b> — BIOS経由で動くDOS。A:\> まで自動で進む</li>
+        <li><b>Linux 6.18</b> — 32bitプロテクトモード+ページング。数秒でシェルが出る</li>
+      </ul>
+      <p class="hint">← 左のメニューからマシンを選ぶと、ここが画面になる</p>
+    </div>
+    <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
          違うので canvas を分け、選ばれている方だけを見せる -->
     <canvas id="linuxScreen" tabindex="0" hidden></canvas>

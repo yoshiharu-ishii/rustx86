@@ -40,6 +40,12 @@ export function mountLinux(canvas, opts = {}) {
   let mips = 0;
   /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
   let idle = false;
+  /** 「状態を保存」の控え。64MBあるので localStorage ではなくメモリに持つ
+      (ページを閉じると消える) */
+  let savedState = null;
+  /** 保存時の端末の姿 (画面・カーソル・履歴)。機械の状態にシリアルの履歴は
+      入らないので、端末側の姿は端末側で控える — VGA機と使い勝手を揃えるため */
+  let savedTerm = null;
 
   // 端末の入力 → ワーカーへ (UTF-8バイト列にして送る)。
   // onData は毎回張り替える — 前回 mount の閉包は古いワーカーを見ている
@@ -79,7 +85,13 @@ export function mountLinux(canvas, opts = {}) {
     return buf;
   }
 
-  async function boot() {
+  /**
+   * 起動する。既定はスナップショット優先 (数秒でシェル)。
+   * `{ full: true }` で**必ずフル起動** — カーネルログが流れる本物の起動を
+   * UI (電源ONボタン) から選べるようにする。スナップショットに乗っ取られて
+   * フルブートが見られない、を防ぐ
+   */
+  async function boot({ full = false } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -90,17 +102,19 @@ export function mountLinux(canvas, opts = {}) {
 
     // まず**起動済みスナップショット**を探す (tools/make-linux-snapshot.sh が作る)。
     // あれば数秒で立つ — 「シンプルなカーネルの起動に1分」への即効薬で、
-    // フル起動はスナップショットが無いときの道として残す
+    // フル起動は電源ONボタンとスナップショット不在時の道
     let snapshot = null;
     let kernel = null;
     let initrd = null;
-    try {
-      const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
-      status('スナップショットを展開中…');
-      const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
-      snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
-    } catch {
-      snapshot = null; // 無ければカーネルからのフル起動に落ちる
+    if (!full) {
+      try {
+        const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
+        status('スナップショットを展開中…');
+        const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+        snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
+      } catch {
+        snapshot = null; // 無ければカーネルからのフル起動に落ちる
+      }
     }
 
     if (!snapshot) {
@@ -171,6 +185,20 @@ export function mountLinux(canvas, opts = {}) {
         case 'serial':
           term.write(new Uint8Array(msg.bytes));
           break;
+        case 'state':
+          savedState = new Uint8Array(msg.bytes);
+          // ここまでのシリアルは全部適用済み (メッセージは順序を守る) なので、
+          // 端末の姿は機械の控えと同じ瞬間のもの
+          savedTerm = term.snapshot();
+          status(`状態を保存した (${(savedState.length / 1e6).toFixed(1)}MB、このページの間だけ残る)`);
+          opts.onState?.();
+          break;
+        case 'loaded':
+          // 機械が戻ったので端末も保存時の姿へ (画面・カーソル・履歴ごと)
+          if (savedTerm) term.restore(savedTerm);
+          status('保存した状態に戻した');
+          canvas.focus();
+          break;
         case 'status':
           mips = msg.mips || 0;
           idle = !!msg.idle;
@@ -195,6 +223,26 @@ export function mountLinux(canvas, opts = {}) {
       if (!worker || !booted || paused === v) return;
       paused = v;
       worker.postMessage({ type: v ? 'pause' : 'resume' });
+    },
+    /** 今の状態をワーカーに控えさせる (返事は 'state' で届く) */
+    saveState() {
+      if (worker && booted) worker.postMessage({ type: 'save' });
+    },
+    /** 控えた状態へ戻す */
+    restoreState() {
+      if (worker && booted && savedState) {
+        // 転送で手放すと二度目が失敗する。写しを渡す
+        const copy = savedState.slice();
+        worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
+      }
+    },
+    get hasSaved() { return savedState !== null; },
+    /** 控えた状態そのもの (JSON書き出し用)。無ければ null */
+    get savedBytes() { return savedState; },
+    /** 端末が見た全文 (履歴1000行+今の画面)。VGA機の「ログを保存」と同じ意味論。
+        スナップショット起動でも画面に見えている分は必ず入る */
+    get logText() {
+      return term.allText();
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {

@@ -1,13 +1,17 @@
 pub mod bios;
-pub mod bus;
-pub mod bzimage;
+pub mod boot;
 pub mod cp437;
 pub mod cpu;
 pub mod debug;
 pub mod dev;
 pub mod disk;
-pub mod elf;
+pub mod mem;
 pub mod snapshot;
+
+// 移動前のパス (rustx86_core::bzimage 等) を保つ再エクスポート。
+// テスト・wasm・cosim の参照はこれで壊れない
+pub use boot::{bzimage, elf};
+pub use mem::bus;
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
@@ -169,6 +173,12 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// デコード済み命令キャッシュ (ADR-0007 P1a)。中身は cpu::dcache
+    pub dcache: cpu::dcache::DecodeCache,
+    /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
+    /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
+    /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
+    pub op_counts: Vec<u64>,
     /// アイドル (HLT) の早送りが飛ばした仮想命令数の累計。
     ///
     /// **走らせる側が実時間との釣り合いを取るための読み値**で、機械の状態では
@@ -252,6 +262,8 @@ impl Machine {
             video_modes: std::collections::BTreeSet::new(),
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
+            dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
+            op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
             first_fault: None,
@@ -277,71 +289,7 @@ impl Machine {
         }
     }
 
-    /// TLBを全部空にする。mov cr3 (アドレス空間の切り替え) や CR0 の変更、
-    /// スナップショット復元の後に呼ぶ。**表を書き換えたのに写しが古いと
-    /// 幽霊のページが見え続ける**ので、切り替えの合図で必ず捨てる
-    pub fn tlb_flush(&self) {
-        for slot in &self.tlb {
-            let mut e = slot.get();
-            e.tag = TLB_INVALID;
-            slot.set(e);
-        }
-    }
-
-    /// TLBの1ページだけ無効化する (INVLPG)。ページテーブルの1エントリを
-    /// 書き換えたカーネルは、この命令でそのページの写しだけを捨てる
-    pub fn tlb_flush_page(&self, la: u32) {
-        let slot = ((la >> 12) as usize) & (TLB_SLOTS - 1);
-        let mut e = self.tlb[slot].get();
-        e.tag = TLB_INVALID;
-        self.tlb[slot].set(e);
-    }
-
-    /// RAMのバイト数 (= 実際の確保量)
-    pub fn ram_bytes(&self) -> usize {
-        self.mem.len()
-    }
-
-    /// 物理アドレスへ書く (変換しない)。テストや装置初期化用
-    pub fn write_phys8(&mut self, pa: u32, val: u8) {
-        if let Some(b) = self.mem.get_mut(pa as usize) {
-            *b = val;
-        }
-        // 超えたら捨てる (未マップへの書き込みは実機でも消える)
-    }
-
-    pub fn write_phys32(&mut self, pa: u32, val: u32) {
-        for (i, b) in val.to_le_bytes().iter().enumerate() {
-            self.write_phys8(pa.wrapping_add(i as u32), *b);
-        }
-    }
-
-    /// ブートセクタ (512バイト) を0x7C00に配置し、CS:IP=0000:7C00から実行開始
-    pub fn load_boot_sector(&mut self, sector: &[u8]) -> Result<(), String> {
-        if sector.len() != 512 {
-            return Err(format!(
-                "boot sector must be 512 bytes, got {}",
-                sector.len()
-            ));
-        }
-        if sector[510] != 0x55 || sector[511] != 0xAA {
-            return Err("missing boot signature 0x55AA".into());
-        }
-        self.power_on_self_test();
-        self.mem[0x7C00..0x7E00].copy_from_slice(sector);
-        self.cpu.set_cs_ip(0x0000, 0x7C00);
-        self.cpu.regs[cpu::DX] = 0x0080; // DL = ブートドライブ番号
-        Ok(())
-    }
-
-    /// ハードウェア割り込みベクタを直接立てる (PICを介さない経路。テスト用)
-    pub fn raise_irq(&mut self, vector: u8) {
-        self.pending_irq = Some(vector);
-    }
-
-    /// 装置を進め、挙手があればPICへ渡す。
-    ///
-    /// **一周はこうなっている**:
+    /// 装置を進め、挙手があればPICへ渡す。**一周はこうなっている**:
     /// PITがカウンタ0を下ろしきってIRQ0を出す → PICが優先順位を見て受理し、
     /// ICW2で設定されたベースから割り込みベクタを決める → CPUが命令境界で受け取る。
     /// この経路のどこか1つでも欠けるとOSのスケジューラが動かない。
@@ -384,7 +332,16 @@ impl Machine {
     /// 止まるのはCPUであって時計ではない。時計を置き去りにすると、
     /// nanosleep したプロセスが永遠に起きない罠 (Tier 3bで実際に踏んだ) を
     /// 逆向きにもう一度踏むことになる。
-    fn idle_fast_forward(&mut self) {
+    ///
+    /// もう一つの約束: **予算 (budget) を超えて飛ばさない。**
+    /// run系は「予算=仮想時間」で回っているのに、ここが1回で次のPITパルスまで
+    /// (100Hzなら10ms ≒ 763k命令分) 飛ぶと、予算6千の run_slice が127倍
+    /// 超過する。呼ぶ側は「頼んだ分だけ進んだ」と勘定するので、アイドル中の
+    /// ゲストの時計だけが実時間の百倍で流れた — ELKSのtetrisは read(2) を
+    /// SIGALRM (300ms) で切ってテンポを作るゲームで、駒が一瞬で積み上がって
+    /// 即ゲームオーバーになった (実際になった)。予算の途中までしか飛ばず、
+    /// 残りは次の呼び出しが続きから飛ぶ。
+    fn idle_fast_forward(&mut self, budget: u64) {
         // 既に挙手があるなら飛ばさない。IF=1なら次のstepで配送されて起きるし、
         // IF=0で寝ている機械の時計だけが暴走するのも防ぐ (従来の1刻みに落とす)
         if self.pending_irq.is_some() || self.pic_service {
@@ -397,7 +354,17 @@ impl Machine {
             return;
         };
         // クロック → tick数 (切り上げ)。パルスが出る tick まで飛ぶ
-        let ticks = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1);
+        let to_irq = clocks.div_ceil(PIT_CLOCKS_PER_TICK).max(1) as u64;
+        // 予算内に収まる tick 数。最低1 tick は進める — ゼロだと進捗が無く
+        // run系のループが空回りする (超過は高々 tick_countdown ≦ 64命令分)
+        let affordable = if budget <= self.tick_countdown as u64 {
+            1
+        } else {
+            1 + (budget - self.tick_countdown as u64) / INSTRUCTIONS_PER_TICK as u64
+        };
+        // 予算が先に尽きるならパルスの手前で止まる。IRQは出ないので機械は
+        // 寝たままだが、それでよい — 次の呼び出しが続きから飛ぶ
+        let ticks = to_irq.min(affordable) as u32;
         // 命令数に換算: 次のtickまでの残り + そこから先のtick分。
         // この間 step() は呼ばれなかったことになるので、TSCをまとめて進める
         let skip = self.tick_countdown as u64 + (ticks as u64 - 1) * INSTRUCTIONS_PER_TICK as u64;
@@ -409,209 +376,6 @@ impl Machine {
         self.tick_devices(ticks);
     }
 
-    /// ディスクイメージを入れ、その先頭セクタからブートする
-    pub fn boot_from_disk(&mut self, image: Vec<u8>) -> Result<(), String> {
-        let d = Disk::from_image(image)?;
-        let boot = d.read_sector(0).ok_or("ブートセクタが読めない")?.to_vec();
-        self.disk = Some(d);
-        self.power_on_self_test();
-        self.mem[0x7C00..0x7E00].copy_from_slice(&boot);
-        self.cpu.set_cs_ip(0x0000, 0x7C00);
-        self.cpu.regs[cpu::DX] = 0x0000; // DL = 0 (フロッピーA)
-        Ok(())
-    }
-
-    /// bzImage を直接ロードして 32bit カーネルエントリへ飛ぶ (Tier 3b)。
-    ///
-    /// ブートローダ (GRUB) がやることを肩代わりする「32bit ブートプロトコル」:
-    ///   1. カーネル本体を物理 1MB へ置く
-    ///   2. zero page (boot_params) を組んで、cmdline と e820 を入れる
-    ///   3. **フラットな32bit protected mode・paging off** の状態を作る
-    ///   4. `%esi` = zero page の物理番地、`code32_start` へジャンプ
-    ///
-    /// GDTを組んで far jump…という手順は踏まず、**隠しレジスタに直接
-    /// フラットセグメント (base=0, limit=4GB, 32bit) を書く**。実機の
-    /// ブートローダが GDT を経て到達する状態を、こちらは結果だけ作れる。
-    ///
-    /// カーネルは早々にこの状態を捨てて自前のGDT/ページテーブルを作るので、
-    /// ここで渡すのは「最初の一歩を踏み出せる姿勢」だけでよい
-    pub fn boot_bzimage(&mut self, image: &[u8], cmdline: &str) -> Result<(), String> {
-        self.boot_bzimage_with_initrd(image, cmdline, None)
-    }
-
-    /// Linux を起動する (bzImage / vmlinux の自動判別)。
-    ///
-    /// 先頭が ELF なら vmlinux 直接ロード (解凍ステブ無し = 起動が半分)、
-    /// そうでなければ bzImage。呼ぶ側はファイルの中身を気にしなくてよい
-    pub fn boot_linux_with_initrd(
-        &mut self,
-        image: &[u8],
-        cmdline: &str,
-        initrd: Option<&[u8]>,
-    ) -> Result<(), String> {
-        if elf::is_elf(image) {
-            self.boot_vmlinux_with_initrd(image, cmdline, initrd)
-        } else {
-            self.boot_bzimage_with_initrd(image, cmdline, initrd)
-        }
-    }
-
-    /// 非圧縮の vmlinux (ELF32) を直接ロードして起動する。
-    ///
-    /// bzImage の自己解凍ステブは**起動全体の55% (540M命令) を無言で食う**。
-    /// 展開済みのカーネルをこちらで物理メモリに置けば、その区間は丸ごと消える。
-    /// Firecracker が bzImage ではなく vmlinux を要求するのと同じ判断。
-    /// vmlinux は tools/extract-vmlinux.sh で bzImage から取り出せる
-    pub fn boot_vmlinux_with_initrd(
-        &mut self,
-        image: &[u8],
-        cmdline: &str,
-        initrd: Option<&[u8]>,
-    ) -> Result<(), String> {
-        let v = elf::parse_vmlinux(image)?;
-        self.power_on_self_test();
-
-        // セグメントを物理メモリへ。解凍ステブがやっていた仕事の代行:
-        // ファイルの中身を写し、memsz までの残り (BSS) をゼロで埋める
-        for s in &v.segments {
-            let end = s.paddr as usize + s.memsz;
-            if end > self.mem.len() {
-                return Err(format!(
-                    "vmlinux のセグメント (物理 0x{:08x}..0x{end:08x}) がRAM ({}MB) に収まらない",
-                    s.paddr,
-                    self.mem.len() >> 20
-                ));
-            }
-            let dst = s.paddr as usize;
-            self.mem[dst..dst + s.filesz].copy_from_slice(&image[s.offset..s.offset + s.filesz]);
-            self.mem[dst + s.filesz..end].fill(0);
-        }
-
-        // zero page に写すセットアップヘッダが vmlinux には無いので合成する。
-        // カーネルが読み返して意味を持つ欄だけ: マジック・版・LOADED_HIGH。
-        // (type_of_loader / ramdisk / cmdline は build_zero_page 自身が書く)
-        let mut hdr_src = vec![0u8; 0x268];
-        hdr_src[0x202..0x206].copy_from_slice(b"HdrS");
-        hdr_src[0x206..0x208].copy_from_slice(&0x020Cu16.to_le_bytes());
-        hdr_src[0x211] = 0x01; // LOADED_HIGH
-        hdr_src[0x214..0x218].copy_from_slice(&v.entry.to_le_bytes());
-
-        self.finish_linux_boot(&hdr_src, cmdline, initrd, v.entry)
-    }
-
-    /// initrd (initramfs) 付きの bzImage 起動。
-    /// initrd は**RAMの高い方**に置く — カーネル本体 (1MB〜) と展開作業域から
-    /// 遠ざけるのが慣習で、実ブートローダも同じことをする
-    pub fn boot_bzimage_with_initrd(
-        &mut self,
-        image: &[u8],
-        cmdline: &str,
-        initrd: Option<&[u8]>,
-    ) -> Result<(), String> {
-        let hdr = bzimage::SetupHeader::parse(image)?;
-        if !hdr.loaded_high() {
-            return Err("LOADED_HIGH でない (bzImage ではなく zImage?)".into());
-        }
-
-        self.power_on_self_test();
-
-        // カーネル本体を物理 1MB へ。bzImage の kernel_offset 以降が本体
-        let kbody = &image[hdr.kernel_offset().min(image.len())..];
-        const KERNEL_BASE: u32 = 0x0010_0000;
-        for (i, b) in kbody.iter().enumerate() {
-            self.write_phys8(KERNEL_BASE + i as u32, *b);
-        }
-
-        self.finish_linux_boot(image, cmdline, initrd, hdr.code32_start)
-    }
-
-    /// Linux 起動の共通の尾部 — カーネル本体を置いた後の仕事。
-    /// cmdline / initrd / zero page を配り、フラット32bitの姿勢を作って
-    /// `entry` へ飛ぶ。bzImage と vmlinux の両経路がここへ合流する。
-    /// `hdr_src` は zero page に写すセットアップヘッダの持ち主
-    /// (bzImage ならファイル先頭、vmlinux なら合成したもの)
-    fn finish_linux_boot(
-        &mut self,
-        hdr_src: &[u8],
-        cmdline: &str,
-        initrd: Option<&[u8]>,
-        entry: u32,
-    ) -> Result<(), String> {
-        use cpu::{CS, DS, ES, FS, GS, SS};
-
-        // cmdline を低位に置く (慣習の 0x2_0000)
-        const CMDLINE_ADDR: u32 = 0x0002_0000;
-        for (i, b) in cmdline.bytes().enumerate() {
-            self.write_phys8(CMDLINE_ADDR + i as u32, b);
-        }
-        self.write_phys8(CMDLINE_ADDR + cmdline.len() as u32, 0);
-
-        // initrd をRAM上端寄り (1MBの余白を残してページ整列) に置く
-        let initrd_loc = match initrd {
-            Some(data) => {
-                let size = data.len() as u32;
-                let top = self.mem.len() as u32;
-                if size + 0x0100_0000 > top {
-                    return Err(format!(
-                        "initrd ({size} バイト) がRAM ({top} バイト) に収まらない"
-                    ));
-                }
-                let addr = (top - size - 0x0010_0000) & !0xFFF;
-                for (i, b) in data.iter().enumerate() {
-                    self.write_phys8(addr + i as u32, *b);
-                }
-                Some((addr, size))
-            }
-            None => None,
-        };
-
-        // zero page を組んで低位に置く (慣習の 0x1_0000)
-        const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
-        for (i, b) in zp.iter().enumerate() {
-            self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
-        }
-
-        // --- 実機のブートローダが作る GDT を、物理メモリに組む ---
-        //
-        // 隠しレジスタに直接書くショートカットは、**カーネルがセグメントを
-        // 再ロードするまでしか保たない**。カーネルは起動直後に mov ds,ax 等で
-        // セグメントを触り、そのとき GDTR の指す表を読み直す。表が無いと
-        // ゴミを記述子として読んで base が壊れ、墜落する (実際に踏んだ)。
-        //
-        // Linux boot protocol の要求どおり、flat な GDT を用意する:
-        //   index 2 (selector 0x10) = flat 32bit code
-        //   index 3 (selector 0x18) = flat 32bit data
-        const GDT_ADDR: u32 = 0x0000_0800;
-        // 8バイトの記述子。base=0, limit=0xFFFFF(4Kページ単位で4GB), access, flags
-        let desc = |access: u8| -> [u8; 8] { [0xFF, 0xFF, 0, 0, 0, access, 0xCF, 0] };
-        let mut gdt = [0u8; 32]; // 4エントリ
-        gdt[16..24].copy_from_slice(&desc(0x9A)); // 0x10: code (P,DPL0,code,readable)
-        gdt[24..32].copy_from_slice(&desc(0x92)); // 0x18: data (P,DPL0,data,writable)
-        for (i, b) in gdt.iter().enumerate() {
-            self.write_phys8(GDT_ADDR + i as u32, *b);
-        }
-        self.cpu.gdtr_base = GDT_ADDR;
-        self.cpu.gdtr_limit = 31;
-
-        // PE を立ててから、GDT経由でセグメントをロードする。
-        // load_seg が GDT から隠しレジスタへ写すので、以後カーネルが
-        // 同じセレクタを mov し直しても同じ記述子が読める
-        self.cpu.cr0 |= 1; // PE (PG は立てない)
-        cpu::load_seg_pub(self, CS, 0x10);
-        for s in [DS, ES, FS, GS, SS] {
-            cpu::load_seg_pub(self, s, 0x18);
-        }
-
-        // 規約: %esi = zero page、エントリへ
-        self.cpu.regs[cpu::SI] = ZERO_PAGE_ADDR;
-        self.cpu.set_ip(entry);
-        self.cpu.set_flag(cpu::IF, false); // カーネルが自分でSTIするまで割り込み禁止
-        Ok(())
-    }
-
-    /// 線形アドレスから読む。**ページングが有効ならここで物理へ変換する**。
-    /// CPUが触るのはこちら (呼び出し側は線形アドレスを渡す)
     /// 未実装にぶつかった。**その命令を実行する前の CS:IP** で止める。
     /// 呼び出し側は直後に return して、命令を実行しないこと
     pub(crate) fn trap(&mut self, reason: String) {
@@ -620,625 +384,6 @@ impl Machine {
             cs: self.cpu.sregs[cpu::CS],
             ip: self.trap_ip,
         });
-    }
-
-    pub fn read8(&self, addr: u32) -> u8 {
-        match self.translate_for(addr, false) {
-            Ok(pa) => self.read_phys8(pa),
-            Err(f) => {
-                self.note_fault(f);
-                0xFF // フォールトした読みの器。命令の終わりに#PFで巻き戻す
-            }
-        }
-    }
-
-    /// 物理アドレスから読む (変換しない)。ページテーブルの歩きと、
-    /// 物理番地で語る装置・テストが使う
-    pub fn read_phys8(&self, pa: u32) -> u8 {
-        // RAMを超えた番地は未マップ。実機のバスと同じく 0xFF を返す (折り返さない)。
-        // リアルモードのアドレスは cpu::lin が 1MB に丸めてから来るので、
-        // 16bit機 (1MB) でここが 0xFF を返すことはない
-        *self.mem.get(pa as usize).unwrap_or(&0xFF)
-    }
-
-    pub fn read_phys32(&self, pa: u32) -> u32 {
-        // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
-        let a = pa as usize;
-        if a + 4 <= self.mem.len() {
-            u32::from_le_bytes([
-                self.mem[a],
-                self.mem[a + 1],
-                self.mem[a + 2],
-                self.mem[a + 3],
-            ])
-        } else {
-            u32::from_le_bytes([
-                self.read_phys8(pa),
-                self.read_phys8(pa.wrapping_add(1)),
-                self.read_phys8(pa.wrapping_add(2)),
-                self.read_phys8(pa.wrapping_add(3)),
-            ])
-        }
-    }
-
-    /// 線形アドレスを物理アドレスへ。
-    ///
-    /// **ここがページングの正体**である。CR0.PGが立っていなければ線形=物理。
-    /// 立っていれば、上位20bitで2段の表を引く:
-    ///   線形 [31:22]=ディレクトリ番号 [21:12]=テーブル番号 [11:0]=ページ内オフセット
-    ///
-    /// TLB (変換の写し) はまだ持たない。決定的なので**毎回歩いても結果は同じ**で、
-    /// 速度が問題になるまで足さない (「測ってから足す」— docs/ci.md と同じ流儀)。
-    ///
-    /// こちらは**寛容な版** (デバッガ・ツール用)。未マップは RAM 外の番地を
-    /// 返し、読めば 0xFF になる。CPUの実行経路は [`translate_for`] を使い、
-    /// 失敗を #PF として配送する
-    pub fn translate(&self, la: u32) -> u32 {
-        self.translate_for(la, false).unwrap_or(0xFFFF_FFFF)
-    }
-
-    /// CPUのアクセス経路の変換。**ページ保護もここで裁く**:
-    ///   - present が無ければ不在フォールト
-    ///   - 書き込みで R/W=0 のページは、CR0.WP (リング0でも守る) か
-    ///     リング3なら保護フォールト。カーネルはこの挙動を起動時に試験し、
-    ///     #PFが来ないと「壊れたWP」として起動を拒否する (実際に拒否された)
-    pub fn translate_for(&self, la: u32, write: bool) -> Result<u32, PageFault> {
-        if self.cpu.cr0 & 0x8000_0000 == 0 {
-            return Ok(la); // PG off: 線形がそのまま物理
-        }
-        // --- TLBを引く。当たれば表を歩かない ---
-        let vpn = la >> 12;
-        let slot = (vpn as usize) & (TLB_SLOTS - 1);
-        let e = self.tlb[slot].get();
-        let (base, writable, user_ok) = if e.tag == vpn {
-            (e.base, e.writable, e.user_ok)
-        } else {
-            // ミス: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
-            // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る
-            let (base, writable, user_ok) = self.walk_page(la)?;
-            self.tlb[slot].set(TlbEntry {
-                tag: vpn,
-                base,
-                writable,
-                user_ok,
-            });
-            (base, writable, user_ok)
-        };
-        // --- 権限チェック。CPLとWPは引くたびに新しく (sys_accessも) ---
-        let user = self.cpu.cpl() == 3 && !self.sys_access.get();
-        let wp = self.cpu.cr0 & 0x0001_0000 != 0;
-        if write && !writable && (user || wp) {
-            return Err(PageFault {
-                la,
-                write,
-                present: true,
-            });
-        }
-        if user && !user_ok {
-            return Err(PageFault {
-                la,
-                write,
-                present: true,
-            });
-        }
-        Ok(base | (la & 0xFFF))
-    }
-
-    /// 2段の表を歩いて、ページの物理先頭と権限ビットを返す (TLBミス時のみ)。
-    /// 返すのは (4K境界の物理先頭, 書けるか, ユーザーで触れるか)。
-    /// **不在は Err(present:false)** — これは TLB に載せない (次回また歩く)
-    fn walk_page(&self, la: u32) -> Result<(u32, bool, bool), PageFault> {
-        let notp = || PageFault {
-            la,
-            write: false,
-            present: false,
-        };
-        let dir = (la >> 22) & 0x3FF;
-        let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
-        if pde & 1 == 0 {
-            return Err(notp());
-        }
-        if pde & 0x80 != 0 {
-            // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる。
-            // TLBは4K単位なので、この4Kぶんの物理先頭を作る
-            let base = (pde & 0xFFC0_0000) | (la & 0x003F_F000);
-            return Ok((base, pde & 2 != 0, pde & 4 != 0));
-        }
-        let tbl = (la >> 12) & 0x3FF;
-        let pte = self.read_phys32((pde & !0xFFF) + tbl * 4);
-        if pte & 1 == 0 {
-            return Err(notp());
-        }
-        // R/W・U/S は2段の**厳しい方**が効く (両方立って初めて許す)
-        let writable = pde & 2 != 0 && pte & 2 != 0;
-        let user_ok = pde & 4 != 0 && pte & 4 != 0;
-        Ok((pte & !0xFFF, writable, user_ok))
-    }
-
-    /// 変換失敗を記録する (最初の1件だけ)。命令の終わりで #PF になる
-    fn note_fault(&self, f: PageFault) {
-        if self.pending_fault.get().is_none() {
-            self.pending_fault.set(Some(f));
-        }
-    }
-
-    /// REPの一括処理用: 線形アドレス `la` から、**同じページ内で連続して
-    /// 触れる物理範囲**を返す。`write` は書き込みか。
-    /// 返り値は (物理先頭, そのページで残るバイト数)。フォールトなら None
-    /// (呼び出し側が note_fault 済みのつもりで巻き戻す)。
-    /// RAMを超える範囲は None (遅い道に落とす)
-    pub(crate) fn phys_span(&self, la: u32, write: bool) -> Option<(usize, usize)> {
-        let pa = match self.translate_for(la, write) {
-            Ok(pa) => pa,
-            Err(f) => {
-                self.note_fault(f);
-                return None;
-            }
-        };
-        let page_remain = 0x1000 - (la & 0xFFF) as usize;
-        let a = pa as usize;
-        if a + page_remain > self.mem.len() {
-            return None;
-        }
-        Some((a, page_remain))
-    }
-
-    /// 生のメモリスライスへの参照 (REP一括処理の宛先)。
-    /// VRAMやデバッガの都合は呼び出し側が事前に外す
-    pub(crate) fn mem_slice_mut(&mut self) -> &mut [u8] {
-        &mut self.mem
-    }
-
-    /// メモリ書き込み。
-    ///
-    /// テキストVRAMは**メモリ空間に居座る装置**なので、素通しで `mem` に書く。
-    /// 実機でもビデオカードのRAMがCPUのアドレス空間に窓として現れているだけで、
-    /// 書き込み経路に特別な変換は無い。ここで足しているのは描画側への合図だけ。
-    ///
-    /// 読み出し ([`read8`](Self::read8)) には一切分岐を入れていない。
-    /// メモリアクセスは最も回数の多い経路なので、**書き込み側だけで済む
-    /// 仕掛けなら書き込み側に寄せる**。
-    pub fn write8(&mut self, addr: u32, val: u8) {
-        // 線形→物理。以後の VRAM 判定もデバッガも**物理番地**で語る
-        // (VRAMは物理アドレス空間の窓なので、そこに写像された線形から書いても
-        //  正しく dirty が立つ)
-        let a = match self.translate_for(addr, true) {
-            Ok(pa) => pa,
-            Err(f) => {
-                self.note_fault(f);
-                return; // フォールトした書き込みは実行しない (再実行で改めて書く)
-            }
-        } as usize;
-        if a >= self.mem.len() {
-            return; // RAMを超えた書き込みは捨てる
-        }
-        // デバッガを切っていれば真偽値1つで抜ける。**最も回数の多い経路**なので
-        // 見張る番地の集合を引く前に元締めで落とす
-        if self.dbg.on && self.dbg.mem_write.contains(&(a as u32)) {
-            self.dbg.stop = Some(debug::Stop::WriteMem {
-                addr: a as u32,
-                old: self.mem[a],
-                new: val,
-                at: self.dbg.at,
-            });
-        }
-        self.mem[a] = val;
-        if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
-            self.vram_dirty = true;
-        }
-    }
-
-    pub fn read16(&self, addr: u32) -> u16 {
-        // ページ内に収まるなら**1回の変換で2バイト**読む。
-        // ページ跨ぎ (稀) のときだけバイトごとに落とす
-        if addr & 0xFFF <= 0xFFE {
-            match self.translate_for(addr, false) {
-                Ok(pa) => {
-                    let a = pa as usize;
-                    if a + 2 <= self.mem.len() {
-                        return self.mem[a] as u16 | (self.mem[a + 1] as u16) << 8;
-                    }
-                    0xFFFF
-                }
-                Err(f) => {
-                    self.note_fault(f);
-                    0xFFFF
-                }
-            }
-        } else {
-            self.read8(addr) as u16 | (self.read8(addr.wrapping_add(1)) as u16) << 8
-        }
-    }
-
-    pub fn read32(&self, addr: u32) -> u32 {
-        // ページ内に収まるなら**1回の変換で4バイト**読む
-        if addr & 0xFFF <= 0xFFC {
-            match self.translate_for(addr, false) {
-                Ok(pa) => self.read_phys32(pa),
-                Err(f) => {
-                    self.note_fault(f);
-                    0xFFFF_FFFF
-                }
-            }
-        } else {
-            self.read16(addr) as u32 | (self.read16(addr.wrapping_add(2)) as u32) << 16
-        }
-    }
-
-    pub fn write32(&mut self, addr: u32, val: u32) {
-        if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
-            return;
-        }
-        self.write16(addr, val as u16);
-        self.write16(addr.wrapping_add(2), (val >> 16) as u16);
-    }
-
-    pub fn write16(&mut self, addr: u32, val: u16) {
-        if addr & 0xFFF <= 0xFFE && self.write_wide(addr, val as u32, 2) {
-            return;
-        }
-        self.write8(addr, val as u8);
-        self.write8(addr.wrapping_add(1), (val >> 8) as u8);
-    }
-
-    /// ページ内に収まる2/4バイト書き込みを**1回の変換**で行う。
-    /// 成功したら true。フォールト・跨ぎ・見張り対象などで速い道を使えないときは
-    /// false を返し、呼び出し側がバイトごとの道へ落とす
-    fn write_wide(&mut self, addr: u32, val: u32, width: u32) -> bool {
-        let pa = match self.translate_for(addr, true) {
-            Ok(pa) => pa,
-            Err(f) => {
-                self.note_fault(f);
-                return true; // フォールトは「書かない」で完了 (再実行が改めて書く)
-            }
-        };
-        let a = pa as usize;
-        if a + width as usize > self.mem.len() {
-            return true; // RAM超えは捨てる (完了扱い)
-        }
-        // デバッガが見張っている、または VRAM に落ちるなら、遅い道で
-        // バイトごとの合図を出す (ここは熱くない)
-        if self.dbg.on || (bus::VRAM_TEXT_BASE..=bus::VRAM_TEXT_END).contains(&(a as u32)) {
-            return false;
-        }
-        for i in 0..width as usize {
-            self.mem[a + i] = (val >> (i * 8)) as u8;
-        }
-        true
-    }
-
-    // --- I/Oポート空間の振り分け ---
-
-    /// ポートから読む。
-    ///
-    /// 未接続のポートは **0xFF** を返す。実機のISAバスは誰もドライブしないと
-    /// プルアップで全ビットが立つためで、OSはこの値を見て「装置が居ない」と
-    /// 判断する。ここで panic すると装置探索の段階で止まってしまう
-    pub fn io_read8(&mut self, port: u16) -> u8 {
-        let val = self.io_read8_inner(port);
-        // **読んだ値まで残す。** 「装置が何を答えたか」が分からないと、
-        // OSがなぜその判断をしたのかを追えない
-        if self.dbg.on && self.dbg.io_read.contains(&port) {
-            self.dbg.stop = Some(debug::Stop::ReadIo {
-                port,
-                val,
-                at: self.dbg.at,
-            });
-        }
-        val
-    }
-
-    fn io_read8_inner(&mut self, port: u16) -> u8 {
-        match bus::decode_io(port) {
-            IoTarget::Pic { slave } => {
-                let p = &self.devices.pic[slave as usize];
-                if port & 1 == 0 {
-                    p.read_command()
-                } else {
-                    p.read_data()
-                }
-            }
-            IoTarget::Pit => {
-                let idx = (port & 3) as usize;
-                if idx == 3 {
-                    0xFF
-                } else {
-                    self.devices.pit.read_counter(idx)
-                }
-            }
-            IoTarget::Keyboard => {
-                if port == 0x64 {
-                    self.devices.keyboard.read_status()
-                } else {
-                    self.devices.keyboard.read_data()
-                }
-            }
-            IoTarget::Uart => self.devices.uart.read(port & 7),
-            IoTarget::Cmos => {
-                if port == 0x71 {
-                    self.devices.cmos.read_data()
-                } else {
-                    0xFF
-                }
-            }
-            IoTarget::Crtc => {
-                if port == 0x3D5 {
-                    self.devices.crtc.read_data()
-                } else {
-                    0xFF
-                }
-            }
-            IoTarget::SystemControl => {
-                // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
-                // 時間を測る古い手口に付き合うため
-                self.devices.sysctl ^= 0x10;
-                self.devices.sysctl
-            }
-            IoTarget::Unmapped => {
-                self.unhandled_io.insert(port);
-                0xFF
-            }
-        }
-    }
-
-    pub fn io_write8(&mut self, port: u16, val: u8) {
-        if self.dbg.on && self.dbg.io_write.contains(&port) {
-            self.dbg.stop = Some(debug::Stop::WriteIo {
-                port,
-                val,
-                at: self.dbg.at,
-            });
-        }
-        match bus::decode_io(port) {
-            IoTarget::Pic { slave } => {
-                let p = &mut self.devices.pic[slave as usize];
-                if port & 1 == 0 {
-                    p.write_command(val)
-                } else {
-                    p.write_data(val)
-                }
-            }
-            IoTarget::Pit => {
-                let idx = (port & 3) as usize;
-                if idx == 3 {
-                    self.devices.pit.write_control(val)
-                } else {
-                    self.devices.pit.write_counter(idx, val)
-                }
-            }
-            IoTarget::Keyboard => {
-                if port == 0x64 {
-                    self.devices.keyboard.write_command(val)
-                } else {
-                    self.devices.keyboard.write_data(val)
-                }
-            }
-            IoTarget::Uart => self.devices.uart.write(port & 7, val),
-            IoTarget::Cmos => {
-                if port == 0x70 {
-                    self.devices.cmos.write_index(val)
-                } else {
-                    self.devices.cmos.write_data(val)
-                }
-            }
-            IoTarget::Crtc => {
-                if port == 0x3D4 {
-                    self.devices.crtc.write_index(val)
-                } else {
-                    // 表示開始位置が動いたら、メモリは変わらなくても**画面は変わる**
-                    if matches!(self.devices.crtc.index(), 0x0C | 0x0D) {
-                        self.vram_dirty = true;
-                    }
-                    self.devices.crtc.write_data(val)
-                }
-            }
-            IoTarget::SystemControl => self.devices.sysctl = val,
-            IoTarget::Unmapped => {
-                self.unhandled_io.insert(port);
-            }
-        }
-    }
-
-    // --- テキストVRAM ---
-
-    /// テキスト画面の生バイト列 (80×25、文字と属性が交互)。
-    ///
-    /// **先頭から4000バイトではなく、CRTCが指す位置から4000バイトを返す。**
-    ///
-    /// テキストVRAMの窓は32KBあり、80x25の1画面はそのうち4000バイトでしかない。
-    /// どこから表示するかを決めるのはCRTCのレジスタ 0x0C/0x0D で、ここを動かすと
-    /// **メモリを1バイトも書き換えずに画面をスクロールできる** (ハードウェアスクロール)。
-    /// 80年代の機械が遅いCPUで滑らかにスクロールできたのはこの仕組みによる。
-    ///
-    /// これを見ずに常に先頭を返していたため、CGA向けにハードウェアスクロールで
-    /// 描くソフト (zmiy など) は**画面の下が永久に出てこなかった**。
-    /// CRTCは実装してあり、説明にも「ここを動かすとスクロールできる」と
-    /// 書いてあったのに、**描く側が見ていなかった**。
-    pub fn text_vram(&self) -> &[u8] {
-        let win = (bus::VRAM_TEXT_END - bus::VRAM_TEXT_BASE + 1) as usize;
-        // 開始位置は文字単位。1文字2バイトなので倍にする
-        let start = (self.devices.crtc.start_offset() as usize * bus::TEXT_CELL) % win;
-        let b = bus::VRAM_TEXT_BASE as usize + start;
-        // 窓の端をまたぐ場合は、素直に先頭を返す (実機は巻き戻るが、
-        // そこまで使うソフトは見ていない。使うものが出てきたら組み立てる)
-        if start + bus::TEXT_LEN <= win {
-            &self.mem[b..b + bus::TEXT_LEN]
-        } else {
-            let base = bus::VRAM_TEXT_BASE as usize;
-            &self.mem[base..base + bus::TEXT_LEN]
-        }
-    }
-
-    /// 機械の状態をまるごと書き出す。
-    ///
-    /// **CPUだけでは足りない。** PICのマスクが失われれば以後の割り込みが
-    /// 来なくなり、PITのカウンタが戻れば時計が飛ぶ。装置もメモリも
-    /// ディスクも含めて初めて「あの瞬間から再開」ができる。
-    pub fn save_state(&self) -> Vec<u8> {
-        let mut w = snapshot::Writer::new();
-        snapshot::write_header(&mut w);
-
-        // CPU
-        for r in self.cpu.regs {
-            w.u32(r);
-        }
-        for s in self.cpu.sregs {
-            w.u16(s);
-        }
-        w.u32(self.cpu.ip);
-        w.u32(self.cpu.flags);
-        // プロテクトモードの状態 (v2)。隠しレジスタを落とすと、復元した瞬間に
-        // 全アドレスが嘘になる — セレクタだけでは base を再構成できない
-        w.u32(self.cpu.cr0);
-        w.u32(self.cpu.gdtr_base);
-        w.u16(self.cpu.gdtr_limit);
-        w.u32(self.cpu.idtr_base);
-        w.u16(self.cpu.idtr_limit);
-        w.u16(self.cpu.tr_sel);
-        w.u32(self.cpu.tr_base);
-        w.u32(self.cpu.tr_limit);
-        w.u32(self.cpu.cr2);
-        w.u32(self.cpu.cr3);
-        w.u32(self.cpu.cr4); // v7
-        w.u16(self.cpu.ldtr_sel); // v7
-        for d in self.cpu.dr {
-            w.u32(d);
-        }
-        w.u16(self.cpu.fpu_cw); // v7
-        w.u32(self.cpu.mxcsr); // v7
-        for x in self.cpu.xmm {
-            w.u32(x as u32);
-            w.u32((x >> 32) as u32);
-            w.u32((x >> 64) as u32);
-            w.u32((x >> 96) as u32);
-        }
-        w.u32(self.cpu.tsc as u32); // v7 (下位のみ。较正はやり直せるので十分)
-        w.u32((self.cpu.tsc >> 32) as u32);
-        for h in self.cpu.hidden {
-            w.u32(h.base);
-            w.u32(h.limit);
-            w.u8(h.access);
-            w.bool(h.big);
-        }
-
-        // 機械の進行状態
-        w.bool(self.halted);
-        w.opt_u8(self.pending_irq);
-
-        // 装置
-        for p in &self.devices.pic {
-            p.save(&mut w);
-        }
-        self.devices.pit.save(&mut w);
-        self.devices.uart.save(&mut w);
-        self.devices.keyboard.save(&mut w);
-        self.devices.cmos.save(&mut w);
-        self.devices.crtc.save(&mut w);
-
-        // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
-        w.rle(&self.mem);
-        match &self.disk {
-            Some(d) => {
-                w.bool(true);
-                w.rle(&d.data);
-            }
-            None => w.bool(false),
-        }
-        w.buf
-    }
-
-    /// 書き出した状態へ戻す。
-    ///
-    /// 途中で失敗すると**半端に書き換わった機械**が残るので、
-    /// まず新しい機械の上に組み立ててから丸ごと差し替える
-    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
-        let mut m = Machine::new();
-        let mut r = snapshot::Reader::new(data);
-        snapshot::read_header(&mut r)?;
-
-        for i in 0..8 {
-            m.cpu.regs[i] = r.u32()?;
-        }
-        for i in 0..6 {
-            m.cpu.sregs[i] = r.u16()?;
-        }
-        m.cpu.ip = r.u32()?;
-        m.cpu.flags = r.u32()?;
-        m.cpu.cr0 = r.u32()?;
-        m.cpu.gdtr_base = r.u32()?;
-        m.cpu.gdtr_limit = r.u16()?;
-        m.cpu.idtr_base = r.u32()?;
-        m.cpu.idtr_limit = r.u16()?;
-        m.cpu.tr_sel = r.u16()?;
-        m.cpu.tr_base = r.u32()?;
-        m.cpu.tr_limit = r.u32()?;
-        m.cpu.cr2 = r.u32()?;
-        m.cpu.cr3 = r.u32()?;
-        m.cpu.cr4 = r.u32()?; // v7
-        m.cpu.ldtr_sel = r.u16()?; // v7
-        for i in 0..8 {
-            m.cpu.dr[i] = r.u32()?;
-        }
-        m.cpu.fpu_cw = r.u16()?; // v7
-        m.cpu.mxcsr = r.u32()?; // v7
-        for i in 0..8 {
-            let a = r.u32()? as u128;
-            let b = r.u32()? as u128;
-            let c = r.u32()? as u128;
-            let d = r.u32()? as u128;
-            m.cpu.xmm[i] = a | b << 32 | c << 64 | d << 96;
-        }
-        m.cpu.tsc = r.u32()? as u64 | ((r.u32()? as u64) << 32);
-        for i in 0..6 {
-            m.cpu.hidden[i] = cpu::SegHidden {
-                base: r.u32()?,
-                limit: r.u32()?,
-                access: r.u8()?,
-                big: r.bool()?,
-            };
-        }
-
-        m.halted = r.bool()?;
-        m.pending_irq = r.opt_u8()?;
-        // pic_service は派生状態なのでPICから作り直す
-
-        for i in 0..2 {
-            m.devices.pic[i].load(&mut r)?;
-        }
-        m.devices.pit.load(&mut r)?;
-        m.devices.uart.load(&mut r)?;
-        m.devices.keyboard.load(&mut r)?;
-        m.devices.cmos.load(&mut r)?;
-        m.devices.crtc.load(&mut r)?;
-
-        // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
-        // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
-        // 別マシンとして復元したことを覗き窓に映すため profile も合わせる
-        let mem = r.rle()?;
-        if !mem.len().is_power_of_two() {
-            return Err(format!("RAMサイズが2の冪でない ({})", mem.len()));
-        }
-        m.profile = if mem.len() == MEM_SIZE {
-            MachineProfile::PC_16BIT
-        } else {
-            MachineProfile {
-                name: "32bit PC",
-                ram_bytes: mem.len(),
-                has_fpu: true,
-                has_cpuid: true,
-            }
-        };
-        m.pic_service = m.devices.pic[0].has_pending();
-        m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
-        m.mem = mem;
-        m.disk = if r.bool()? {
-            Some(Disk::from_image(r.rle()?)?)
-        } else {
-            None
-        };
-
-        *self = m;
-        Ok(())
     }
 
     /// BIOSサービスが返した成否をフラグとして呼び出し元へ届ける。
@@ -1326,7 +471,17 @@ impl Machine {
     /// 順序に意味がある。**割り込みの受付は命令の途中ではなく境界で行う**。
     /// 命令の実行中に割り込むと、書き換え途中のレジスタやスタックのまま
     /// ハンドラへ飛ぶことになり、`IRET` で戻っても再開できない。
+    /// 1命令進める。アイドル早送りは無制限 (次のPITパルスまで一気に飛ぶ)。
+    /// 予算の中で回すときは [`Self::step_budgeted`] を使う — run系が
+    /// 「予算=仮想時間」の約束を守るのはそちら経由である
+    #[inline]
     pub fn step(&mut self) {
+        self.step_budgeted(u64::MAX);
+    }
+
+    /// 1命令進める。HLT中の早送りは `idle_budget` (仮想時間の残り予算) までに
+    /// 制限する — 予算を超えて時計が飛ぶと、呼ぶ側の時間の勘定が壊れる
+    pub fn step_budgeted(&mut self, idle_budget: u64) {
         // 未実装で止まっていたら、以後は何もしない (run系がここで抜ける)
         if self.trap.is_some() {
             return;
@@ -1377,7 +532,7 @@ impl Machine {
         }
 
         if self.halted {
-            self.idle_fast_forward();
+            self.idle_fast_forward(idle_budget);
             return;
         }
 
@@ -1449,7 +604,13 @@ impl Machine {
         } else {
             None
         };
-        cpu::step(self);
+        // デバッガが見ているときは従来経路 (before_exec/トレースの意味を守る)。
+        // 普段はデコード済み命令キャッシュ経由 — 対象外は中で従来経路に落ちる
+        if self.dbg.on {
+            cpu::step(self);
+        } else {
+            cpu::dcache::step_cached(self);
+        }
 
         // 命令中にページフォールトが起きていたら、**CPUを命令前の姿に戻して**
         // #PF を配送する。ハンドラがページを直して iret すれば、同じ命令が
@@ -1525,7 +686,10 @@ impl Machine {
             if self.trap.is_some() {
                 break; // 未実装にぶつかった。生きたまま止まっている
             }
-            self.step();
+            // 残り予算を渡す — アイドルの早送りが予算を飛び越えないように。
+            // 飛び越えると「頼んだ分だけ進んだ」という呼ぶ側の勘定が壊れ、
+            // 暇な機械の時計だけが速く回る (ELKS tetris が即死した原因)
+            self.step_budgeted(max_instructions - elapsed);
             // デバッガが止めたら抜ける。**見張っていなければ真偽値1つ**なので
             // 計測経路には効かない。
             //
