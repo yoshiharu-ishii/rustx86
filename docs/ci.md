@@ -7,35 +7,34 @@
 Checkのレポートには**何をしたかと結果だけ**を書く。設計の理由 (この文書) を
 毎回のCheckに繰り返し載せても、読む人は同じ文章を何十回も見ることになる。
 
-## 全体図
+## 全体図 (2026-08-10 パイプライン化)
+
+1本のワークフロー (ci.yml) を**段構え**にしてある。安いコードチェックが
+先に走り、通ったときだけ重い検査が並行して走る — 壊れたコードに
+数分の検査を払わない。最後の OK が合流点。
 
 ```mermaid
 flowchart LR
-    subgraph 引き金
-        PR[PRを出す/更新する]
-        PUSH[mainへマージ]
+    PR[PR / mainへマージ] --> CHECKJ
+
+    subgraph CHECKJ["段1: コードチェック (~30秒)"]
+        T[テスト] & W[wasmビルド] & F[整形] & L[lint] --> R[レポート発行]
     end
 
-    subgraph CIY["ci.yml — 毎回"]
-        T[テスト<br>cargo test]
-        W[wasmビルド<br>--target wasm32]
-        F[整形<br>cargo fmt --check]
-        L[lint<br>clippy -D warnings]
-        T & W & F & L --> R[レポート発行<br>合否表 + 全ログを1つに束ねる]
+    CHECKJ --> COS & REG
+
+    subgraph COS["段2a: CPU照合 (~3分)"]
+        C[Unicornと毎命令比較]
+    end
+    subgraph REG["段2b: OS起動回帰 (~3分)"]
+        G[ELKS / FreeDOS / Linux を<br>プロンプトまで起動 + スクショ + ブートログ]
     end
 
-    subgraph COS["cosim.yml — CPUを触ったときだけ"]
-        C[CPU照合<br>Unicornと毎命令比較]
-    end
-
-    PR --> T
-    PUSH --> T
-    PR -- "core/src/** か cosim/** に差分" --> C
-    PUSH -- 同左 --> C
-
-    R --> CHK["Checksタブ『CI 結果』<br>右ペインに本文が出る"]
-    C --> CHK2["『CPU照合 結果』"]
+    COS & REG --> OK[OK — 全段の合流点]
 ```
+
+CPU照合は以前 paths で「CPUを触ったPRだけ」に絞っていたが、段構えに
+したので常に回す。回る時間は起動回帰と並行で隠れ、判定条件が単純になる。
 
 ## Checksタブに出すものは絞る
 
@@ -50,7 +49,8 @@ Check run** を自前で発行する ([.github/actions/publish-check](../.github
 | 項目 | 中身 |
 |---|---|
 | **CI 結果** | 見出しが「4/4 合格」。開くと先頭に合否表、下に各ステージのログ |
-| **CPU照合 結果** | 見出しが「Unicornと一致」。CPUを触ったPRにだけ現れる |
+| **CPU照合 結果** | 見出しが「Unicornと一致」 |
+| **OS起動回帰 結果** | 3OSのプロンプト到達と画面のスクショ。ブートログはアーティファクト |
 
 各ステージは `continue-on-error` で最後まで走らせてから束ねる。
 テストが落ちてもビルドの結果は見たいからである。
@@ -100,10 +100,11 @@ wasmビルドのレポートには **`.wasm` のサイズ**も出る (初回 196
 
 ## OS起動回帰 (2026-08-10 追加)
 
-`regress.yml` — **mainへのマージ時だけ**、3つのOSをプロンプトまで実際に起動する
-(`cargo run --release --example regress`)。PRごとには回さない — イメージ取得と
-リリースビルドで数分かかり、PRの回転を鈍らせる。マージ後に赤くなったら
-そのコミットが犯人、という切り分けで十分回る。
+段2b — 3つのOSをプロンプトまで実際に起動する
+(`cargo run --release --example regress`)。当初はmainマージ時だけの予定
+だったが、パイプラインを段構えにしたことで「コードチェックが通ったPRだけ、
+CPU照合と並行に」回せるようになり、PRの回転を鈍らせずに毎回検査できる。
+イメージはActionsキャッシュが効くので2回目からは取得なし。
 
 - **16bit回帰**: ELKS が `login:` に、FreeDOS がメニューを抜けて FreeCOM に着く。
   判定だけでなく**そのときの画面 (80×25のテキスト) をスクショとしてレポートに貼る**
