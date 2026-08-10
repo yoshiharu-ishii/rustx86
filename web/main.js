@@ -93,6 +93,11 @@ function setStatus(text, warn = false) {
 
 /** ツールバーの表示を実際の状態に合わせる */
 function syncControls() {
+  // スタート画面では機械向けの操作列を丸ごと伏せる。
+  // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
+  const onWelcome = !$('welcomePane').hidden;
+  document.querySelector('.toolbar').hidden = onWelcome;
+  if (onWelcome) return;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!linux;
@@ -507,6 +512,7 @@ async function select(m) {
     term.reset();
     $('screen').hidden = true;
     $('welcomePane').hidden = false;
+    $('gauge').textContent = ''; // 前のマシンの「アイドル」等を持ち越さない
     showNote(null);
     setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
     dbg.reset();
