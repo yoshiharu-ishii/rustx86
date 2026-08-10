@@ -123,6 +123,9 @@ pub struct Machine {
     /// 16bitのまま実行するとIPがずれ、以後はデータを命令として食い始める。
     /// panicも出ないまま遠くで暴走するので、**来たものを控えておく**。
     pub prefixed_ops: std::collections::BTreeSet<u8>,
+    /// `prefixed_ops` の「もう控えたか」を配列で持つ。
+    /// ホットパス (毎プレフィクス命令) で BTreeSet を歩かないため
+    pub prefixed_seen: [bool; 256],
     /// ユーザー空間で #UD にした未実装命令の理由 (観測用)。
     /// 機械は止めない — OSがSIGILLで裁く。実装すべきものの一覧になる
     pub ud_user: std::collections::BTreeSet<String>,
@@ -244,6 +247,7 @@ impl Machine {
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
+            prefixed_seen: [false; 256],
             video_modes: std::collections::BTreeSet::new(),
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
