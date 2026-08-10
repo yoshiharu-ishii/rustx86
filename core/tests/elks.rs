@@ -88,7 +88,11 @@ fn elks_tetris_tempo() {
         let s = m.text_screen_string();
         s.lines().last().map(|l| l.trim() == "#").unwrap_or(false)
     };
-    assert!(ok, "シェルのプロンプトが出ない:\n{}", m.text_screen_string());
+    assert!(
+        ok,
+        "シェルのプロンプトが出ない:\n{}",
+        m.text_screen_string()
+    );
 
     m.devices.keyboard.type_ascii("tetris\n");
     for _ in 0..2_000_000 {
@@ -137,7 +141,8 @@ fn elks_tetris_tempo() {
                     && m.cpu.regs[rustx86_core::cpu::AX] as u16 == 3
                     && m.cpu.regs[rustx86_core::cpu::BX] as u16 == 0
                 {
-                    ret_watch = Some((m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip.wrapping_add(2)));
+                    ret_watch =
+                        Some((m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip.wrapping_add(2)));
                 }
                 m.step_budgeted(slice - elapsed);
             }
