@@ -333,11 +333,13 @@ impl DecodeCache {
 pub(crate) fn step_cached(m: &mut Machine) {
     // 16bitコードは対象外 (ELKS/FreeDOSは従来経路)
     if !m.cpu.seg_is32(CS) {
+        m.guard_save();
         return super::step(m);
     }
     let lin = m.cpu.lin(CS, m.cpu.ip);
     let Ok(pa) = m.translate_for(lin, false) else {
         // フェッチがフォールトする状況は従来経路に任せる (#PF配送もそちら)
+        m.guard_save();
         return super::step(m);
     };
     let page = (pa >> 12) as usize;
@@ -348,6 +350,12 @@ pub(crate) fn step_cached(m: &mut Machine) {
         if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
             let (len, uop) = (e.len, e.uop);
             m.dcache.hits += 1;
+            // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
+            // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
+            // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
+            if exec::may_touch_memory(&uop) {
+                m.guard_save();
+            }
             m.cpu.advance_ip(len as u32);
             exec::exec(m, uop);
             return;
@@ -378,11 +386,15 @@ pub(crate) fn step_cached(m: &mut Machine) {
                 *h = true;
             }
             m.dcache.fills += 1;
+            if exec::may_touch_memory(&uop) {
+                m.guard_save();
+            }
             m.cpu.advance_ip(len as u32);
             exec::exec(m, uop);
         }
         None => {
             m.dcache.fallbacks += 1;
+            m.guard_save();
             super::step(m);
         }
     }
