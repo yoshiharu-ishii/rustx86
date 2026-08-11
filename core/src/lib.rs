@@ -177,6 +177,10 @@ pub struct Machine {
     pub halted: bool,
     /// デコード済み命令キャッシュ (ADR-0007 P1a)。中身は cpu::dcache
     pub dcache: cpu::dcache::DecodeCache,
+    /// JIT実行フック (F1a、ADR-0008)。ランタイム (wasmシェル等) が挿す。
+    /// **機械の状態ではない** — スナップショットに入れない。
+    /// Noneなら従来どおり全部インタプリタ (常に動く退路)
+    pub jit: Option<cpu::dcache::jit::JitHook>,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -282,6 +286,7 @@ impl Machine {
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
+            jit: None,
             op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
