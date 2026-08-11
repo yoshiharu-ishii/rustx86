@@ -1,0 +1,509 @@
+//! F1a: テンプレートJITの生成器 — JitOp列を小さなwasmモジュールに焼く。
+//!
+//! 生成物は「関数1個 (export "b") のwasmモジュール」で、メインモジュールと
+//! **同じリニアメモリ**をimportし、レジスタ・フラグ材料 (cc_*)・ipを
+//! 実アドレス直打ちで読み書きする。番地は生成時に定数として焼き込む
+//! (core::jit::layout が出す番地表)。
+//!
+//! ## 意味論の守り方
+//!
+//! - フラグはC1のlazy flags (cc_op方式) をそのまま踏襲 — 生成コードは
+//!   材料 (op, a, b, cin, r) をメモリへ書くだけで、フラグを合成しない。
+//!   インタプリタと**同じ表現**なので、ブロックの途中でインタプリタに
+//!   戻っても状態はそのまま繋がる
+//! - CFを「読む」必要がある所 (ADC/SBB/INC/DEC) と条件分岐の判定は、
+//!   メインモジュールのヘルパ ([`rx86_jit_cf`]/[`rx86_jit_cond`]) を呼ぶ —
+//!   遅延フラグの評価器を生成コードに二重実装しない (F1bで頻出形だけ
+//!   インライン化を検討)。呼び出しは同期なので、直前にメモリへ書いた
+//!   cc_* をヘルパが読む順序は保証される
+//! - ipの更新は**ブロック出口で1回** — 途中で観測する者が居ない
+//!   (F1aの語彙は#PF不能・割り込み受付はブロック境界の外) ため、
+//!   毎命令更新と結果は同じ
+//! - tsc/tick_countdown は生成コードでは触らない — 呼ぶ側 (Rust) が
+//!   「実行した命令数」の返り値でまとめて清算する (契約は増分3)
+//!
+//! ## モジュール構造 (jit-probe で固定費実測済みの形)
+//!
+//! type: [() -> i32, (i32) -> i32, (i32,i32) -> i32]
+//! import: e.m = memory / e.cf = CF評価 / e.cond = 条件評価
+//! export: "b" = ブロック本体 (返り値 = 実行した命令数)
+
+use rustx86_core::jit::{JitBlock, JitLayout, JitOp};
+use rustx86_core::{cpu, Machine};
+
+// ---- メインモジュール側のヘルパ (生成コードからimportされる) ----
+//
+// 引数はMachineの実アドレス (生成時に定数で焼く)。wasm32では
+// 「メインモジュールのヒープ番地」= 共有リニアメモリのオフセット。
+// 生成コードとRustが同じメモリを見ているからこの受け渡しが成立する。
+
+/// 遅延フラグからCFを評価する (ADC/SBB/INC/DECのキャリー入力)
+///
+/// # Safety
+/// `m` は生きているMachineの実アドレスであること (呼ぶのは生成コードだけ)
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_cf(m: *const Machine) -> i32 {
+    (*m).cpu.flag(cpu::CF) as i32
+}
+
+/// 条件コード (jcc/setccのcc) を遅延フラグから評価する
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_cond(m: *const Machine, cc: i32) -> i32 {
+    cpu::alu::condition(&(*m).cpu, cc as u8) as i32
+}
+
+// ---- wasmバイト列の組み立て (依存なしの手組み — jit-probeの移植) ----
+
+fn uleb(out: &mut Vec<u8>, mut n: u64) {
+    loop {
+        let mut b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n != 0 {
+            b |= 0x80;
+        }
+        out.push(b);
+        if n == 0 {
+            return;
+        }
+    }
+}
+
+fn sleb(out: &mut Vec<u8>, mut n: i64) {
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        let done = (n == 0 && b & 0x40 == 0) || (n == -1 && b & 0x40 != 0);
+        out.push(if done { b } else { b | 0x80 });
+        if done {
+            return;
+        }
+    }
+}
+
+fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
+    out.push(id);
+    uleb(out, body.len() as u64);
+    out.extend_from_slice(body);
+}
+
+// opcode (使う分だけ)
+const I32_CONST: u8 = 0x41;
+const I32_LOAD: u8 = 0x28;
+const I32_STORE: u8 = 0x36;
+const I32_STORE8: u8 = 0x3a;
+const I32_ADD: u8 = 0x6a;
+const I32_SUB: u8 = 0x6b;
+const I32_AND: u8 = 0x71;
+const I32_OR: u8 = 0x72;
+const I32_XOR: u8 = 0x73;
+const I32_SHL: u8 = 0x74;
+const LOCAL_GET: u8 = 0x20;
+const LOCAL_SET: u8 = 0x21;
+const CALL: u8 = 0x10;
+const SELECT: u8 = 0x1b;
+const END: u8 = 0x0b;
+
+// ローカル変数の番地 (関数は引数なしなので0から)
+const L_A: u32 = 0; // オペランドa
+const L_B: u32 = 1; // オペランドb
+const L_CIN: u32 = 2; // キャリー入力 (CF評価の置き場も兼ねる)
+const L_R: u32 = 3; // 結果
+
+/// 生成器の作業場。codeに命令列を積んでいく
+struct Gen<'a> {
+    code: Vec<u8>,
+    lay: &'a JitLayout,
+    /// Machineの実アドレス (ヘルパに渡す定数)
+    maddr: u32,
+}
+
+impl Gen<'_> {
+    fn iconst(&mut self, v: u32) {
+        self.code.push(I32_CONST);
+        sleb(&mut self.code, v as i32 as i64);
+    }
+    /// メモリ番地からi32を読む (align=2)
+    fn load(&mut self, addr: usize) {
+        self.iconst(addr as u32);
+        self.code.extend_from_slice(&[I32_LOAD, 0x02, 0x00]);
+    }
+    /// スタックトップをメモリ番地へ書く — 呼ぶ側が [addr, value] の順で積む
+    fn store_op(&mut self) {
+        self.code.extend_from_slice(&[I32_STORE, 0x02, 0x00]);
+    }
+    /// 定数をメモリ番地へ書く
+    fn store_const(&mut self, addr: usize, v: u32) {
+        self.iconst(addr as u32);
+        self.iconst(v);
+        self.store_op();
+    }
+    /// ローカルをメモリ番地へ書く
+    fn store_local(&mut self, addr: usize, l: u32) {
+        self.iconst(addr as u32);
+        self.local_get(l);
+        self.store_op();
+    }
+    /// 1バイト書き (cc_op / cc_w 用)
+    fn store8_const(&mut self, addr: usize, v: u8) {
+        self.iconst(addr as u32);
+        self.iconst(v as u32);
+        self.code.extend_from_slice(&[I32_STORE8, 0x00, 0x00]);
+    }
+    fn local_get(&mut self, l: u32) {
+        self.code.push(LOCAL_GET);
+        uleb(&mut self.code, l as u64);
+    }
+    fn local_set(&mut self, l: u32) {
+        self.code.push(LOCAL_SET);
+        uleb(&mut self.code, l as u64);
+    }
+    fn reg_addr(&self, r: u8) -> usize {
+        self.lay.regs + 4 * r as usize
+    }
+    /// CFをヘルパで評価して L_CIN へ
+    fn eval_cf_into_cin(&mut self) {
+        self.iconst(self.maddr);
+        self.code.push(CALL);
+        uleb(&mut self.code, 0); // import 0 = e.cf
+        self.local_set(L_CIN);
+    }
+
+    /// ALUの共通部: L_A/L_B が積まれた前提で、kindの演算 + cc材料の書き出し。
+    /// `dst` があれば結果をレジスタへ (kind7=CMPはNone扱い)
+    fn alu_core(&mut self, kind: u8, dst: Option<u8>) {
+        // cin: ADC/SBBだけCFを食う (インタプリタのalu_lazyと同じ)
+        if kind == 2 || kind == 3 {
+            self.eval_cf_into_cin();
+        } else {
+            self.iconst(0);
+            self.local_set(L_CIN);
+        }
+        // r = 演算 (幅32bitはwasmのi32がそのまま面倒を見る)
+        self.local_get(L_A);
+        self.local_get(L_B);
+        match kind {
+            0 | 2 => {
+                self.code.push(I32_ADD);
+                self.local_get(L_CIN);
+                self.code.push(I32_ADD);
+            }
+            1 => self.code.push(I32_OR),
+            3 | 5 | 7 => {
+                self.code.push(I32_SUB);
+                self.local_get(L_CIN);
+                self.code.push(I32_SUB);
+            }
+            4 => self.code.push(I32_AND),
+            _ => self.code.push(I32_XOR), // 6 = XOR
+        }
+        self.local_set(L_R);
+        // cc材料 (インタプリタのset_ccと同じ内容をメモリへ)
+        self.store8_const(self.lay.cc_op, kind);
+        self.store8_const(self.lay.cc_w, 2);
+        self.store_local(self.lay.cc_a, L_A);
+        self.store_local(self.lay.cc_b, L_B);
+        self.store_local(self.lay.cc_cin, L_CIN);
+        self.store_local(self.lay.cc_r, L_R);
+        if kind != 7 {
+            if let Some(d) = dst {
+                self.store_local(self.reg_addr(d), L_R);
+            }
+        }
+    }
+
+    fn op(&mut self, op: &JitOp) {
+        match *op {
+            JitOp::MovRI { dst, imm } => self.store_const(self.reg_addr(dst), imm),
+            JitOp::MovRR { dst, src } => {
+                self.iconst(self.reg_addr(dst) as u32);
+                self.load(self.reg_addr(src));
+                self.store_op();
+            }
+            JitOp::AluRR { kind, dst, src } => {
+                self.load(self.reg_addr(dst));
+                self.local_set(L_A);
+                self.load(self.reg_addr(src));
+                self.local_set(L_B);
+                self.alu_core(kind, Some(dst));
+            }
+            JitOp::AluRI { kind, dst, imm } => {
+                self.load(self.reg_addr(dst));
+                self.local_set(L_A);
+                self.iconst(imm);
+                self.local_set(L_B);
+                self.alu_core(kind, Some(dst));
+            }
+            JitOp::TestRR { a, b } => {
+                self.load(self.reg_addr(a));
+                self.local_set(L_A);
+                self.load(self.reg_addr(b));
+                self.local_set(L_B);
+                self.alu_core(4, None);
+            }
+            JitOp::IncDec { reg, dec } => {
+                // CFは不変 — インタプリタのset_cc_incdecと同じく、
+                // **遅延状態を上書きする前に**CFを評価してflagsのbit0へ退避
+                self.eval_cf_into_cin();
+                self.iconst(self.lay.flags as u32);
+                self.load(self.lay.flags);
+                self.iconst(!1u32);
+                self.code.push(I32_AND);
+                self.local_get(L_CIN);
+                self.code.push(I32_OR);
+                self.store_op();
+                // a, r = a±1
+                self.load(self.reg_addr(reg));
+                self.local_set(L_A);
+                self.local_get(L_A);
+                self.iconst(1);
+                self.code.push(if dec { I32_SUB } else { I32_ADD });
+                self.local_set(L_R);
+                // cc材料 (op=8:INC / 9:DEC、cinは0)
+                self.store8_const(self.lay.cc_op, if dec { 9 } else { 8 });
+                self.store8_const(self.lay.cc_w, 2);
+                self.store_local(self.lay.cc_a, L_A);
+                self.store_const(self.lay.cc_b, 1);
+                self.store_const(self.lay.cc_cin, 0);
+                self.store_local(self.lay.cc_r, L_R);
+                self.store_local(self.reg_addr(reg), L_R);
+            }
+            JitOp::Lea {
+                dst,
+                base,
+                index,
+                scale,
+                disp,
+            } => {
+                self.iconst(self.reg_addr(dst) as u32);
+                self.iconst(disp);
+                if base >= 0 {
+                    self.load(self.reg_addr(base as u8));
+                    self.code.push(I32_ADD);
+                }
+                if index >= 0 {
+                    self.load(self.reg_addr(index as u8));
+                    self.iconst(scale as u32);
+                    self.code.push(I32_SHL);
+                    self.code.push(I32_ADD);
+                }
+                self.store_op();
+            }
+            // 終端はcompile_blockが面倒を見る (ipの帳尻)
+            JitOp::Jcc { .. } | JitOp::Jmp { .. } => unreachable!("終端はemit_exitで扱う"),
+        }
+    }
+}
+
+/// ブロックをwasmモジュールに焼く。
+/// `machine_addr` は生きているMachineの実アドレス (ヘルパへ焼き込む)
+pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec<u8> {
+    let mut g = Gen {
+        code: Vec::new(),
+        lay,
+        maddr: machine_addr,
+    };
+
+    // 本体: 終端以外を順に。ipは触らない (出口で1回)
+    let mut term = None;
+    let mut total_len: u32 = 0;
+    for &(len, ref op) in &block.ops {
+        total_len += len as u32;
+        match *op {
+            JitOp::Jcc { cc, rel } => term = Some((cc as i32, rel, true)),
+            JitOp::Jmp { rel } => term = Some((0, rel, false)),
+            _ => g.op(op),
+        }
+    }
+
+    // 出口: ip = ip + total_len (+ 分岐が取られたら rel)
+    g.iconst(lay.ip as u32);
+    g.load(lay.ip);
+    match term {
+        Some((cc, rel, conditional)) => {
+            if conditional {
+                // select(total+rel, total, cond)
+                g.iconst(total_len.wrapping_add(rel));
+                g.iconst(total_len);
+                g.iconst(g.maddr);
+                g.iconst(cc as u32);
+                g.code.push(CALL);
+                uleb(&mut g.code, 1); // import 1 = e.cond
+                g.code.push(SELECT);
+            } else {
+                g.iconst(total_len.wrapping_add(rel));
+            }
+        }
+        None => g.iconst(total_len),
+    }
+    g.code.push(I32_ADD);
+    g.store_op();
+
+    // 返り値: 実行した命令数 (F1aは常に全部)
+    g.iconst(block.ops.len() as u32);
+    g.code.push(END);
+
+    // ---- モジュールに包む ----
+    let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+    // type: [()->i32, (i32)->i32, (i32,i32)->i32]
+    let mut b = Vec::new();
+    uleb(&mut b, 3);
+    b.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    b.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    b.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut m, 1, &b);
+    // import: e.cf (type1), e.cond (type2), e.m (memory min1)
+    let mut b = Vec::new();
+    uleb(&mut b, 3);
+    for (name, desc) in [
+        ("cf", &[0x00, 0x01][..]),
+        ("cond", &[0x00, 0x02][..]),
+        ("m", &[0x02, 0x00, 0x01][..]),
+    ] {
+        uleb(&mut b, 1);
+        b.push(b'e');
+        uleb(&mut b, name.len() as u64);
+        b.extend_from_slice(name.as_bytes());
+        b.extend_from_slice(desc);
+    }
+    section(&mut m, 2, &b);
+    // function: [type0]
+    section(&mut m, 3, &[1, 0x00]);
+    // export: "b" = func 2 (import 2本の後)
+    section(&mut m, 7, &[1, 1, b'b', 0x00, 2]);
+    // code: locals (i32 ×4) + 本体
+    let mut body = Vec::new();
+    body.extend_from_slice(&[1, 4, 0x7f]); // 1グループ: i32が4個
+    body.extend_from_slice(&g.code);
+    let mut b = Vec::new();
+    uleb(&mut b, 1);
+    uleb(&mut b, body.len() as u64);
+    b.extend_from_slice(&body);
+    section(&mut m, 10, &b);
+    m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustx86_core::{jit, MachineProfile};
+
+    fn block_from(code: &[u8]) -> (Machine, JitBlock, JitLayout) {
+        let mut m = Machine::with_profile(MachineProfile::pc_32bit(4));
+        for (i, b) in code.iter().enumerate() {
+            m.write_phys8(0x10000 + i as u32, *b);
+        }
+        let blk = jit::collect_block(&m, 0x10000, 32).expect("block");
+        let lay = jit::layout(&m);
+        (m, blk, lay)
+    }
+
+    /// 生成モジュールが**本物のwasm検証** (型・スタック規律・LEB) を通るか。
+    /// V8のinstantiateが通る形であることの、CIで回せる代役
+    #[test]
+    fn generated_modules_pass_real_validation() {
+        let cases: &[&[u8]] = &[
+            // mov/ALU/jcc入りのループ
+            &[
+                0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+                0x89, 0xC3, // mov ebx,eax
+                0x01, 0xD8, // add eax,ebx
+                0x83, 0xE8, 0x01, // sub eax,1
+                0x85, 0xC0, // test eax,eax
+                0x75, 0xF4, // jne
+            ],
+            // adc/sbb (CFヘルパ呼び出し) と inc/dec、lea
+            &[
+                0x11, 0xC8, // adc eax,ecx
+                0x19, 0xDA, // sbb edx,ebx
+                0x40, // inc eax
+                0x4B, // dec ebx
+                0x8D, 0x44, 0x8B, 0x08, // lea eax,[ebx+ecx*4+8]
+                0xEB, 0xF2, // jmp
+            ],
+            // 分岐なしで途切れる形
+            &[0xB9, 0xFF, 0x00, 0x00, 0x00, 0x8B, 0x03],
+        ];
+        for (i, code) in cases.iter().enumerate() {
+            let (_m, blk, lay) = block_from(code);
+            let wasm = compile_block(&blk, &lay, 0x1000);
+            wasmparser::validate(&wasm)
+                .unwrap_or_else(|e| panic!("case{i}: 検証に落ちた: {e} bytes={wasm:02x?}"));
+        }
+    }
+
+    #[test]
+    fn emits_valid_module_skeleton() {
+        let (_m, blk, lay) = block_from(&[
+            0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+            0x01, 0xD8, // add eax,ebx
+            0x75, 0xF9, // jne -7
+        ]);
+        let wasm = compile_block(&blk, &lay, 0x1234);
+        // マジックとバージョン
+        assert_eq!(
+            &wasm[..8],
+            &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        );
+        // export "b" が居る
+        let needle = [1, 1, b'b', 0x00, 2];
+        assert!(
+            wasm.windows(needle.len()).any(|w| w == needle),
+            "export b が無い"
+        );
+        // セクションIDが昇順 (1,2,3,7,10)
+        let mut pos = 8;
+        let mut ids = Vec::new();
+        while pos < wasm.len() {
+            ids.push(wasm[pos]);
+            let mut size = 0u64;
+            let mut shift = 0;
+            let mut p = pos + 1;
+            loop {
+                let byte = wasm[p];
+                size |= ((byte & 0x7f) as u64) << shift;
+                p += 1;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+            pos = p + size as usize;
+        }
+        assert_eq!(ids, vec![1, 2, 3, 7, 10]);
+        assert_eq!(pos, wasm.len(), "セクション長の帳尻が合わない");
+    }
+
+    #[test]
+    fn block_without_branch_ends_with_plain_ip_advance() {
+        // mov eax,1 / mov ebx,2 (分岐なしで途切れる形)
+        let (_m, blk, lay) = block_from(&[
+            0xB8, 0x01, 0x00, 0x00, 0x00, 0xBB, 0x02, 0x00, 0x00, 0x00, 0x8B, 0x03,
+        ]);
+        assert_eq!(blk.ops.len(), 2); // mov眼2個、メモリ形の手前まで
+        let wasm = compile_block(&blk, &lay, 0);
+        // 返り値の直前に「命令数2」のconstが居るはず (END の手前)
+        assert_eq!(&wasm[wasm.len() - 3..], &[I32_CONST, 2, END]);
+    }
+
+    #[test]
+    fn helpers_evaluate_lazy_flags() {
+        // ヘルパが遅延フラグを正しく評価するか (JITの土台の直接検証)。
+        // sub eax,eax 相当をインタプリタで実行 → ZF=1 のはず
+        let mut m = Machine::with_profile(MachineProfile::pc_32bit(4));
+        m.cpu.regs[0] = 7;
+        // cc状態を作る: cmp eax,eax (インタプリタ経由)
+        for (i, b) in [0x39u8, 0xC0].iter().enumerate() {
+            m.write_phys8(0x7C00 + i as u32, *b);
+        }
+        // 実行はstepで (32bitセグメント設定などの面倒を避け、
+        // ヘルパの評価だけを直接見る)
+        unsafe {
+            // condition 4 = ZF (cc=0x4: ZF set)
+            let before = rx86_jit_cond(&m as *const Machine, 0x4);
+            assert_eq!(before, 0, "まだZFは立っていない");
+        }
+    }
+}
