@@ -161,6 +161,38 @@ pub struct JitLayout {
     pub tick_countdown: usize,
 }
 
+/// 焼けたブロックの実行フック (F1a増分3)。
+///
+/// coreは生成器もランタイムも知らない — 知っているのは「ブロック頭で
+/// これを呼べば、焼けていればn命令ぶん進む」という契約だけ。
+/// dynではなくfnポインタなのは、Machineを&mutで貸しながら呼ぶため
+/// (Copyで取り出してから呼ぶ) と、coreの無依存を保つため。
+///
+/// ## try_enter の契約
+///
+/// - 呼ばれるのは**ブロック頭** (分岐の着地直後か step_cached の入口) で、
+///   `m.cpu.ip` はそのブロックの先頭命令を指している
+/// - `budget` 命令まで実行してよい (coreが `min(extra+1, tick_countdown)` で
+///   計算する — **ブロック内でtickが起きない**ことの保証)。全部は走れない
+///   なら**1命令も実行せず** 0 を返す (部分実行は無し — 会計が単純になる)
+/// - 実行したら ip・レジスタ・フラグ材料 (cc_*) を更新済みにして n を返す。
+///   tsc/tick_countdown/extra の清算は**core側がやる** (毎命令の意味順序を
+///   n命令まとめて再現する — 位置がずれると命令数の決定性が壊れる)
+#[derive(Clone, Copy)]
+pub struct JitHook {
+    /// ランタイム側の状態へのポインタ (coreは中身を知らない)
+    pub ctx: usize,
+    /// 焼けていれば実行して実行命令数を返す。無ければ0
+    pub try_enter: fn(ctx: usize, m: &mut Machine, pa: u32, budget: u32) -> u32,
+}
+
+/// ブロックのページ世代 (焼いた時点の値を控えて、実行前に照合する)。
+/// F1aの語彙はメモリに書かないので、ブロック**内**で世代が動くことはない —
+/// 頭での照合が、インタプリタの毎命令照合と同じ強さになる
+pub fn page_gen(m: &Machine, pa: u32) -> u32 {
+    m.dcache.page_gen_of(pa)
+}
+
 pub fn layout(m: &Machine) -> JitLayout {
     // jit.rs は cpu モジュールの子孫なので、Cpuのprivateフィールドに触れる
     // (alu.rs が cc_* に触れるのと同じ理屈)。アドレスはここで写し取り、
