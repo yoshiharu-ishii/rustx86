@@ -274,6 +274,13 @@ struct Entry {
     /// 毎命令カウントはB5/C5の教訓 (ホットループへの追加は逆効果) に反するので、
     /// 分岐が取られた次の1回だけ +1 する。閾値でJITフックへ通知して飽和
     heat: u16,
+    /// このブロック頭に**焼けたJITブロック**があれば、その命令数 (0=無し) と
+    /// 関数テーブルのスロット。Entryのgen一致が「現世代のブロック」を保証する
+    /// ので、JIT入口は毎ブロック頭のhashmap照合を払わずここを読むだけで済む。
+    /// ページが書かれると gen が動き Entry が再デコードで上書きされる (jit_n=0)
+    /// ので、古いJITブロックが誤って呼ばれることはない
+    jit_n: u16,
+    jit_slot: u32,
     uop: Uop,
 }
 
@@ -327,6 +334,22 @@ impl DecodeCache {
     /// 物理アドレスのページ世代 (JITビューが照合に使う)
     pub(crate) fn page_gen_of(&self, pa: u32) -> u32 {
         self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
+    }
+
+    /// 焼けたJITブロックを Entry に据える (F1a、増分5)。
+    /// ブロック頭 `pa` の Entry が現存しかつ同一物理番地なら、スロットと命令数を
+    /// 書き込む。以後そのブロック頭の訪問は Entry 読みだけでJIT入口を判定できる
+    /// (hashmap不要)。Entry が既に別番地なら黙って捨てる — JITブロックは
+    /// テーブルに残るが誰も指さない (再訪で jit_n=0 のまま=インタプリタ)
+    pub fn set_jit(&mut self, pa: u32, slot: u32, n: u16) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let e = &mut self.entries[(pa as usize) & (SLOTS - 1)];
+        if e.tag == pa {
+            e.jit_slot = slot;
+            e.jit_n = n;
+        }
     }
 
     /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める
@@ -413,60 +436,18 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
-        // ---- JIT入口 (F1a増分3) ----
-        // ブロック頭で、焼けたブロックがあれば任せる。入らない条件:
-        // tick直後 (skip_jit)、IRQ保留中 (インタプリタは1命令で戻る意味論)
-        if let Some(h) = jit_hook {
-            if at_head && !skip_jit {
-                let irq_waiting =
-                    m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
-                if !irq_waiting {
-                    // 予算 = この命令込みで走ってよい数。extra+1はチェーンの残り、
-                    // tick_countdownは「ブロック内でtickが起きない」ことの保証
-                    let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
-                    let n = (h.try_enter)(h.ctx, m, pa, budget);
-                    if n > 0 {
-                        let n64 = n as u64;
-                        // 清算 — インタプリタの毎命令順序 (exec後にextra/tsc/tick) を
-                        // n命令まとめて再現する。今の命令の時計は支払い済みなので、
-                        // 払うのは「次の命令たち」のぶん
-                        if n64 > extra {
-                            // チェーンの出し切り: 最後の命令の次の時計は外側が払う
-                            m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
-                            m.tick_countdown -= n - 1;
-                            return;
-                        }
-                        m.cpu.tsc = m.cpu.tsc.wrapping_add(n64);
-                        m.tick_countdown -= n;
-                        extra -= n64;
-                        if m.tick_countdown == 0 {
-                            m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
-                            m.tick_devices(1);
-                            // tickが割り込みを挙げたかもしれない。インタプリタは
-                            // 「次の1命令を実行してから」受け付ける — 同じ位置に
-                            // するため、次の1命令はJITに入らず下の本体で実行する
-                            skip_jit = true;
-                        }
-                        // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ
-                        let new_lin = m.cpu.lin(CS, m.cpu.ip);
-                        if new_lin >> 12 != lin >> 12 {
-                            return;
-                        }
-                        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-                        lin = new_lin;
-                        continue; // at_headは真のまま — ブロックを連続でJITできる
-                    }
-                }
-                skip_jit = false;
-            }
-        }
-
+        // Entry照合を先に済ませる (JIT入口もこの結果を使う)。gen一致は
+        // 「このブロック頭は現世代」の保証 — JITブロックの世代照合も兼ねる
         let mut cached = None;
+        let mut jit_here = None; // (slot, n) — このブロック頭に焼けたJIT
         if !m.dcache.entries.is_empty() {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
             let e = &mut m.dcache.entries[slot];
             if e.tag == pa && e.gen == gen_now {
                 cached = Some((e.len, e.uop));
+                if e.jit_n != 0 {
+                    jit_here = Some((e.jit_slot, e.jit_n));
+                }
                 m.dcache.hits += 1;
                 if at_head && e.heat < JIT_HOT_THRESHOLD {
                     e.heat += 1;
@@ -477,6 +458,53 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 }
             }
         }
+
+        // ---- JIT入口 (F1a増分5) ----
+        // ブロック頭で、Entryに焼けたブロックがあれば任せる。hashmapは引かない —
+        // 判定材料 (slot/n/現世代) は上のEntry読みで全部そろっている。
+        // 入らない条件: tick直後 (skip_jit)、IRQ保留中 (インタプリタは1命令で戻る)
+        if let (Some(h), Some((jslot, jn))) = (jit_hook, jit_here) {
+            if at_head && !skip_jit {
+                // 予算 = この命令込みで走ってよい数。extra+1はチェーンの残り、
+                // tick_countdownは「ブロック内でtickが起きない」ことの保証
+                let budget = extra.saturating_add(1).min(m.tick_countdown as u64);
+                let irq_waiting =
+                    m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
+                if jn as u64 <= budget && !irq_waiting {
+                    let n = (h.enter)(jslot);
+                    let n64 = n as u64;
+                    // 清算 — インタプリタの毎命令順序 (exec後にextra/tsc/tick) を
+                    // n命令まとめて再現する。今の命令の時計は支払い済みなので、
+                    // 払うのは「次の命令たち」のぶん
+                    if n64 > extra {
+                        // チェーンの出し切り: 最後の命令の次の時計は外側が払う
+                        m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
+                        m.tick_countdown -= n - 1;
+                        return;
+                    }
+                    m.cpu.tsc = m.cpu.tsc.wrapping_add(n64);
+                    m.tick_countdown -= n;
+                    extra -= n64;
+                    if m.tick_countdown == 0 {
+                        m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                        m.tick_devices(1);
+                        // tickが割り込みを挙げたかもしれない。インタプリタは
+                        // 「次の1命令を実行してから」受け付ける — 同じ位置に
+                        // するため、次の1命令はJITに入らず下の本体で実行する
+                        skip_jit = true;
+                    }
+                    // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ
+                    let new_lin = m.cpu.lin(CS, m.cpu.ip);
+                    if new_lin >> 12 != lin >> 12 {
+                        return;
+                    }
+                    pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+                    lin = new_lin;
+                    continue; // at_headは真のまま — ブロックを連続でJITできる
+                }
+            }
+        }
+        skip_jit = false;
         at_head = false;
         let (len, uop) = match cached {
             Some(x) => x,
@@ -489,6 +517,8 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                                 gen: 0,
                                 len: 0,
                                 heat: 0,
+                                jit_n: 0,
+                                jit_slot: 0,
                                 uop: Uop::Ret,
                             };
                             SLOTS
@@ -500,6 +530,8 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         gen,
                         len,
                         heat: 0,
+                        jit_n: 0,
+                        jit_slot: 0,
                         uop,
                     };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
