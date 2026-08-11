@@ -51,6 +51,8 @@ fn main() {
                     covered as f64 * 100.0 / seen as f64,
                     d.fallbacks / 1_000_000
                 );
+                // F1a: 熱が閾値に達したブロック頭の数 (JITの焼き候補)
+                println!("jit候補: {} ブロック頭が閾値到達", d.hot_pending());
             }
             // opstats フィーチャ付きなら、実行回数の上位を出す
             // (デコードキャッシュの対象選定は推測でなくこの実測で行う)
