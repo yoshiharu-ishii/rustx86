@@ -3,12 +3,14 @@
 //   node tools/webtest/headless.mjs
 // exit 0 = シェル到達 (+ snakeの盤面描画も確認)、exit 1 = 失敗
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const wasm = readFileSync(join(root, 'web/pkg/rustx86_wasm_bg.wasm'));
-const mod = await import(join(root, 'web/pkg/rustx86_wasm.js'));
+// pathToFileURL: Windowsでは C:\ 絶対パスを裸で import() に渡せない
+// (ERR_UNSUPPORTED_ESM_URL_SCHEME — ドライブ文字がURLスキームに見える)
+const mod = await import(pathToFileURL(join(root, 'web/pkg/rustx86_wasm.js')).href);
 await mod.default({ module_or_path: wasm });
 
 // 既定は bzImage — ブラウザの既定と同じ、自己解凍ステブごと実行する本物の起動。
