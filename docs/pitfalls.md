@@ -11,6 +11,27 @@
 イベントループに戻りたいだけなら **MessageChannel の port.postMessage** を使う
 (クランプ無しのマクロタスク。他のメッセージも同じFIFOに並ぶので応答性は保たれる)。
 
+```js
+// NG: 「0ms後」のつもりが、ネスト5段目からは毎回4ms待たされる
+function loop() {
+  runSlice();           // ~8ms の計算
+  setTimeout(loop, 0);  // ← 実質 setTimeout(loop, 4)。1/3が休憩になる
+}
+loop();
+
+// OK: MessageChannel の自分宛メッセージはクランプ対象外のマクロタスク
+const wake = new MessageChannel();
+wake.port1.onmessage = () => loop();
+function loop() {
+  runSlice();
+  wake.port2.postMessage(0);  // 隙間なく次へ。キー入力等も同じFIFOで割り込める
+}
+loop();
+```
+
+どちらもマクロタスク境界を挟むので「メッセージを捌く隙」は同じ。違いは
+**待たされるかどうかだけ** — 差し替えは事実上1行で済む。
+
 **事件**: Linuxワーカーが8msスライスごとに `setTimeout(loop, 0)` で再予約していた。
 8ms働いて4ms強制休憩 = デューティ比67% — **ブラウザだけheadlessより×1.5遅い**
 「タブ税」の正体がこの2文字 (`, 0`) だった。エラーも警告も出ず、CPUは忙しそうに
