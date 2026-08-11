@@ -74,6 +74,23 @@ GAMES=(
 
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 
+# zipから1ファイルだけ取り出す (パスは捨てる)。unzipの無いホスト (Windows) は
+# Pythonの標準ライブラリで開く
+unzip_one() { # zip member destdir
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -oqj "$1" "$2" -d "$3"
+  else
+    python3 - "$1" "$2" "$3" <<'PY'
+import os, sys, zipfile
+zip_, member, dest = sys.argv[1:4]
+with zipfile.ZipFile(zip_) as z, z.open(member) as s:
+    out = os.path.join(dest, os.path.basename(member))
+    with open(out, "wb") as d:
+        d.write(s.read())
+PY
+  fi
+}
+
 fetch() { # url dest
   [ -f "$2" ] && { say "$(basename "$2") は取得済み"; return; }
   say "取得: $(basename "$2")"
@@ -119,7 +136,7 @@ build_freedos() {
   # 8086ビルドの起動フロッピー。配布zipの 144m/x86BOOT.img がそれ。
   # 同じディスクに KERNEL.SYS (8086) と KERNL386.SYS (386) の両方が入っている
   say "起動フロッピーを取り出す"
-  unzip -oqj "$WORK/fd14flop.zip" "144m/x86BOOT.img" -d "$WORK"
+  unzip_one "$WORK/fd14flop.zip" "144m/x86BOOT.img" "$WORK"
   cp "$WORK/x86BOOT.img" "$IMAGES/fd14boot.img"
 
   say "ゲームを取得して載せる"
@@ -154,7 +171,7 @@ build_freedos_boot() {
   mkdir -p "$IMAGES"
   fetch "$FREEDOS_URL" "$WORK/fd14flop.zip"
   say "起動フロッピーを取り出す (ゲーム無し)"
-  unzip -oqj "$WORK/fd14flop.zip" "144m/x86BOOT.img" -d "$WORK"
+  unzip_one "$WORK/fd14flop.zip" "144m/x86BOOT.img" "$WORK"
   cp "$WORK/x86BOOT.img" "$IMAGES/fd14boot.img"
 }
 

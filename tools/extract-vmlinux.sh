@@ -21,29 +21,45 @@ IN="${1:-images/vmlinuz-lts}"
 OUT="${2:-images/vmlinux-lts}"
 
 python3 - "$IN" "$OUT" <<'EOF'
-import subprocess, sys
+import lzma, subprocess, sys, zlib
 
 src, dst = sys.argv[1], sys.argv[2]
 data = open(src, 'rb').read()
 
-# 形式ごとのマジックと展開コマンド。gzipのマジックは短く誤検知しうるので、
+# 1MBずつ食わせ、途中で文句が出ても手前までの出力を採る
+# (圧縮ストリームの後ろはbzImageのゴミなので、末尾のエラーは無視してよい)
+def feed(decomp, b):
+    out = bytearray()
+    for i in range(0, len(b), 1 << 20):
+        try:
+            out += decomp(b[i:i + (1 << 20)])
+        except Exception:
+            break
+    return bytes(out)
+
+def run(cmd, b):  # stdlibに無い形式だけ外部コマンドに頼る
+    try:
+        return subprocess.run(cmd, input=b, capture_output=True).stdout
+    except FileNotFoundError:
+        return b''
+
+# 形式ごとのマジックと展開器。gzip/xz は標準ライブラリで展開する —
+# 外部コマンドはWindowsに無い (Git Bashのgunzipはシェルスクリプトで
+# WindowsのPythonから起動できない)。gzipのマジックは短く誤検知しうるので、
 # **候補を順に試して ELF が出たものを採る**
 magics = [
-    (b'\x1f\x8b\x08', ['gunzip', '-c']),
-    (b'\xfd7zXZ\x00', ['xz', '-dc']),
-    (b'\x02!L\x18', ['lz4', '-dc']),
-    (b'\x28\xb5\x2f\xfd', ['zstd', '-dc']),
+    (b'\x1f\x8b\x08', 'gzip', lambda b: feed(zlib.decompressobj(31).decompress, b)),
+    (b'\xfd7zXZ\x00', 'xz', lambda b: feed(lzma.LZMADecompressor().decompress, b)),
+    (b'\x02!L\x18', 'lz4', lambda b: run(['lz4', '-dc'], b)),
+    (b'\x28\xb5\x2f\xfd', 'zstd', lambda b: run(['zstd', '-dc'], b)),
 ]
-start = 0
-for magic, cmd in magics:
+for magic, name, expand in magics:
     pos = data.find(magic)
     while pos >= 0:
-        p = subprocess.run(cmd, input=data[pos:], capture_output=True)
-        out = p.stdout
-        # 途中で切れても手前までは出る (解凍器は末尾のゴミで文句を言うが無視)
+        out = expand(data[pos:])
         if out.startswith(b'\x7fELF'):
             open(dst, 'wb').write(out)
-            print(f'{dst}: {len(out)/1e6:.1f}MB (ELF, {cmd[0]} @ {pos})')
+            print(f'{dst}: {len(out)/1e6:.1f}MB (ELF, {name} @ {pos})')
             sys.exit(0)
         pos = data.find(magic, pos + 1)
 print('ELF が出てこなかった (未対応の圧縮形式?)', file=sys.stderr)
