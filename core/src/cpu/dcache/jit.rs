@@ -44,11 +44,17 @@ impl From<MemRef> for JitMem {
     }
 }
 
-/// JITの語彙: レジスタ間で完結する命令 (F1a) + メモリロード (F1b-1)。
-/// メモリに**書く**命令はまだ無い — ブロック内で世代 (page_gen) が動かない
-/// 前提はF1aから変わっていない。
+/// JITの語彙: レジスタ間 (F1a) + メモリロード (F1b-1) + ストア/RMW (F1b-2)。
+///
+/// ストアが入っても「ブロック内で世代 (page_gen) が動かない」前提は保たれる —
+/// 現行coreで世代を進めるのは REP文字列 (note_write_range) と write_phys8 だけで、
+/// 素の線形ストアは進めない (JITヘルパはこれを正確に写す)。REPは語彙に無い。
+/// この前提が変わる (素のストアが世代を進めるようになる) ときは、
+/// 「ヘルパが自ページの世代を進めたら実行済みn+1で脱出」の受けを足すこと。
+///
 /// フラグの扱いは lazy flags (cc_*) の材料更新として生成する —
-/// C1で作ったcc_op方式がそのままJITのフラグモデルになる
+/// C1で作ったcc_op方式がそのままJITのフラグモデルになる。
+/// RMWだけは例外で、ccの更新ごとRustヘルパ (alu_w) の中で済む
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitOp {
     /// mov r32, imm32
@@ -75,10 +81,20 @@ pub enum JitOp {
     MovRM { dst: u8, mem: JitMem },
     /// ALU r32, [mem] — dst = alu(kind, dst, mem)。kind7 (CMP) はdstを書かない
     AluRM { kind: u8, dst: u8, mem: JitMem },
-    /// cmp [mem], r32 (ALUグリッドのrm=dst形はロードだけで済むkind7のみ)
+    /// cmp [mem], r32 (ALUグリッドのrm=dst形でロードだけで済むkind7)
     CmpMR { mem: JitMem, reg: u8 },
+    /// cmp [mem], imm32 (Grp1のkind7 — 同上)
+    CmpMI { mem: JitMem, imm: u32 },
     /// test [mem], r32 (フラグだけ)
     TestMR { mem: JitMem, reg: u8 },
+    /// mov [mem], r32 (F1b-2。フォールトしそうなら書く前に脱出)
+    StoreMR { mem: JitMem, src: u8 },
+    /// mov [mem], imm32
+    StoreMI { mem: JitMem, imm: u32 },
+    /// ALU [mem], r32 — read→alu→write をRustヘルパ1呼びで (kind7は来ない)
+    AluMR { kind: u8, mem: JitMem, reg: u8 },
+    /// ALU [mem], imm32
+    AluMI { kind: u8, mem: JitMem, imm: u32 },
     /// 終端: 条件分岐 (取られたら ip += rel は命令長込みの相対)
     Jcc { cc: u8, rel: u32 },
     /// 終端: 無条件相対ジャンプ
@@ -122,7 +138,7 @@ fn convert(u: &Uop) -> Option<(JitOp, bool)> {
             dst: reg,
             mem: mr.into(),
         },
-        // rm=dst形はkind7 (CMP) だけロードで済む — 他はメモリへ書き戻すので対象外
+        // rm=dst形: kind7 (CMP) はロードだけ、他はRMW (F1b-2)
         Uop::AluRmR {
             kind: 7,
             rm: Rm::Mem(mr),
@@ -131,12 +147,53 @@ fn convert(u: &Uop) -> Option<(JitOp, bool)> {
             mem: mr.into(),
             reg,
         },
+        Uop::AluRmR {
+            kind,
+            rm: Rm::Mem(mr),
+            reg,
+        } => JitOp::AluMR {
+            kind,
+            mem: mr.into(),
+            reg,
+        },
+        Uop::Grp1RmImm {
+            kind: 7,
+            rm: Rm::Mem(mr),
+            imm,
+        } => JitOp::CmpMI {
+            mem: mr.into(),
+            imm,
+        },
+        Uop::Grp1RmImm {
+            kind,
+            rm: Rm::Mem(mr),
+            imm,
+        } => JitOp::AluMI {
+            kind,
+            mem: mr.into(),
+            imm,
+        },
         Uop::TestRmR {
             rm: Rm::Mem(mr),
             reg,
         } => JitOp::TestMR {
             mem: mr.into(),
             reg,
+        },
+        // ---- F1b-2: ストア ----
+        Uop::MovRmR {
+            rm: Rm::Mem(mr),
+            reg,
+        } => JitOp::StoreMR {
+            mem: mr.into(),
+            src: reg,
+        },
+        Uop::MovRmImm {
+            rm: Rm::Mem(mr),
+            imm,
+        } => JitOp::StoreMI {
+            mem: mr.into(),
+            imm,
         },
         Uop::MovRmImm {
             rm: Rm::Reg(dst),
@@ -256,8 +313,9 @@ pub struct JitHook {
 }
 
 /// ブロックのページ世代 (焼いた時点の値を控えて、実行前に照合する)。
-/// F1aの語彙はメモリに書かないので、ブロック**内**で世代が動くことはない —
-/// 頭での照合が、インタプリタの毎命令照合と同じ強さになる
+/// ブロック**内**で世代が動くことはない — 現行coreで世代を進めるのは
+/// REP文字列と write_phys8 だけで、どちらも語彙に無い (素のストアは進めない。
+/// JitOpのdocを参照)。よって頭での照合が、インタプリタの毎命令照合と同じ強さになる
 pub fn page_gen(m: &Machine, pa: u32) -> u32 {
     m.dcache.page_gen_of(pa)
 }
