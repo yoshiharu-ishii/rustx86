@@ -27,6 +27,7 @@ export function setupJit(emu, exports) {
         m: exports.memory,
         cf: exports.rx86_jit_cf,
         cond: exports.rx86_jit_cond,
+        ld32: exports.rx86_jit_ld32, // F1b: メモリロード (フォールト脱出つき)
       },
     },
   };
