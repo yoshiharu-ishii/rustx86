@@ -233,6 +233,40 @@ jobs:
         continue-on-error: true
         run: node tools/webtest/jit-check.mjs | tee jitcheck.md
 
+      # 速度測定 (情報のみ — 合否には使わない)。共有ランナーは±10〜30%揺れる
+      # ので、赤くする基準にはせず「毎PRで傾向が見える」ことだけを狙う。
+      # wasm側の数字は jitcheck の副産物 (speed行) をそのまま使う — 追加ブート無し
+      - name: 速度測定 (ネイティブ vmlinux)
+        id: speed
+        continue-on-error: true
+        run: |
+          {
+            echo '## 速度測定 — 共有ランナーは±10〜30%揺れる。傾向を見る用 (合否に使わない)'
+            echo '手元の物差し: M1ネイティブ ~79 MIPS / M1 wasm ~50 MIPS (docs/perf.md)'
+            echo ''
+            echo '### ネイティブ (bootphase vmlinux 580M)'
+            echo '```'
+            cargo run --release --example bootphase -- images/vmlinux-lts | tee native-speed.txt
+            echo '```'
+            echo '### wasm (jit-check の副産物: interp / jit)'
+            echo '```'
+            grep -E '^speed:' jitcheck.md || echo '(jit-check未実行)'
+            echo '```'
+          } > speed.md
+          # チェックの見出しに要約を出す: native XX MIPS / wasm interp YY / jit ZZ
+          nsec=$(grep 合計 native-speed.txt | grep -oE '[0-9.]+s' | tr -d s)
+          nmips=$(awk -v s="$nsec" 'BEGIN{ if (s>0) printf "%.1f", 580/s; else print "?" }')
+          wline=$(grep -E '^speed:' jitcheck.md | head -1 | sed 's/^speed: //')
+          echo "title=native ${nmips} MIPS / ${wline:-wasm 計測なし}" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 速度測定
+          title: ${{ steps.speed.outputs.title || '計測失敗' }}
+          outcome: ${{ steps.speed.outcome }}
+          report-file: speed.md
+
       # ブートログを証跡として残す。ゲストの時計は決定的なので、
       # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
       # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)

@@ -30,6 +30,7 @@ async function boot(useJit) {
   const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
   if (useJit) { setupJit(emu, exports); emu.jit_enable(); }
 
+  const t0 = Date.now();
   let serial = '', n = 0;
   const CHUNK = 50_000_000, CAP = 3_000_000_000;
   let banner = false;
@@ -45,7 +46,8 @@ async function boot(useJit) {
   // 命令数は「シェル到達までTSCが進んだ量」で数える (決定的・精密)
   const instrs = emu.tsc();
   const installed = useJit ? emu.jit_installed() : 0;
-  return { banner, serial, instrs, installed };
+  const secs = (Date.now() - t0) / 1000;
+  return { banner, serial, instrs, installed, secs };
 }
 
 const off = await boot(false);
@@ -63,5 +65,9 @@ check('シェル到達までの命令数 (TSC・精密)', off.instrs, on.instrs)
 check('シリアル出力(全文)', off.serial, on.serial);
 console.log(`jit据え付け: ${on.installed} ブロック`);
 if (on.installed === 0) { ok = false; console.log('NG  JITが一度も発火していない'); }
+// 速度の観測 (CIの速度レポートが拾う)。合否には使わない — ランナーの揺れで
+// 赤くしない。傾向は毎PRのチェック結果で追う
+const mips = (r) => (r.instrs / r.secs / 1e6).toFixed(1);
+console.log(`speed: wasm interp ${off.secs.toFixed(1)}s (${mips(off)} MIPS) | jit ${on.secs.toFixed(1)}s (${mips(on)} MIPS)`);
 
 process.exit(ok && on.banner ? 0 : 1);
