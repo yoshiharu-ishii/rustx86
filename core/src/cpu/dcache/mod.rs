@@ -614,7 +614,8 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             }
         }
         skip_jit = false;
-        at_head = false;
+        // at_head はここでは触らない — 連結判定の末尾が毎周必ず決め直す
+        // (直線なら head_pending の引き取り、分岐なら true)
         let (len, uop) = match cached {
             Some(x) => x,
             None => match decode::decode_at(m, pa) {
