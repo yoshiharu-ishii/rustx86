@@ -385,6 +385,123 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
     m
 }
 
+// ---- ランタイム (増分3): 焼き・据え付け・実行の台帳 ----
+
+use std::collections::HashMap;
+
+/// 据え付け済みブロック。idx はJS側の関数配列の添字
+struct Compiled {
+    gen: u32,
+    n: u32,
+    idx: u32,
+}
+
+/// 焼き上がってJSのinstantiate待ちのジョブ
+pub struct Job {
+    pub pa: u32,
+    pub gen: u32,
+    pub n: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// JITランタイムの台帳。Emulatorが1個持つ (Boxで住所固定 — hookのctxになる)
+#[derive(Default)]
+pub struct JitRt {
+    blocks: HashMap<u32, Compiled>,
+    jobs: Vec<Job>,
+}
+
+impl JitRt {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// スライスの終わりに呼ぶ: 焼き候補 (drain_hot) をコンパイルしてジョブへ。
+    /// instantiateはJSにしかできないので、ここでは**バイト列を作るだけ**
+    pub fn compile_pending(&mut self, m: &mut Machine) {
+        let hot = m.dcache.drain_hot();
+        if hot.is_empty() {
+            return;
+        }
+        let lay = rustx86_core::jit::layout(m);
+        let maddr = m as *const Machine as u32;
+        for pa in hot {
+            if self.blocks.contains_key(&pa) {
+                continue;
+            }
+            let Some(blk) = rustx86_core::jit::collect_block(m, pa, 32) else {
+                continue;
+            };
+            // 1命令のブロックは呼び出しの税で赤字 — 焼かない
+            if blk.ops.len() < 2 {
+                continue;
+            }
+            self.jobs.push(Job {
+                pa,
+                gen: rustx86_core::jit::page_gen(m, pa),
+                n: blk.ops.len() as u32,
+                bytes: compile_block(&blk, &lay, maddr),
+            });
+        }
+    }
+
+    pub fn take_job(&mut self) -> Option<Job> {
+        self.jobs.pop()
+    }
+
+    pub fn install(&mut self, pa: u32, gen: u32, n: u32, idx: u32) {
+        self.blocks.insert(pa, Compiled { gen, n, idx });
+    }
+
+    /// スナップショット復元・OS入れ替えで全部捨てる (世代が巻き戻るため)
+    pub fn flush(&mut self) {
+        self.blocks.clear();
+        self.jobs.clear();
+    }
+
+    pub fn installed(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+/// coreのJitHookに挿す実行口。契約はcore側 (jit::JitHook) のdocを参照
+pub fn try_enter(ctx: usize, m: &mut Machine, pa: u32, budget: u32) -> u32 {
+    // ctxはEmulatorが持つBox<JitRt>の中身 — Emulatorより長生きしない
+    let rt = unsafe { &mut *(ctx as *mut JitRt) };
+    let Some(c) = rt.blocks.get(&pa) else {
+        return 0;
+    };
+    // 部分実行はしない契約 — 予算に収まらないなら丸ごと断る
+    if c.n > budget {
+        return 0;
+    }
+    // 自己書き換えの見張り: 焼いた時と世代が違えば捨てる。
+    // F1aの語彙はメモリに書かないので、頭での照合で十分
+    if rustx86_core::jit::page_gen(m, pa) != c.gen {
+        let _ = rt.blocks.remove(&pa);
+        return 0;
+    }
+    call_block(c.idx)
+}
+
+// 生成wasmの呼び出しはJS経由 (globalThis.rx86_call_block)。
+// F1aは正しさ優先 — テーブル直呼び (call_indirect) 化はF1bで測ってから
+#[cfg(target_arch = "wasm32")]
+fn call_block(idx: u32) -> u32 {
+    #[wasm_bindgen::prelude::wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = globalThis)]
+        fn rx86_call_block(idx: u32) -> u32;
+    }
+    rx86_call_block(idx)
+}
+
+/// ホスト (テスト) では生成wasmを実行できない — 常に「焼けていない」扱い
+#[cfg(not(target_arch = "wasm32"))]
+fn call_block(_idx: u32) -> u32 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

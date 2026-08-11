@@ -49,6 +49,21 @@ pub fn install_panic_hook() {
 #[wasm_bindgen]
 pub struct Emulator {
     m: Machine,
+    /// JITランタイムの台帳 (F1a)。Boxなのはhookのctxとして住所を固定するため
+    jit_rt: Box<jit::JitRt>,
+    /// drain_job で取り出し中のジョブの (pa, gen, n)。install_blockで消費
+    pending_job: Option<(u32, u32, u32)>,
+}
+
+impl Emulator {
+    /// 全コンストラクタの共通出口。JITの台帳を持たせる
+    fn wrap(m: Machine) -> Emulator {
+        Emulator {
+            m,
+            jit_rt: Box::new(jit::JitRt::new()),
+            pending_job: None,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -58,7 +73,7 @@ impl Emulator {
     pub fn new(sector: &[u8]) -> Result<Emulator, JsError> {
         let mut m = Machine::new();
         m.load_boot_sector(sector).map_err(|e| JsError::new(&e))?;
-        Ok(Emulator { m })
+        Ok(Emulator::wrap(m))
     }
 
     /// HLTするか上限まで実行し、実行した命令数を返す。
@@ -109,7 +124,7 @@ impl Emulator {
         let mut m = Machine::new();
         m.boot_from_disk(image.to_vec())
             .map_err(|e| JsError::new(&e))?;
-        Ok(Emulator { m })
+        Ok(Emulator::wrap(m))
     }
 
     /// カーネルイメージ (+ initramfs) から 32bit Linux を起動する。
@@ -125,7 +140,7 @@ impl Emulator {
         let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
         m.boot_linux_with_initrd(kernel, cmdline, initrd.as_deref())
             .map_err(|e| JsError::new(&e))?;
-        Ok(Emulator { m })
+        Ok(Emulator::wrap(m))
     }
 
     /// 起動済みスナップショットから機械を丸ごと復元する。
@@ -136,7 +151,7 @@ impl Emulator {
     pub fn from_snapshot(data: &[u8]) -> Result<Emulator, JsError> {
         let mut m = Machine::new();
         m.load_state(data).map_err(|e| JsError::new(&e))?;
-        Ok(Emulator { m })
+        Ok(Emulator::wrap(m))
     }
 
     /// シリアル (UART) に溜まった出力を取り出して返す。**読むと消える** —
@@ -188,6 +203,69 @@ impl Emulator {
                 break;
             }
         }
+        // スライスの終わりに、熱くなったブロックを焼いてジョブへ積む (F1a)。
+        // instantiateはJS側がやる — drain_jobs で取り出して据え付け直す
+        if self.m.jit.is_some() {
+            self.jit_rt.compile_pending(&mut self.m);
+        }
+    }
+
+    // ---------- JIT (F1a、ADR-0008) ----------
+
+    /// JITを有効化する。coreにフックを挿し、以後ブロック頭で焼けたコードに
+    /// 任せる (無ければインタプリタ)。JS側で `rx86_call_block` を用意すること
+    pub fn jit_enable(&mut self) {
+        let ctx = &*self.jit_rt as *const jit::JitRt as usize;
+        self.m.jit = Some(rustx86_core::jit::JitHook {
+            ctx,
+            try_enter: jit::try_enter,
+        });
+    }
+
+    /// 焼き上がってinstantiate待ちのジョブを1件取り出す ({pa,gen,n,bytes})。
+    /// JS側が WebAssembly.Instance を作って関数を配列に足し、install_block を呼ぶ
+    pub fn drain_job(&mut self) -> Option<js_sys::Uint8Array> {
+        // (pa,gen,n) はinstall_blockで受け直す — ここではバイト列だけ渡す。
+        // ジョブの本体はメンバに退避しておく
+        let job = self.jit_rt.take_job()?;
+        let bytes = js_sys::Uint8Array::from(job.bytes.as_slice());
+        self.pending_job = Some((job.pa, job.gen, job.n));
+        Some(bytes)
+    }
+
+    /// drain_job で取り出したジョブの (pa, gen, n) — JSが据え付け時に使う
+    pub fn pending_pa(&self) -> u32 {
+        self.pending_job.map(|j| j.0).unwrap_or(0)
+    }
+    pub fn pending_gen(&self) -> u32 {
+        self.pending_job.map(|j| j.1).unwrap_or(0)
+    }
+    pub fn pending_n(&self) -> u32 {
+        self.pending_job.map(|j| j.2).unwrap_or(0)
+    }
+
+    /// JS側が instantiate して関数配列に足した後、その添字を core の台帳へ登録
+    pub fn install_block(&mut self, idx: u32) {
+        if let Some((pa, gen, n)) = self.pending_job.take() {
+            self.jit_rt.install(pa, gen, n, idx);
+        }
+    }
+
+    /// instantiate に失敗したジョブを捨てる (据え付けない)。
+    /// coreはインタプリタで走り続ける — 退路は常にある
+    pub fn discard_job(&mut self) {
+        self.pending_job = None;
+    }
+
+    /// 据え付け済みブロック数 (観測用)
+    pub fn jit_installed(&self) -> usize {
+        self.jit_rt.installed()
+    }
+
+    /// TSC (実行した仮想命令数の累計)。決定性ゲートの精密な物差し —
+    /// JIT on/off で完全一致すべき値。f64は2^53まで無損失で今回の桁は収まる
+    pub fn tsc(&self) -> f64 {
+        self.m.cpu.tsc as f64
     }
 
     /// テキストVRAM (80×25、文字と属性が交互) の先頭ポインタ。
