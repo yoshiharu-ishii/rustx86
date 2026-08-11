@@ -10,3 +10,6 @@ crate-type = ["cdylib", "rlib"]
 wasm-bindgen = "0.2"
 rustx86-core = { path = "../core" }
 rustx86-disasm = { path = "../disasm" }
+
+[dev-dependencies]
+wasmparser = "0.256.0"
