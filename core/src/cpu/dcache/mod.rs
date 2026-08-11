@@ -324,6 +324,11 @@ impl DecodeCache {
         self.hot.len()
     }
 
+    /// 物理アドレスのページ世代 (JITビューが照合に使う)
+    pub(crate) fn page_gen_of(&self, pa: u32) -> u32 {
+        self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
+    }
+
     /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める
     #[inline]
     pub(crate) fn note_write(&mut self, pa: u32) {
@@ -393,13 +398,68 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
-    // ブロック頭か (F1aの熱計上)。外から入った今この瞬間と、分岐の着地だけ真。
-    // **毎命令は数えない** — 毎命令の追加はB5/C5の実測で逆効果と出ている
+    // ブロック頭か (F1aの熱計上とJIT入口)。外から入った今この瞬間と、
+    // 分岐の着地だけ真。**毎命令は数えない** — B5/C5の実測で逆効果と出ている
     let mut at_head = true;
+    // tick直後の1命令はインタプリタで実行する印。割り込みの受付は
+    // 「tickの次の1命令を実行した後」— この位置をJITでずらさないための約束
+    // JITフックはループの外で1回だけ見る (Copy)。**None なら退路は完全に
+    // 従来のホットループ** — 下の入口ブロックは jit_hook.is_some() で丸ごと
+    // 死ぬので、JIT無効時のコストはゼロ (退路の無コストは譲れない)
+    let jit_hook = m.jit;
+    let mut skip_jit = false;
 
     loop {
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
+
+        // ---- JIT入口 (F1a増分3) ----
+        // ブロック頭で、焼けたブロックがあれば任せる。入らない条件:
+        // tick直後 (skip_jit)、IRQ保留中 (インタプリタは1命令で戻る意味論)
+        if let Some(h) = jit_hook {
+            if at_head && !skip_jit {
+                let irq_waiting =
+                    m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
+                if !irq_waiting {
+                    // 予算 = この命令込みで走ってよい数。extra+1はチェーンの残り、
+                    // tick_countdownは「ブロック内でtickが起きない」ことの保証
+                    let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
+                    let n = (h.try_enter)(h.ctx, m, pa, budget);
+                    if n > 0 {
+                        let n64 = n as u64;
+                        // 清算 — インタプリタの毎命令順序 (exec後にextra/tsc/tick) を
+                        // n命令まとめて再現する。今の命令の時計は支払い済みなので、
+                        // 払うのは「次の命令たち」のぶん
+                        if n64 > extra {
+                            // チェーンの出し切り: 最後の命令の次の時計は外側が払う
+                            m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
+                            m.tick_countdown -= n - 1;
+                            return;
+                        }
+                        m.cpu.tsc = m.cpu.tsc.wrapping_add(n64);
+                        m.tick_countdown -= n;
+                        extra -= n64;
+                        if m.tick_countdown == 0 {
+                            m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                            m.tick_devices(1);
+                            // tickが割り込みを挙げたかもしれない。インタプリタは
+                            // 「次の1命令を実行してから」受け付ける — 同じ位置に
+                            // するため、次の1命令はJITに入らず下の本体で実行する
+                            skip_jit = true;
+                        }
+                        // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ
+                        let new_lin = m.cpu.lin(CS, m.cpu.ip);
+                        if new_lin >> 12 != lin >> 12 {
+                            return;
+                        }
+                        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+                        lin = new_lin;
+                        continue; // at_headは真のまま — ブロックを連続でJITできる
+                    }
+                }
+                skip_jit = false;
+            }
+        }
 
         let mut cached = None;
         if !m.dcache.entries.is_empty() {

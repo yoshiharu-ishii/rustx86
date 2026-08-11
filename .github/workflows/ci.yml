@@ -215,6 +215,24 @@ jobs:
           REGRESS_MIN_MIPS: 10
         run: cargo run --release --example regress | tee regress.md
 
+      # JITの決定性ゲート (F1a、ADR-0008)。生成コードとインタプリタが
+      # 「シェル到達までの命令数」も「シリアル出力全文」もビット同一かを見張る。
+      # 命令数決定性 (docs/perf.md の柱) をJITが崩したら即赤くする
+      - name: Node の用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: wasm-pack の用意
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: wasm を焼く
+        run: bash tools/build-web.sh
+      - name: JIT決定性ゲート (interp と jit がビット同一)
+        id: jitcheck
+        continue-on-error: true
+        run: node tools/webtest/jit-check.mjs | tee jitcheck.md
+
       # ブートログを証跡として残す。ゲストの時計は決定的なので、
       # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
       # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
@@ -234,8 +252,18 @@ jobs:
           outcome: ${{ steps.regress.outcome }}
           report-file: regress.md
 
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: JIT決定性 結果
+          title: ${{ steps.jitcheck.outcome == 'success' && 'interp と jit がビット同一' || '食い違い or JIT不発' }}
+          outcome: ${{ steps.jitcheck.outcome }}
+          report-file: jitcheck.md
+
       - name: 合否判定
-        run: test "${{ steps.regress.outcome }}" = "success"
+        run: |
+          test "${{ steps.regress.outcome }}" = "success" \
+            && test "${{ steps.jitcheck.outcome }}" = "success"
 
   # ---- 合流点。全部通って初めて OK ----
 
