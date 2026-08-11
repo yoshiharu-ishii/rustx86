@@ -13,6 +13,9 @@
 use rustx86_core::Machine;
 use wasm_bindgen::prelude::*;
 
+// F1a: テンプレートJITの生成器 (JitOp→wasmバイト列) とヘルパ
+pub mod jit;
+
 #[wasm_bindgen]
 extern "C" {
     /// パニックの内容をJS側へ渡す口。ページが `globalThis.__rustx86_panic` を
