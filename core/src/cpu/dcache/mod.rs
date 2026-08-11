@@ -268,8 +268,16 @@ struct Entry {
     /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
     gen: u32,
     len: u8,
+    /// ブロック頭としての熱 (F1a)。**分岐の着地点だけ**が数えられる —
+    /// 毎命令カウントはB5/C5の教訓 (ホットループへの追加は逆効果) に反するので、
+    /// 分岐が取られた次の1回だけ +1 する。閾値でJITフックへ通知して飽和
+    heat: u16,
     uop: Uop,
 }
+
+/// この熱に達したブロック頭を「焼き候補」としてフックに通知する。
+/// 分岐着地でしか数えないので、実行回数ではおよそ×(ブロック長)倍に相当
+const JIT_HOT_THRESHOLD: u16 = 1024;
 
 pub struct DecodeCache {
     /// 直接マップ。**最初の32bitデコードまで確保しない** —
@@ -284,6 +292,10 @@ pub struct DecodeCache {
     pub hits: u64,
     pub fills: u64,
     pub fallbacks: u64,
+    /// 焼き候補 (F1a): 熱が閾値に達したブロック頭の物理アドレス。
+    /// JIT側 (wasmシェル/ネイティブランナー) がdrainして焼く。
+    /// coreは積むだけ — 生成器を知らない (無依存の維持)
+    hot: Vec<u32>,
 }
 
 impl DecodeCache {
@@ -296,7 +308,18 @@ impl DecodeCache {
             hits: 0,
             fills: 0,
             fallbacks: 0,
+            hot: Vec::new(),
         }
+    }
+
+    /// 焼き候補を引き取る (F1a)。呼んだ側が生成器へ渡す
+    pub fn drain_hot(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.hot)
+    }
+
+    /// 焼き候補の累計観測 (drain前の残数)
+    pub fn hot_pending(&self) -> usize {
+        self.hot.len()
     }
 
     /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める
@@ -368,6 +391,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
+    // ブロック頭か (F1aの熱計上)。外から入った今この瞬間と、分岐の着地だけ真。
+    // **毎命令は数えない** — 毎命令の追加はB5/C5の実測で逆効果と出ている
+    let mut at_head = true;
 
     loop {
         let page = (pa >> 12) as usize;
@@ -375,12 +401,21 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
 
         let mut cached = None;
         if !m.dcache.entries.is_empty() {
-            let e = &m.dcache.entries[slot];
-            if e.tag == pa && e.gen == m.dcache.page_gen.get(page).copied().unwrap_or(0) {
+            let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+            let e = &mut m.dcache.entries[slot];
+            if e.tag == pa && e.gen == gen_now {
                 cached = Some((e.len, e.uop));
                 m.dcache.hits += 1;
+                if at_head && e.heat < JIT_HOT_THRESHOLD {
+                    e.heat += 1;
+                    if e.heat == JIT_HOT_THRESHOLD {
+                        // 閾値の瞬間に1回だけ積む (以後は飽和して静か)
+                        m.dcache.hot.push(pa);
+                    }
+                }
             }
         }
+        at_head = false;
         let (len, uop) = match cached {
             Some(x) => x,
             None => match decode::decode_at(m, pa) {
@@ -391,6 +426,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                                 tag: TAG_INVALID,
                                 gen: 0,
                                 len: 0,
+                                heat: 0,
                                 uop: Uop::Ret,
                             };
                             SLOTS
@@ -401,6 +437,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         tag: pa,
                         gen,
                         len,
+                        heat: 0,
                         uop,
                     };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
@@ -446,6 +483,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let new_lin = if m.cpu.ip == ip_linear {
             lin.wrapping_add(len as u32)
         } else {
+            at_head = true; // 分岐の着地 = ブロック頭 (F1aの熱計上の対象)
             m.cpu.lin(CS, m.cpu.ip)
         };
         if new_lin >> 12 != lin >> 12 {
