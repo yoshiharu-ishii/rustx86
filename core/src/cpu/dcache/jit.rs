@@ -9,11 +9,44 @@
 //! F1aの対象はレジスタとフラグしか触らない命令に限る:
 //! #PFが起き得ない = 巻き戻しが要らない = 生成コードに脱出点が要らないため、
 //! 最初の骨格から失敗系を締め出せる。
+//!
+//! F1b-1でメモリ**ロード**が加わった。フォールト脱出モデル (ADR-0008):
+//! ロードの前にヘルパでtranslateを試し、フォールトしそうなら状態を1つも
+//! 変えずにブロックを脱出する — 巻き戻しは相変わらず要らない。
 
-use super::{decode, Rm, Uop};
+use super::{decode, MemRef, Rm, Uop};
 use crate::Machine;
 
-/// レジスタ間で完結する命令 (F1aの語彙)。
+/// メモリオペランドの作り方 (JITの語彙)。coreの [`MemRef`] の公開鏡 —
+/// 実効アドレスは生成コードがレジスタの**今の**値から組み、セグメント適用と
+/// 変換はヘルパ (Rust) がやる
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitMem {
+    /// 基底レジスタ (-1 = 無し)
+    pub base: i8,
+    /// インデックスレジスタ (-1 = 無し)
+    pub index: i8,
+    pub scale: u8,
+    /// セグメント (デコード時に上書き規則まで解決済み)
+    pub seg: u8,
+    pub disp: u32,
+}
+
+impl From<MemRef> for JitMem {
+    fn from(m: MemRef) -> Self {
+        JitMem {
+            base: m.base,
+            index: m.index,
+            scale: m.scale,
+            seg: m.seg,
+            disp: m.disp,
+        }
+    }
+}
+
+/// JITの語彙: レジスタ間で完結する命令 (F1a) + メモリロード (F1b-1)。
+/// メモリに**書く**命令はまだ無い — ブロック内で世代 (page_gen) が動かない
+/// 前提はF1aから変わっていない。
 /// フラグの扱いは lazy flags (cc_*) の材料更新として生成する —
 /// C1で作ったcc_op方式がそのままJITのフラグモデルになる
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +71,14 @@ pub enum JitOp {
         scale: u8,
         disp: u32,
     },
+    /// mov r32, [mem] (F1b-1。フォールトしそうなら脱出)
+    MovRM { dst: u8, mem: JitMem },
+    /// ALU r32, [mem] — dst = alu(kind, dst, mem)。kind7 (CMP) はdstを書かない
+    AluRM { kind: u8, dst: u8, mem: JitMem },
+    /// cmp [mem], r32 (ALUグリッドのrm=dst形はロードだけで済むkind7のみ)
+    CmpMR { mem: JitMem, reg: u8 },
+    /// test [mem], r32 (フラグだけ)
+    TestMR { mem: JitMem, reg: u8 },
     /// 終端: 条件分岐 (取られたら ip += rel は命令長込みの相対)
     Jcc { cc: u8, rel: u32 },
     /// 終端: 無条件相対ジャンプ
@@ -64,6 +105,39 @@ fn convert(u: &Uop) -> Option<(JitOp, bool)> {
             reg,
             rm: Rm::Reg(src),
         } => JitOp::MovRR { dst: reg, src },
+        // ---- F1b-1: メモリロード (書かない形だけ。RMW/ストアはF1b-2) ----
+        Uop::MovRRm {
+            reg,
+            rm: Rm::Mem(mr),
+        } => JitOp::MovRM {
+            dst: reg,
+            mem: mr.into(),
+        },
+        Uop::AluRRm {
+            kind,
+            reg,
+            rm: Rm::Mem(mr),
+        } => JitOp::AluRM {
+            kind,
+            dst: reg,
+            mem: mr.into(),
+        },
+        // rm=dst形はkind7 (CMP) だけロードで済む — 他はメモリへ書き戻すので対象外
+        Uop::AluRmR {
+            kind: 7,
+            rm: Rm::Mem(mr),
+            reg,
+        } => JitOp::CmpMR {
+            mem: mr.into(),
+            reg,
+        },
+        Uop::TestRmR {
+            rm: Rm::Mem(mr),
+            reg,
+        } => JitOp::TestMR {
+            mem: mr.into(),
+            reg,
+        },
         Uop::MovRmImm {
             rm: Rm::Reg(dst),
             imm,
@@ -174,7 +248,10 @@ pub struct JitLayout {
 /// 毎命令の意味順序どおりに再現する (位置がずれると命令数の決定性が壊れる)。
 #[derive(Clone, Copy)]
 pub struct JitHook {
-    /// スロット番号を受け取り、そのJITブロックを実行して実行命令数を返す
+    /// スロット番号を受け取り、そのJITブロックを実行して実行命令数を返す。
+    /// **ブロックの全命令数より少ない返り値 = フォールト脱出** (F1b) —
+    /// 返した数までは完全に実行済み、次の命令は状態を1つも変えていない。
+    /// core側はその1命令をインタプリタでやり直す (skip_jit)
     pub enter: fn(slot: u32) -> u32,
 }
 

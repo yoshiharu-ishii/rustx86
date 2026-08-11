@@ -317,6 +317,26 @@ impl Machine {
         }
     }
 
+    /// JIT用の**記録しない**32bit読み (F1b、ADR-0008)。
+    ///
+    /// [`read32`](Self::read32) との違いは1点だけ — フォールトしそうなとき
+    /// `note_fault` せず Err を返す。生成コードはこれを合図に**状態を1つも
+    /// 変えずに脱出**し、インタプリタが同じ命令をやり直して正式に裁く
+    /// (#PFの記録・配送は従来経路)。
+    ///
+    /// 脱出は保守的でよい (余計に脱出しても、やり直しで同じ結果になる) ので、
+    /// ページ跨ぎは無条件で Err に倒す。Ok の道は read32 の速い道と同じ部品
+    /// (translate_for + read_phys32) — 意味論を二重実装しない
+    pub fn jit_try_read32(&self, addr: u32) -> Result<u32, ()> {
+        if addr & 0xFFF > 0xFFC {
+            return Err(()); // ページ跨ぎ (稀) はインタプリタに任せる
+        }
+        match self.translate_for(addr, false) {
+            Ok(pa) => Ok(self.read_phys32(pa)),
+            Err(_) => Err(()),
+        }
+    }
+
     pub fn write32(&mut self, addr: u32, val: u32) {
         if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
             return;
