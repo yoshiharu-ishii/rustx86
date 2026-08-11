@@ -181,6 +181,11 @@ pub struct Machine {
     /// **機械の状態ではない** — スナップショットに入れない。
     /// Noneなら従来どおり全部インタプリタ (常に動く退路)
     pub jit: Option<cpu::dcache::jit::JitHook>,
+    /// JITブロックの中で実行された命令数の累計 (観測用)。
+    /// ブロック実行ごとに清算のnを1回足すだけ — 毎命令の帳簿には触れない。
+    /// tsc に対する割合が「JITのカバレッジ」— 次の梃子が語彙 (カバレッジ) か
+    /// 単価 (インライン化) かを、この数字で決める
+    pub jit_instrs: u64,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -287,6 +292,7 @@ impl Machine {
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
             jit: None,
+            jit_instrs: 0,
             op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
