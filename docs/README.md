@@ -17,26 +17,26 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 
 | 文書 | 一言で |
 |---|---|
-| [アーキテクチャ](architecture.md) | CPUと装置の接続図。なぜPCはこの形なのか。**最初はここから** |
-| [JITの考え方と仕組み](jit.md) | インタプリタ/AOT/JITの違い、なぜ速くなるのか、結果論の台帳 |
-| [踏んだ罠の型](pitfalls.md) | 「教科書どおりに書いたのに罠」10型。他所でも踏み得るものだけ |
+| [アーキテクチャ](explanation/architecture.md) | CPUと装置の接続図。なぜPCはこの形なのか。**最初はここから** |
+| [JITの考え方と仕組み](explanation/jit.md) | インタプリタ/AOT/JITの違い、なぜ速くなるのか、結果論の台帳 |
+| [踏んだ罠の型](explanation/pitfalls.md) | 「教科書どおりに書いたのに罠」10型。他所でも踏み得るものだけ |
 
 ### 🔧 手を動かす (how-to — 作業のとき開く)
 
 | 文書 | 一言で |
 |---|---|
-| [ビルドの最小構成](build.md) | Rust導入〜wasm-packの中身、wasmの落とし穴 |
-| [perf.md の「起動経路の測り方」](perf.md#起動経路の測り方) | bootphase / headless / ブラウザでの測定コマンド |
+| [ビルドの最小構成](howto/build.md) | Rust導入〜wasm-packの中身、wasmの落とし穴 |
+| [perf.md の「起動経路の測り方」](reference/perf.md#起動経路の測り方) | bootphase / headless / ブラウザでの測定コマンド |
 | [ルートREADME](../README.md) | 実行方法・ロードマップ (Tier表) の本体 |
 
 ### 📖 引く (reference — 必要な行だけ見る台帳)
 
 | 文書 | 一言で |
 |---|---|
-| [CPU最適化の台帳](perf.md) | 地図: 現在地・北極星 (v86実測)・全量カタログ・測定の規律 |
-| [最適化の実験記](perf-log.md) | 物語: 日付つきの謎解きの経過。追記専用 |
-| [レジスタ一覧](registers.md) | 何があり、何を決め、何をまだ持たないか |
-| [CI — 何を見張らせるか](ci.md) | パイプラインの段構えと「どの事故を止めるか」 |
+| [CPU最適化の台帳](reference/perf.md) | 地図: 現在地・北極星 (v86実測)・全量カタログ・測定の規律 |
+| [最適化の実験記](reference/perf-log.md) | 物語: 日付つきの謎解きの経過。追記専用 |
+| [レジスタ一覧](reference/registers.md) | 何があり、何を決め、何をまだ持たないか |
+| [CI — 何を見張らせるか](reference/ci.md) | パイプラインの段構えと「どの事故を止めるか」 |
 
 ### ⚖️ 判断の記録 (ADR — なぜそうしたかを追う)
 
@@ -54,15 +54,15 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 
 ## 読む順番 (初見の人向けの道)
 
-1. **[アーキテクチャ](architecture.md)** — 図で全体像。扱っている問い:
+1. **[アーキテクチャ](explanation/architecture.md)** — 図で全体像。扱っている問い:
    なぜブートセクタは0x7C00か / なぜセグメントは16倍か / IVTを「OSが乗っ取る」とは /
    なぜ1981年の8254 PITが現代PCにも生きているのか / 32bit化は「命令が増える」ことなのか
-2. **[ビルドの最小構成](build.md)** — `wasm32-unknown-unknown`の「OS無し」とは /
+2. **[ビルドの最小構成](howto/build.md)** — `wasm32-unknown-unknown`の「OS無し」とは /
    wasm単体では文字列すら渡せないのになぜ`String`が返せるのか /
    wasmのメモリが伸びるとJSの`Uint8Array`に何が起きるのか
-3. **[CI](ci.md) → [perf.md](perf.md)** — 検証と測定の流儀。
+3. **[CI](reference/ci.md) → [perf.md](reference/perf.md)** — 検証と測定の流儀。
    「検査で見張るより、事故れない構造にする」の実例
-4. **[jit.md](jit.md) → [perf-log.md](perf-log.md) → [pitfalls.md](pitfalls.md)** —
+4. **[jit.md](explanation/jit.md) → [perf-log.md](reference/perf-log.md) → [pitfalls.md](explanation/pitfalls.md)** —
    最適化の旅を仕組み→経過→教訓の順で
 5. **ADRを0001から** — 判断の過程を時系列で追体験できる
 
@@ -88,9 +88,9 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 perf.mdが469行に膨らんだ反省 (2026-08-12の分冊) から、置き場の規則を固定する:
 
 1. **1ファイル1役割** — 地図 (引く) と物語 (読む) を同じファイルに書かない
-2. **実験の経過は [perf-log.md](perf-log.md) へ追記** — 日付見出しで足すだけ。
+2. **実験の経過は [perf-log.md](reference/perf-log.md) へ追記** — 日付見出しで足すだけ。
    perf.md側はカタログの状態欄とタグ (`exp/*`) への参照を1行更新する
-3. **横断の教訓は [pitfalls.md](pitfalls.md) へ** — 「型→サンプルコード→事件→検知」
+3. **横断の教訓は [pitfalls.md](explanation/pitfalls.md) へ** — 「型→サンプルコード→事件→検知」
    の並びで。rustx86固有のものは載せない (それはperf-logの仕事)
 4. **決定は ADR** — 追記はしても書き換えない。効いたのに見送る判断は
    賛否の議論と**復帰条件**まで書く (実例: ADR-0009)

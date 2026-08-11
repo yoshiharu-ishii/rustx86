@@ -3,7 +3,7 @@
 - 状態: **決定** (2026-08-11 ユーザー決定: 常設見送り・タグ保存・復帰条件つき)
 - 日付: 2026-08-11
 - 関連: [ADR-0008](0008-template-jit.md) (wasm凍結→汎用路線の文脈)、
-  [perf.md](../perf.md) (寝かせ台帳)、タグ [exp/pgo-build](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fpgo-build)、PR #64 (クローズ)
+  [perf.md](../reference/perf.md) (寝かせ台帳)、タグ [exp/pgo-build](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fpgo-build)、PR #64 (クローズ)
 
 ## 背景
 
