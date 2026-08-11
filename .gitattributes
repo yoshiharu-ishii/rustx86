@@ -1,0 +1,3 @@
+# シェルスクリプトはWindowsのチェックアウト (autocrlf=true) でもLFのまま展開する。
+# CRLFになった.shはGit Bashが「$'\r': command not found」で死ぬ
+*.sh text eol=lf
