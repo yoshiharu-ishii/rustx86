@@ -69,8 +69,8 @@ pub unsafe extern "C" fn rx86_jit_ld32(m: *const Machine, seg: i32, off: i32) ->
     let m = &*m;
     let la = m.cpu.lin(seg as usize, off as u32);
     match m.jit_try_read32(la) {
-        Ok(v) => v as i64,
-        Err(()) => 1i64 << 32,
+        Some(v) => v as i64,
+        None => 1i64 << 32,
     }
 }
 
@@ -739,11 +739,11 @@ mod tests {
     fn jit_try_read32_does_not_record_fault() {
         // 記録しない読み (F1b の核心): フォールトしそうでも pending_fault は無傷
         let m = Machine::with_profile(MachineProfile::pc_32bit(4));
-        // ページ跨ぎは無条件で Err (保守的な脱出)
-        assert!(m.jit_try_read32(0xFFD).is_err());
+        // ページ跨ぎは無条件で None (保守的な脱出)
+        assert!(m.jit_try_read32(0xFFD).is_none());
         assert!(m.pending_fault.get().is_none(), "跨ぎでも記録しない");
         // ページ内・RAM内は普通に読める
-        assert!(m.jit_try_read32(0x1000).is_ok());
+        assert!(m.jit_try_read32(0x1000).is_some());
         assert!(m.pending_fault.get().is_none());
     }
 
