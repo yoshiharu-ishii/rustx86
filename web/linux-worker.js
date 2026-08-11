@@ -136,6 +136,20 @@ let sliceSize = 1_000_000;
 // なったため (実際になった)。飛ばした量そのものを数えるのが正確である
 const INSTR_PER_GUEST_MS = (1_193_182 * 64) / 1000;
 
+// 次スライスの予約 (クランプ回避)。
+//
+// `setTimeout(loop, 0)` はHTML仕様の「ネストが5段を超えたタイマは最低4ms」に
+// 当たる。スライス目標が8msなので **8ms働いて4ms強制休憩 = デューティ67%** —
+// ブラウザだけheadlessより×1.5遅かった「タブ税」の正体がこれだった。
+// MessageChannelのport.postMessageはクランプの無いマクロタスクで、
+// キー入力などworkerへのメッセージも間に割り込める (同じFIFOに並ぶ)。
+// アイドル時の「実時間で待つ」setTimeoutは意図した待ちなのでそのまま
+const wake = new MessageChannel();
+wake.port1.onmessage = () => loop();
+function scheduleNext() {
+  wake.port2.postMessage(0);
+}
+
 function loop() {
   if (!running || !emu) return;
   const t0 = performance.now();
@@ -201,6 +215,6 @@ function loop() {
     sliceSize = Math.max(100_000, Math.min(5_000_000, Math.round((sliceSize * target) / dt)));
   }
 
-  // 次のスライス。setTimeout(0) でメッセージを捌く隙を作る
-  setTimeout(loop, 0);
+  // 次のスライス。マクロタスク境界を挟むのでメッセージを捌く隙は保たれる
+  scheduleNext();
 }
