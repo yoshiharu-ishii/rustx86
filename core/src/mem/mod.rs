@@ -325,15 +325,15 @@ impl Machine {
     /// (#PFの記録・配送は従来経路)。
     ///
     /// 脱出は保守的でよい (余計に脱出しても、やり直しで同じ結果になる) ので、
-    /// ページ跨ぎは無条件で Err に倒す。Ok の道は read32 の速い道と同じ部品
+    /// ページ跨ぎは無条件で None に倒す。Some の道は read32 の速い道と同じ部品
     /// (translate_for + read_phys32) — 意味論を二重実装しない
-    pub fn jit_try_read32(&self, addr: u32) -> Result<u32, ()> {
+    pub fn jit_try_read32(&self, addr: u32) -> Option<u32> {
         if addr & 0xFFF > 0xFFC {
-            return Err(()); // ページ跨ぎ (稀) はインタプリタに任せる
+            return None; // ページ跨ぎ (稀) はインタプリタに任せる
         }
         match self.translate_for(addr, false) {
-            Ok(pa) => Ok(self.read_phys32(pa)),
-            Err(_) => Err(()),
+            Ok(pa) => Some(self.read_phys32(pa)),
+            Err(_) => None,
         }
     }
 
