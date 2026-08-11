@@ -52,7 +52,7 @@ pub struct Emulator {
     /// JITランタイムの台帳 (F1a)。Boxなのはhookのctxとして住所を固定するため
     jit_rt: Box<jit::JitRt>,
     /// drain_job で取り出し中のジョブの (pa, gen, n)。install_blockで消費
-    pending_job: Option<(u32, u32, u32)>,
+    pending_job: Option<(u32, u32)>,
 }
 
 impl Emulator {
@@ -213,41 +213,27 @@ impl Emulator {
     // ---------- JIT (F1a、ADR-0008) ----------
 
     /// JITを有効化する。coreにフックを挿し、以後ブロック頭で焼けたコードに
-    /// 任せる (無ければインタプリタ)。JS側で `rx86_call_block` を用意すること
+    /// 任せる (無ければインタプリタ)。実行の判定材料は core の Entry が持つ
     pub fn jit_enable(&mut self) {
-        let ctx = &*self.jit_rt as *const jit::JitRt as usize;
-        self.m.jit = Some(rustx86_core::jit::JitHook {
-            ctx,
-            try_enter: jit::try_enter,
-        });
+        self.m.jit = Some(rustx86_core::jit::JitHook { enter: jit::enter });
     }
 
-    /// 焼き上がってinstantiate待ちのジョブを1件取り出す ({pa,gen,n,bytes})。
-    /// JS側が WebAssembly.Instance を作って関数を配列に足し、install_block を呼ぶ
+    /// 焼き上がってinstantiate待ちのジョブを1件取り出す (バイト列)。
+    /// JS側が WebAssembly.Instance を作り、関数テーブルへ table.set し、
+    /// そのスロット番号で install_block を呼ぶ
     pub fn drain_job(&mut self) -> Option<js_sys::Uint8Array> {
-        // (pa,gen,n) はinstall_blockで受け直す — ここではバイト列だけ渡す。
-        // ジョブの本体はメンバに退避しておく
         let job = self.jit_rt.take_job()?;
         let bytes = js_sys::Uint8Array::from(job.bytes.as_slice());
-        self.pending_job = Some((job.pa, job.gen, job.n));
+        self.pending_job = Some((job.pa, job.n));
         Some(bytes)
     }
 
-    /// drain_job で取り出したジョブの (pa, gen, n) — JSが据え付け時に使う
-    pub fn pending_pa(&self) -> u32 {
-        self.pending_job.map(|j| j.0).unwrap_or(0)
-    }
-    pub fn pending_gen(&self) -> u32 {
-        self.pending_job.map(|j| j.1).unwrap_or(0)
-    }
-    pub fn pending_n(&self) -> u32 {
-        self.pending_job.map(|j| j.2).unwrap_or(0)
-    }
-
-    /// JS側が instantiate して関数配列に足した後、その添字を core の台帳へ登録
-    pub fn install_block(&mut self, idx: u32) {
-        if let Some((pa, gen, n)) = self.pending_job.take() {
-            self.jit_rt.install(pa, gen, n, idx);
+    /// JS が table.set したスロット番号を受け取り、**core の Entry** へ据える。
+    /// 以後そのブロック頭の訪問は Entry 読みだけでJIT入口を判定できる (hashmap不要)
+    pub fn install_block(&mut self, slot: u32) {
+        if let Some((pa, n)) = self.pending_job.take() {
+            self.m.dcache.set_jit(pa, slot, n as u16);
+            self.jit_rt.note_installed();
         }
     }
 
