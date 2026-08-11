@@ -2,7 +2,7 @@
 
 - 状態: **決定** (2026-08-11 ユーザー決定: 割り込み受付点は**案A** — 毎命令の受付点を維持)
 - 日付: 2026-08-11
-- 関連: [ADR-0007](0007-cpu-optimization-steps.md)、[perf.md](../perf.md)
+- 関連: [ADR-0007](0007-cpu-optimization-steps.md)、[perf.md](../reference/perf.md)
 
 ## 背景 — なぜJITしかないのか
 
