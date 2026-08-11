@@ -279,6 +279,48 @@ pub fn pop32(m: &mut Machine) -> u32 {
     v
 }
 
+// ---- JIT用の記録しないスタック操作 (F1b-3、ADR-0008のフォールト脱出モデル) ----
+//
+// push32/pop32 の「成功したときだけSPを確定する」順序はそのままに、
+// フォールトしそうなときは note_fault せず false/None で合図する —
+// SPもレジスタも無傷なので、インタプリタが同じ命令を白紙からやり直せる。
+// 幅の刈り込み (SS.big) も上と同じ関数を使う — 意味論の原本は1つ
+
+impl Machine {
+    /// JIT用push。false = 脱出 (何も変えていない)
+    pub fn jit_try_push32(&mut self, v: u32) -> bool {
+        let sp = sp_wrap(self, sp_read(self).wrapping_sub(4));
+        let la = self.cpu.lin(SS, sp);
+        if !self.jit_try_write32(la, v) {
+            return false;
+        }
+        sp_write(self, sp);
+        true
+    }
+
+    /// JIT用pop。None = 脱出 (SP不変)
+    pub fn jit_try_pop32(&mut self) -> Option<u32> {
+        let sp = sp_read(self);
+        let v = self.jit_try_read32(self.cpu.lin(SS, sp))?;
+        sp_write(self, sp.wrapping_add(4));
+        Some(v)
+    }
+
+    /// JIT用leave (SP←BP、BB←pop)。false = 脱出 (SP/BP無傷)。
+    /// インタプリタの exec::Leave (sp_write(bp)→pop32) と同じ最終状態にする —
+    /// popの読みを**先に**試すので、SPを動かした後に失敗する道が無い
+    pub fn jit_try_leave(&mut self) -> bool {
+        let bp = self.cpu.regs[super::BP];
+        let sp = sp_wrap(self, bp);
+        let Some(v) = self.jit_try_read32(self.cpu.lin(SS, sp)) else {
+            return false;
+        };
+        sp_write(self, sp.wrapping_add(4));
+        self.cpu.regs[super::BP] = v;
+        true
+    }
+}
+
 /// 幅を実行時に選ぶpush
 pub fn push_w(m: &mut Machine, v: u32, wide: bool) {
     if wide {

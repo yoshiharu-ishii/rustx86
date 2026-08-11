@@ -80,6 +80,33 @@ fn main() {
                     );
                 }
             }
+            // dcacheヒット側の動的uop分布 — JIT語彙の内外 (語彙拡大の優先度は
+            // この実測で決める。カバレッジの分母はこちらが本体)
+            #[cfg(feature = "opstats")]
+            {
+                let (inside, ref outside) = m.jit_vocab_counts;
+                let out_total: u64 = outside.values().sum();
+                let all = inside + out_total;
+                if all > 0 {
+                    println!(
+                        "\nJIT語彙 (dcacheヒット側 {}M命令): 語彙内 {:.1}% / 語彙外 {:.1}%",
+                        all / 1_000_000,
+                        inside as f64 * 100.0 / all as f64,
+                        out_total as f64 * 100.0 / all as f64
+                    );
+                    let mut v: Vec<(&&str, &u64)> = outside.iter().collect();
+                    v.sort_by_key(|&(_, c)| std::cmp::Reverse(*c));
+                    println!("語彙外の上位 (これが語彙拡大の買い物リスト):");
+                    for (name, c) in v.iter().take(15) {
+                        println!(
+                            "  {:<28} {:>6}M  {:4.1}%",
+                            name,
+                            **c / 1_000_000,
+                            **c as f64 * 100.0 / all as f64
+                        );
+                    }
+                }
+            }
             return;
         }
     }
