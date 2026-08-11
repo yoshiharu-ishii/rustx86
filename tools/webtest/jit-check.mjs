@@ -27,9 +27,8 @@ async function freshModule() {
 async function boot(useJit) {
   const { mod, exports } = await freshModule();
   resetJit();
-  setupJit(mod, exports);
   const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
-  if (useJit) emu.jit_enable();
+  if (useJit) { setupJit(emu, exports); emu.jit_enable(); }
 
   let serial = '', n = 0;
   const CHUNK = 50_000_000, CAP = 3_000_000_000;
