@@ -286,7 +286,7 @@ struct Entry {
 
 /// この熱に達したブロック頭を「焼き候補」としてフックに通知する。
 /// 分岐着地でしか数えないので、実行回数ではおよそ×(ブロック長)倍に相当
-const JIT_HOT_THRESHOLD: u16 = 1024;
+const JIT_HOT_THRESHOLD: u16 = 64;
 
 pub struct DecodeCache {
     /// 直接マップ。**最初の32bitデコードまで確保しない** —
@@ -305,6 +305,14 @@ pub struct DecodeCache {
     /// JIT側 (wasmシェル/ネイティブランナー) がdrainして焼く。
     /// coreは積むだけ — 生成器を知らない (無依存の維持)
     hot: Vec<u32>,
+    /// 据え付け済みブロックの永続台帳: pa → (スロット, 命令数, 焼いた時のページ世代)。
+    ///
+    /// Entryは直接マップなので、衝突するとfillで上書きされ jit_n が消える —
+    /// ブート実測でfill 15M回/32Kスロット (1スロット~460回転) の環境では、
+    /// 据え付けた入口が数十万命令で剥がれ、カバレッジが8%で頭打ちになった。
+    /// この台帳から **fillのついでに** 埋め直す (照合はfill時だけ = 全命令の~2.6%。
+    /// ホットパスに辞書は持ち込まない)。genの一致で自己書き換え後の誤回収を防ぐ
+    jit_map: std::collections::HashMap<u32, (u32, u16, u32)>,
 }
 
 impl DecodeCache {
@@ -318,6 +326,7 @@ impl DecodeCache {
             fills: 0,
             fallbacks: 0,
             hot: Vec::new(),
+            jit_map: std::collections::HashMap::new(),
         }
     }
 
@@ -342,6 +351,9 @@ impl DecodeCache {
     /// (hashmap不要)。Entry が既に別番地なら黙って捨てる — JITブロックは
     /// テーブルに残るが誰も指さない (再訪で jit_n=0 のまま=インタプリタ)
     pub fn set_jit(&mut self, pa: u32, slot: u32, n: u16) {
+        // 永続台帳へ (Entryが衝突で剥がれてもfillで埋め直せる)
+        let gen = self.page_gen_of(pa);
+        self.jit_map.insert(pa, (slot, n, gen));
         if self.entries.is_empty() {
             return;
         }
@@ -379,6 +391,72 @@ impl DecodeCache {
                 }
             }
         }
+    }
+}
+
+/// uopの粗い名前 (opstatsの分布表示用)。メモリ形かどうかで分ける
+#[cfg(feature = "opstats")]
+fn uop_name(u: &Uop) -> &'static str {
+    let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
+    match u {
+        Uop::MovRmR { rm, .. } => {
+            if mem(rm) {
+                "mov [m],r (対象内のはず)"
+            } else {
+                "mov r,r"
+            }
+        }
+        Uop::Mov8RmR { rm, .. } => {
+            if mem(rm) {
+                "mov8 [m],r"
+            } else {
+                "mov8 r,r"
+            }
+        }
+        Uop::Mov8RRm { rm, .. } => {
+            if mem(rm) {
+                "mov8 r,[m]"
+            } else {
+                "mov8 r,r"
+            }
+        }
+        Uop::Alu8RmR { .. } | Uop::Alu8RRm { .. } | Uop::Alu8AImm { .. } => "alu8",
+        Uop::Grp18RmImm { .. } => "grp1-8",
+        Uop::Test8RmR { .. } => "test8",
+        Uop::MovRm8Imm { .. } => "mov8 [m],imm",
+        Uop::Mov8AMoffs { .. } => "mov8 moffs",
+        Uop::MovAMoffs { .. } => "mov moffs",
+        Uop::ShiftRmImm { rm, .. } | Uop::ShiftRmCl { rm, .. } => {
+            if mem(rm) {
+                "shift [m]"
+            } else {
+                "shift r"
+            }
+        }
+        Uop::MovzxB { rm, .. } => {
+            if mem(rm) {
+                "movzx8 r,[m]"
+            } else {
+                "movzx8 r,r"
+            }
+        }
+        Uop::MovzxW { rm, .. } => {
+            if mem(rm) {
+                "movzx16 r,[m]"
+            } else {
+                "movzx16 r,r"
+            }
+        }
+        Uop::Grp3b { .. } => "grp3-8",
+        Uop::Grp3w { .. } => "grp3",
+        Uop::Grp5 { .. } => "grp5 (inc/call/jmp/push rm)",
+        Uop::SetCC { .. } => "setcc",
+        Uop::ImulRRm { .. } => "imul",
+        Uop::StrOne { .. } => "string単発",
+        Uop::CallRel { .. } => "call rel (対象内のはず)",
+        Uop::Ret => "ret (対象内のはず)",
+        Uop::Leave => "leave (対象内のはず)",
+        _ => "その他 (対象内のはず)",
     }
 }
 
@@ -424,6 +502,13 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     // ブロック頭か (F1aの熱計上とJIT入口)。外から入った今この瞬間と、
     // 分岐の着地だけ真。**毎命令は数えない** — B5/C5の実測で逆効果と出ている
     let mut at_head = true;
+    // タイル張り (F1b-3): JITブロックが分岐以外 (語彙外の手前・cap) で終わったとき、
+    // 間の1命令をインタプリタで挟んで**その次を新しいブロック頭**として育てる。
+    // これが無いとブロック頭は分岐の着地点しか育たず、語彙内81%に対して
+    // カバレッジ2.3%しか出なかった (熱い直線の頭数命令だけ焼けて、残りが
+    // 全部インタプリタに落ちる)。頭は増えるが、熱計上は相変わらず頭だけ —
+    // 毎命令カウントの逆効果 (B5/C5) は踏まない
+    let mut head_pending = false;
     // tick直後の1命令はインタプリタで実行する印。割り込みの受付は
     // 「tickの次の1命令を実行した後」— この位置をJITでずらさないための約束
     // JITフックはループの外で1回だけ見る (Copy)。**None なら退路は完全に
@@ -474,6 +559,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                     let n = (h.enter)(jslot);
                     let n64 = n as u64;
                     m.jit_instrs = m.jit_instrs.wrapping_add(n64);
+                    m.jit_entries += 1;
                     // フォールト脱出 (F1b): ブロックが途中で戻った = 次の命令の
                     // メモリアクセスがフォールトしそう。その1命令はインタプリタで
                     // やり直す (guard込み・#PF配送も従来経路)。JITに再入すると
@@ -520,6 +606,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         // するため、次の1命令はJITに入らず下の本体で実行する
                         skip_jit = true;
                     }
+                    // タイル張り: この着地に焼けたブロックが無くインタプリタで
+                    // 1命令実行することになったら、その次を新しい頭にする
+                    head_pending = true;
                     continue; // at_headは真のまま — ブロックを連続でJITできる
                 }
             }
@@ -545,13 +634,23 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         ];
                     }
                     let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+                    // 焼けたブロックの回収 (F1b-3): 衝突で剥がれた入口を
+                    // fillのついでに台帳から埋め直す (JIT有効時のみ)
+                    let (jit_slot, jit_n) = if jit_hook.is_some() {
+                        match m.dcache.jit_map.get(&pa) {
+                            Some(&(s, n, g)) if g == gen => (s, n),
+                            _ => (0, 0),
+                        }
+                    } else {
+                        (0, 0)
+                    };
                     m.dcache.entries[slot] = Entry {
                         tag: pa,
                         gen,
                         len,
                         heat: 0,
-                        jit_n: 0,
-                        jit_slot: 0,
+                        jit_n,
+                        jit_slot,
                         uop,
                     };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
@@ -570,6 +669,18 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 }
             },
         };
+
+        // 計測 (opstats時のみ): dcacheヒット側の動的uop分布。
+        // JIT語彙の内外と、外なら何のuopかを数える — 語彙拡大の優先度は
+        // 推測でなくこの実測で決める
+        #[cfg(feature = "opstats")]
+        {
+            if jit::in_vocab(&uop) {
+                m.jit_vocab_counts.0 += 1;
+            } else {
+                *m.jit_vocab_counts.1.entry(uop_name(&uop)).or_insert(0) += 1;
+            }
+        }
 
         // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
         // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
@@ -595,9 +706,13 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         }
         // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
         let new_lin = if m.cpu.ip == ip_linear {
+            // タイル張り: 直前がJITブロックだったなら、挟んだこの1命令の
+            // 次を新しい頭に (分岐の着地でなくても熱計上とJIT入口の対象)
+            at_head = std::mem::take(&mut head_pending);
             lin.wrapping_add(len as u32)
         } else {
             at_head = true; // 分岐の着地 = ブロック頭 (F1aの熱計上の対象)
+            head_pending = false;
             m.cpu.lin(CS, m.cpu.ip)
         };
         if new_lin >> 12 != lin >> 12 {

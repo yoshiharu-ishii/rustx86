@@ -56,15 +56,17 @@ fn reg_only_block_until_branch() {
 }
 
 #[test]
-fn mem_ops_join_but_stack_terminates() {
-    // F1b: ロードもストアもRMWもブロックに入り、語彙外 (push) の手前で切れる。
-    // mov eax,1 / mov ecx,[ebx+4] / add edx,[esi] / mov [edi],eax / push eax
+fn mem_and_stack_ops_join_until_ret() {
+    // F1b: ロード・ストア・RMW・スタック形が全部ブロックに入り、retで終端する。
     let code = [
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-        0x8B, 0x4B, 0x04, // mov ecx, [ebx+4] (F1b-1で語彙入り)
+        0x8B, 0x4B, 0x04, // mov ecx, [ebx+4] (F1b-1)
         0x03, 0x16, // add edx, [esi]
-        0x89, 0x07, // mov [edi], eax (F1b-2で語彙入り)
-        0x50, // push eax ← 語彙外。ここで切れる
+        0x89, 0x07, // mov [edi], eax (F1b-2)
+        0x50, // push eax (F1b-3)
+        0x59, // pop ecx
+        0xC3, // ret ← 終端
+        0x40, // inc eax (届かない)
     ];
     let m = machine_with_code(&code, 0x2000);
     let b = jit::collect_block(&m, 0x2000, 32).unwrap();
@@ -104,14 +106,17 @@ fn mem_ops_join_but_stack_terminates() {
                 },
                 src: 0,
             },
+            JitOp::PushR { src: 0 },
+            JitOp::PopR { dst: 1 },
+            JitOp::Ret,
         ]
     );
 }
 
 #[test]
 fn none_when_head_is_not_jittable() {
-    // 先頭からスタック形なら焼く物が無い
-    let code = [0x50, 0x51]; // push eax / push ecx
+    // 先頭から8bitメモリ形なら焼く物が無い
+    let code = [0x00, 0x03]; // add [ebx], al
     let m = machine_with_code(&code, 0x3000);
     assert!(jit::collect_block(&m, 0x3000, 32).is_none());
 }

@@ -107,6 +107,37 @@ pub unsafe extern "C" fn rx86_jit_rmw32(
     m.jit_try_rmw32(la, kind as u8, b as u32) as i32
 }
 
+/// push (F1b-3)。SPの確定は成功時だけ — push32と同じ順序。
+/// 返り値: 1 = 完了 / 0 = 脱出 (SPもメモリも無傷)
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_push32(m: *mut Machine, val: i32) -> i32 {
+    (*m).jit_try_push32(val as u32) as i32
+}
+
+/// pop (F1b-3)。返り値: 成功 = 値 (上位32bit=0) / 脱出 = 1<<32 (SP不変)
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_pop32(m: *mut Machine) -> i64 {
+    match (*m).jit_try_pop32() {
+        Some(v) => v as i64,
+        None => 1i64 << 32,
+    }
+}
+
+/// leave (F1b-3)。返り値: 1 = 完了 / 0 = 脱出 (SP/BP無傷)
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_leave(m: *mut Machine) -> i32 {
+    (*m).jit_try_leave() as i32
+}
+
 // ---- wasmバイト列の組み立て (依存なしの手組み — jit-probeの移植) ----
 
 fn uleb(out: &mut Vec<u8>, mut n: u64) {
@@ -263,7 +294,15 @@ impl Gen<'_> {
         self.code.push(CALL);
         uleb(&mut self.code, 2); // import 2 = e.ld32
         self.local_set(L_V64);
-        // 上位32bitが立っていたら脱出
+        self.escape_if_v64_hi();
+        // 成功: 下位32bitが値
+        self.local_get(L_V64);
+        self.code.push(I32_WRAP_I64);
+    }
+
+    /// i64返しヘルパの合図を裁く: L_V64 の上位32bitが立っていたら脱出。
+    /// 事前に local_set(L_V64) しておくこと
+    fn escape_if_v64_hi(&mut self) {
         self.local_get(L_V64);
         self.code.push(I64_CONST);
         sleb(&mut self.code, 32);
@@ -272,9 +311,6 @@ impl Gen<'_> {
         self.code.extend_from_slice(&[IF, BT_EMPTY]);
         self.emit_escape();
         self.code.push(END);
-        // 成功: 下位32bitが値
-        self.local_get(L_V64);
-        self.code.push(I32_WRAP_I64);
     }
 
     /// 脱出の本体: ip = ブロック頭 + cur_ip_off、返り値 = cur_k
@@ -494,8 +530,51 @@ impl Gen<'_> {
                 self.local_set(L_B);
                 self.alu_core(4, None);
             }
+            // ---- F1b-3: スタック形 (SP確定は成功時だけ — ヘルパが担保) ----
+            JitOp::PushR { src } => {
+                self.iconst(self.maddr);
+                self.load(self.reg_addr(src));
+                self.code.push(CALL);
+                uleb(&mut self.code, 5); // import 5 = e.push32
+                self.escape_if_zero();
+            }
+            JitOp::PushI { imm } => {
+                self.iconst(self.maddr);
+                self.iconst(imm);
+                self.code.push(CALL);
+                uleb(&mut self.code, 5);
+                self.escape_if_zero();
+            }
+            JitOp::PopR { dst } => {
+                self.iconst(self.reg_addr(dst) as u32);
+                self.iconst(self.maddr);
+                self.code.push(CALL);
+                uleb(&mut self.code, 6); // import 6 = e.pop32
+                self.local_set(L_V64);
+                self.escape_if_v64_hi();
+                self.local_get(L_V64);
+                self.code.push(I32_WRAP_I64);
+                self.store_op(); // pop esp もこの順で正しい (SP更新→上書き)
+            }
+            JitOp::Leave => {
+                self.iconst(self.maddr);
+                self.code.push(CALL);
+                uleb(&mut self.code, 7); // import 7 = e.leave
+                self.escape_if_zero();
+            }
+            JitOp::XchgA { reg } => {
+                // eAX ↔ reg (reg=0 の 0x90 nop も自分と交換で正しい)
+                self.load(self.reg_addr(0));
+                self.local_set(L_A);
+                self.iconst(self.reg_addr(0) as u32);
+                self.load(self.reg_addr(reg));
+                self.store_op();
+                self.store_local(self.reg_addr(reg), L_A);
+            }
             // 終端はcompile_blockが面倒を見る (ipの帳尻)
-            JitOp::Jcc { .. } | JitOp::Jmp { .. } => unreachable!("終端はemit_exitで扱う"),
+            JitOp::Jcc { .. } | JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret => {
+                unreachable!("終端はcompile_blockの出口で扱う")
+            }
         }
     }
 }
@@ -511,8 +590,18 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
         cur_ip_off: 0,
     };
 
+    // 終端の種類 (出口の形が違う)
+    enum Term {
+        Jcc { cc: u8, rel: u32 },
+        Jmp { rel: u32 },
+        Call { rel: u32 },
+        Ret,
+    }
+
     // 本体: 終端以外を順に。ipは触らない (通常出口で1回 —
-    // フォールト脱出だけが emit_load32 の中で途中のipを書く)
+    // フォールト脱出だけが途中のipを書く)。ループを抜けた時点の
+    // cur_k/cur_ip_off は終端命令のもの — 終端の脱出 (call/retのpush/pop) が
+    // そのまま正しい座標で逃げられる
     let mut term = None;
     let mut total_len: u32 = 0;
     for (i, &(len, ref op)) in block.ops.iter().enumerate() {
@@ -520,61 +609,107 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
         g.cur_ip_off = total_len;
         total_len += len as u32;
         match *op {
-            JitOp::Jcc { cc, rel } => term = Some((cc as i32, rel, true)),
-            JitOp::Jmp { rel } => term = Some((0, rel, false)),
+            JitOp::Jcc { cc, rel } => term = Some(Term::Jcc { cc, rel }),
+            JitOp::Jmp { rel } => term = Some(Term::Jmp { rel }),
+            JitOp::CallRel { rel } => term = Some(Term::Call { rel }),
+            JitOp::Ret => term = Some(Term::Ret),
             _ => g.op(op),
         }
     }
 
-    // 出口: ip = ip + total_len (+ 分岐が取られたら rel)
-    g.iconst(lay.ip as u32);
-    g.load(lay.ip);
+    // 出口: ipの帳尻と (call/retなら) スタック操作
     match term {
-        Some((cc, rel, conditional)) => {
-            if conditional {
-                // select(total+rel, total, cond)
-                g.iconst(total_len.wrapping_add(rel));
-                g.iconst(total_len);
-                g.iconst(g.maddr);
-                g.iconst(cc as u32);
-                g.code.push(CALL);
-                uleb(&mut g.code, 1); // import 1 = e.cond
-                g.code.push(SELECT);
-            } else {
-                g.iconst(total_len.wrapping_add(rel));
-            }
+        None => {
+            // ip = ip + total_len
+            g.iconst(lay.ip as u32);
+            g.load(lay.ip);
+            g.iconst(total_len);
+            g.code.push(I32_ADD);
+            g.store_op();
         }
-        None => g.iconst(total_len),
+        Some(Term::Jmp { rel }) => {
+            g.iconst(lay.ip as u32);
+            g.load(lay.ip);
+            g.iconst(total_len.wrapping_add(rel));
+            g.code.push(I32_ADD);
+            g.store_op();
+        }
+        Some(Term::Jcc { cc, rel }) => {
+            // ip = ip + select(total+rel, total, cond)
+            g.iconst(lay.ip as u32);
+            g.load(lay.ip);
+            g.iconst(total_len.wrapping_add(rel));
+            g.iconst(total_len);
+            g.iconst(g.maddr);
+            g.iconst(cc as u32);
+            g.code.push(CALL);
+            uleb(&mut g.code, 1); // import 1 = e.cond
+            g.code.push(SELECT);
+            g.code.push(I32_ADD);
+            g.store_op();
+        }
+        Some(Term::Call { rel }) => {
+            // 戻り番地 (= ip + total_len) をpush。ここが脱出点 —
+            // 失敗ならSPもipも無傷でインタプリタがやり直す
+            g.iconst(g.maddr);
+            g.load(lay.ip);
+            g.iconst(total_len);
+            g.code.push(I32_ADD);
+            g.code.push(CALL);
+            uleb(&mut g.code, 5); // import 5 = e.push32
+            g.escape_if_zero();
+            // ip = ip + total_len + rel
+            g.iconst(lay.ip as u32);
+            g.load(lay.ip);
+            g.iconst(total_len.wrapping_add(rel));
+            g.code.push(I32_ADD);
+            g.store_op();
+        }
+        Some(Term::Ret) => {
+            // popした値が次のip。popが脱出点
+            g.iconst(g.maddr);
+            g.code.push(CALL);
+            uleb(&mut g.code, 6); // import 6 = e.pop32
+            g.local_set(L_V64);
+            g.escape_if_v64_hi();
+            g.iconst(lay.ip as u32);
+            g.local_get(L_V64);
+            g.code.push(I32_WRAP_I64);
+            g.store_op();
+        }
     }
-    g.code.push(I32_ADD);
-    g.store_op();
 
-    // 返り値: 実行した命令数 (F1aは常に全部)
+    // 返り値: 実行した命令数 (脱出しなかったら全部)
     g.iconst(block.ops.len() as u32);
     g.code.push(END);
 
     // ---- モジュールに包む ----
     let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
     // type: [()->i32, (i32)->i32, (i32,i32)->i32, (i32,i32,i32)->i64,
-    //        (i32×4)->i32, (i32×5)->i32]
+    //        (i32×4)->i32, (i32×5)->i32, (i32)->i64]
     let mut b = Vec::new();
-    uleb(&mut b, 6);
+    uleb(&mut b, 7);
     b.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7e]);
     b.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    b.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7e]);
     section(&mut m, 1, &b);
-    // import: e.cf/e.cond/e.ld32/e.st32/e.rmw32 (func)、e.m (memory min1)
+    // import: e.cf/e.cond/e.ld32/e.st32/e.rmw32/e.push32/e.pop32/e.leave (func)、
+    //         e.m (memory min1)
     let mut b = Vec::new();
-    uleb(&mut b, 6);
+    uleb(&mut b, 9);
     for (name, desc) in [
         ("cf", &[0x00, 0x01][..]),
         ("cond", &[0x00, 0x02][..]),
         ("ld32", &[0x00, 0x03][..]),
         ("st32", &[0x00, 0x04][..]),
         ("rmw32", &[0x00, 0x05][..]),
+        ("push32", &[0x00, 0x02][..]),
+        ("pop32", &[0x00, 0x06][..]),
+        ("leave", &[0x00, 0x01][..]),
         ("m", &[0x02, 0x00, 0x01][..]),
     ] {
         uleb(&mut b, 1);
@@ -586,8 +721,8 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
     section(&mut m, 2, &b);
     // function: [type0]
     section(&mut m, 3, &[1, 0x00]);
-    // export: "b" = func 5 (関数import 5本の後)
-    section(&mut m, 7, &[1, 1, b'b', 0x00, 5]);
+    // export: "b" = func 8 (関数import 8本の後)
+    section(&mut m, 7, &[1, 1, b'b', 0x00, 8]);
     // code: locals (i32 ×4, i64 ×1) + 本体
     let mut body = Vec::new();
     body.extend_from_slice(&[2, 4, 0x7f, 1, 0x7e]); // 2グループ: i32×4, i64×1
@@ -642,18 +777,21 @@ impl JitRt {
             if !self.compiled.insert(pa) {
                 continue; // 焼き済み
             }
-            let Some(blk) = rustx86_core::jit::collect_block(m, pa, 32) else {
-                continue;
-            };
-            // 1命令のブロックは呼び出しの税で赤字 — 焼かない
-            if blk.ops.len() < 2 {
-                continue;
+            // 走路ごと焼く (F1b-3タイル焼き): 語彙外の1命令を挟んだ後続の
+            // ブロックも一緒に。入口は実行時のタイル張り (head_pending) が作る
+            for blk in rustx86_core::jit::collect_run(m, pa, 32, 8) {
+                if blk.ops.len() < 2 {
+                    continue; // 1命令のブロックは呼び出しの税で赤字 — 焼かない
+                }
+                if blk.head_pa != pa && !self.compiled.insert(blk.head_pa) {
+                    continue; // 後続セグメントが焼き済みならそれだけ飛ばす
+                }
+                self.jobs.push(Job {
+                    pa: blk.head_pa,
+                    n: blk.ops.len() as u32,
+                    bytes: compile_block(&blk, &lay, maddr),
+                });
             }
-            self.jobs.push(Job {
-                pa,
-                n: blk.ops.len() as u32,
-                bytes: compile_block(&blk, &lay, maddr),
-            });
         }
     }
 
@@ -766,6 +904,22 @@ mod tests {
                 0x83, 0x7F, 0x04, 0x00, // cmp dword [edi+4],0 (Grp1 kind7=ロード)
                 0x75, 0xEC, // jne
             ],
+            // F1b-3: スタック形 (関数プロローグ〜エピローグの形) — call終端
+            &[
+                0x55, // push ebp
+                0x89, 0xE5, // mov ebp,esp… は 89 (rm=ebp) レジスタ形
+                0x51, // push ecx
+                0x68, 0x78, 0x56, 0x34, 0x12, // push 0x12345678
+                0x59, // pop ecx
+                0x90, // nop (xchg eax,eax)
+                0xE8, 0x10, 0x00, 0x00, 0x00, // call +0x10
+            ],
+            // F1b-3: leave + ret 終端
+            &[
+                0x8B, 0x45, 0xFC, // mov eax,[ebp-4]
+                0xC9, // leave
+                0xC3, // ret
+            ],
         ];
         for (i, code) in cases.iter().enumerate() {
             let (_m, blk, lay) = block_from(code);
@@ -789,7 +943,7 @@ mod tests {
             &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
         );
         // export "b" が居る
-        let needle = [1, 1, b'b', 0x00, 5];
+        let needle = [1, 1, b'b', 0x00, 8];
         assert!(
             wasm.windows(needle.len()).any(|w| w == needle),
             "export b が無い"
@@ -832,18 +986,19 @@ mod tests {
 
     #[test]
     fn mem_ops_join_the_block_and_validate() {
-        // ロード+ストア+RMWを含むブロックが切り出され、生成物が検証を通る。
-        // pushはまだ語彙外 — そこで途切れる
+        // ロード+ストア+RMW+スタック形を含むブロックが切り出され、検証を通る。
+        // 8bit ALUメモリ形は語彙外 — そこで途切れる
         let (_m, blk, lay) = block_from(&[
             0x8B, 0x43, 0x04, // mov eax,[ebx+4]
             0x89, 0x07, // mov [edi],eax (F1b-2で語彙入り)
             0x01, 0x0E, // add [esi],ecx (RMW)
-            0x50, // push eax — 語彙外。ここで途切れる
+            0x50, // push eax (F1b-3で語彙入り)
+            0x00, 0x03, // add [ebx],al — 8bit形は語彙外。ここで途切れる
         ]);
         assert_eq!(
             blk.ops.len(),
-            3,
-            "ロード+ストア+RMWの3命令で、pushの手前まで"
+            4,
+            "ロード+ストア+RMW+pushの4命令で、8bit形の手前まで"
         );
         let wasm = compile_block(&blk, &lay, 0x1000);
         wasmparser::validate(&wasm).expect("メモリop入りブロックの検証");

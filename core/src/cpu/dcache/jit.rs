@@ -95,10 +95,25 @@ pub enum JitOp {
     AluMR { kind: u8, mem: JitMem, reg: u8 },
     /// ALU [mem], imm32
     AluMI { kind: u8, mem: JitMem, imm: u32 },
+    /// push r32 (F1b-3。SP更新前に脱出できる — push32と同じ「成功時だけ確定」)
+    PushR { src: u8 },
+    /// push imm32
+    PushI { imm: u32 },
+    /// pop r32
+    PopR { dst: u8 },
+    /// leave (SP←BP、BP←pop)
+    Leave,
+    /// xchg eAX, r32 (レジスタ間 — 0x90 nop = 自分と交換も含む)
+    XchgA { reg: u8 },
     /// 終端: 条件分岐 (取られたら ip += rel は命令長込みの相対)
     Jcc { cc: u8, rel: u32 },
     /// 終端: 無条件相対ジャンプ
     Jmp { rel: u32 },
+    /// 終端: call rel — 戻り番地 (頭+ここまでの長さ) をpushしてから ip += len+rel。
+    /// pushが脱出点 (F1b-3)
+    CallRel { rel: u32 },
+    /// 終端: ret — pop した値が次のip。popが脱出点
+    Ret,
 }
 
 /// 焼き候補ブロック: 先頭物理アドレスと (命令長, op) の列。
@@ -237,11 +252,88 @@ fn convert(u: &Uop) -> Option<(JitOp, bool)> {
             scale: mem.scale,
             disp: mem.disp,
         },
+        // ---- F1b-3: スタック形 ----
+        Uop::PushR { reg } => JitOp::PushR { src: reg },
+        Uop::PushImm { imm } => JitOp::PushI { imm },
+        Uop::PopR { reg } => JitOp::PopR { dst: reg },
+        Uop::Leave => JitOp::Leave,
+        Uop::XchgAR { reg } => JitOp::XchgA { reg },
         Uop::Jcc { cc, rel } => return Some((JitOp::Jcc { cc, rel }, true)),
         Uop::JmpRel { rel } => return Some((JitOp::Jmp { rel }, true)),
+        Uop::CallRel { rel } => return Some((JitOp::CallRel { rel }, true)),
+        Uop::Ret => return Some((JitOp::Ret, true)),
         _ => return None, // メモリ形・スタック・その他はF1a対象外
     };
     Some((op, false))
+}
+
+/// このuopがJITの語彙に入っているか (opstatsの分布計測用)
+#[cfg(feature = "opstats")]
+pub(crate) fn in_vocab(u: &Uop) -> bool {
+    convert(u).is_some()
+}
+
+/// `pa` から**走路ごと**切り出す (F1b-3のタイル焼き)。
+///
+/// collect_block は語彙外の命令で切れる。動的実測では語彙内が81%も
+/// あるのに、語彙外18.8%が点在するせいで走路が平均5命令の断片になり、
+/// 断片の頭は分岐の着地でないと熱が乗らず、カバレッジが2.3%で止まった。
+/// ここでは**語彙外の1命令を飛ばして次のブロックも続けて焼く** —
+/// 実行時のタイル張り (head_pending) が入口を作り、こちらが中身を量産する。
+/// 熱い頭1つから走路全体が一度に焼ける (セグメントごとの再加熱1024回が消える)
+pub fn collect_run(m: &Machine, pa: u32, cap: usize, max_blocks: usize) -> Vec<JitBlock> {
+    let mut blocks = Vec::new();
+    let mut p = pa;
+    // guard: 語彙外スキップの空回り対策 (ページ内で高々数十回)
+    let mut guard = 0;
+    while blocks.len() < max_blocks && guard < 64 {
+        guard += 1;
+        if let Some(blk) = collect_block(m, p, cap) {
+            let end = blk
+                .head_pa
+                .wrapping_add(blk.ops.iter().map(|&(l, _)| l as u32).sum::<u32>());
+            let terminal = matches!(
+                blk.ops.last(),
+                Some((
+                    _,
+                    JitOp::Jcc { .. } | JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret
+                ))
+            );
+            let hit_cap = blk.ops.len() >= cap;
+            blocks.push(blk);
+            if terminal {
+                break; // 分岐で終わる走路 — その先は着地点の熱に任せる
+            }
+            p = end;
+            if p & 0xFFF == 0 {
+                break; // ページ末
+            }
+            if !hit_cap {
+                // 語彙外の1命令を飛ばして続ける (長さだけ知りたい)
+                match decode::decode_at(m, p) {
+                    Some((len, _)) => {
+                        p = p.wrapping_add(len as u32);
+                        if p & 0xFFF == 0 {
+                            break;
+                        }
+                    }
+                    None => break, // uop化すらできない命令 — 走路はここまで
+                }
+            }
+        } else {
+            // 頭が語彙外: 1命令飛ばして次を試す
+            match decode::decode_at(m, p) {
+                Some((len, _)) => {
+                    p = p.wrapping_add(len as u32);
+                    if p & 0xFFF == 0 {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+    blocks
 }
 
 /// `pa` から直線にデコードして、JITで焼ける範囲を切り出す。
