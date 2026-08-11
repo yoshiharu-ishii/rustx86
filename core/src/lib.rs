@@ -12,6 +12,8 @@ pub mod snapshot;
 // テスト・wasm・cosim の参照はこれで壊れない
 pub use boot::{bzimage, elf};
 pub use mem::bus;
+// JITビュー (F1a、ADR-0008): 生成器 (wasmシェル/ネイティブランナー) の入口
+pub use cpu::dcache::jit;
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
