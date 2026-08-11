@@ -248,6 +248,12 @@ impl Emulator {
         self.jit_rt.installed()
     }
 
+    /// JITブロック内で実行された命令数の累計 (観測用)。
+    /// tsc() に対する割合が「JITのカバレッジ」
+    pub fn jit_instrs(&self) -> f64 {
+        self.m.jit_instrs as f64
+    }
+
     /// core が call_indirect で叩く関数テーブル (`__indirect_function_table`)。
     /// JS はここへ生成ブロックの export "b" を table.set し、その添字を
     /// install_block へ渡す — JS境界を介さずブロックが呼ばれる (F1a call_indirect)

@@ -337,6 +337,68 @@ impl Machine {
         }
     }
 
+    /// JIT用の**記録しない**32bit書き込み (F1b-2)。
+    ///
+    /// 返り値: true = 完了 / false = 脱出 (フォールトしそう。**何も書いていない**)。
+    /// 意味は [`write32`](Self::write32) の道を正確に写す:
+    /// - ページ跨ぎは無条件で脱出 (稀。インタプリタの write16×2 に任せる)
+    /// - RAM超えは「捨てて完了」(write_wide と同じ)
+    /// - テキストVRAM窓に落ちるなら vram_dirty (write8 の遅い道と同じ効果)
+    /// - デバッガの見張りは考えない — dbg.on のとき dcache/JIT は使われない
+    /// - **note_write は呼ばない** — 現行の write8/write_wide も呼んでいない
+    ///   (素の線形ストアは自己書き換え検出の網に入っていない。修正するときは
+    ///   両経路同時でないと JIT⇔interp のビット同一が壊れる)
+    pub fn jit_try_write32(&mut self, addr: u32, val: u32) -> bool {
+        if addr & 0xFFF > 0xFFC {
+            return false;
+        }
+        let pa = match self.translate_for(addr, true) {
+            Ok(pa) => pa,
+            Err(_) => return false,
+        };
+        let a = pa as usize;
+        if a + 4 > self.mem.len() {
+            return true; // RAM超えは捨てる (完了扱い)
+        }
+        self.mem[a..a + 4].copy_from_slice(&val.to_le_bytes());
+        if a + 3 >= bus::VRAM_TEXT_BASE as usize && a <= bus::VRAM_TEXT_END as usize {
+            self.vram_dirty = true;
+        }
+        true
+    }
+
+    /// JIT用のRMW (`alu [mem], b` — F1b-2)。read→ALU→writeを1呼びで完結する。
+    ///
+    /// 返り値: true = 完了 (ccとメモリを更新済み) / false = 脱出 (**状態は無傷**)。
+    ///
+    /// 脱出判定は**書き込み権限のtranslate**を最初にやる — x86のページングに
+    /// 書き込み専用ページは無い (writable ⊆ readable) ので、これが通れば
+    /// 後続の読みも必ず通り、cc更新後に失敗する道が消える。
+    /// ALUは従来経路と同じ [`alu_w`](crate::cpu::alu::alu_w) — 意味論の原本は1つ
+    pub fn jit_try_rmw32(&mut self, addr: u32, kind: u8, b: u32) -> bool {
+        if addr & 0xFFF > 0xFFC {
+            return false;
+        }
+        let pa = match self.translate_for(addr, true) {
+            Ok(pa) => pa,
+            Err(_) => return false,
+        };
+        let a = self.read_phys32(pa);
+        let v = crate::cpu::alu::alu_w(&mut self.cpu, kind, a, b, true);
+        // kind7 (CMP) はJIT側で CmpMR/CmpMI に振られるのでここへは来ないが、
+        // 来ても書かないのが正しい (従来経路と同じ判定)
+        if kind != 7 {
+            let w = pa as usize;
+            if w + 4 <= self.mem.len() {
+                self.mem[w..w + 4].copy_from_slice(&v.to_le_bytes());
+                if w + 3 >= bus::VRAM_TEXT_BASE as usize && w <= bus::VRAM_TEXT_END as usize {
+                    self.vram_dirty = true;
+                }
+            }
+        }
+        true
+    }
+
     pub fn write32(&mut self, addr: u32, val: u32) {
         if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
             return;
