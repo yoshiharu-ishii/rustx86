@@ -1,7 +1,7 @@
 # ADR-0007: CPU最適化はデコード済み命令キャッシュを本丸に、段階を刻む
 
 - ステータス: 採択 (2026-08-10)
-- 関連: [docs/perf.md](../perf.md) (数字と進捗の生きた台帳) /
+- 関連: [docs/perf.md](../reference/perf.md) (数字と進捗の生きた台帳) /
   [ADR-0001](0001-16bit-cpu-and-cosim.md) (cosimが検証の土台)
 
 ## 背景

@@ -14,7 +14,7 @@ const mod = await import(pathToFileURL(join(root, 'web/pkg/rustx86_wasm.js')).hr
 await mod.default({ module_or_path: wasm });
 
 // 既定は bzImage — ブラウザの既定と同じ、自己解凍ステブごと実行する本物の起動。
-// KERNEL=vmlinux で直接ロードの近道を測れる (経路比較用、docs/perf.md)
+// KERNEL=vmlinux で直接ロードの近道を測れる (経路比較用、docs/reference/perf.md)
 const kernel = new Uint8Array(
   (() => {
     if (process.env.KERNEL === 'vmlinux') {

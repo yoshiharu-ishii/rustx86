@@ -45,7 +45,7 @@ I/Oポート空間があり、`IN`/`OUT` という専用命令だけがそこへ
 間に立って経路を決める者は要らない。装置を数える仕組み (PCIの設定空間) が
 要るのは virtio を載せる Tier 4 からになる。
 
-`decode_mem` / `decode_io` は [`core/src/bus.rs`](../core/src/bus.rs) にある。
+`decode_mem` / `decode_io` は [`core/src/bus.rs`](../../core/src/mem/bus.rs) にある。
 
 ### 未接続のポートは 0xFF を返す
 
@@ -65,7 +65,7 @@ PIC/PIT/UARTは `IN`/`OUT` でポート番号を指定して話す。一方で�
 
 DOSやUNIXのコンソールがBIOSを呼ばずVRAMへ直接書くのは、BIOS経由 (INT 10h) だと
 1文字ごとに割り込みが要るからである。0xB8000 から2バイトで1文字 —
-[文字コード][属性] が交互に並ぶ。動く実例が [`asm/vram.asm`](../asm/vram.asm) にある。
+[文字コード][属性] が交互に並ぶ。動く実例が [`asm/vram.asm`](../../asm/vram.asm) にある。
 
 なお読み出し側には分岐を入れていない。メモリアクセスは最も回数の多い経路なので、
 **書き込み側だけで済む仕掛けなら書き込み側に寄せる**という判断である
@@ -129,7 +129,7 @@ ALUグリッドのように48命令が1ハンドラで処理される構造を�
 
 上の流れは毎命令「フェッチ → プレフィクス → 巨大match → ModRM再デコード」を
 踏む。同じ命令を何百万回もデコードし直すこの構造が ~30 MIPS の天井だった
-([ADR-0007](adr/0007-cpu-optimization-steps.md))。
+([ADR-0007](../adr/0007-cpu-optimization-steps.md))。
 
 そこで **物理アドレスをキーにデコード結果 (uop) を控えるキャッシュ**
 (`cpu/dcache/`) を足した。2回目からはデコードを飛ばして実行だけ。さらに
@@ -151,7 +151,7 @@ ALUグリッドのように48命令が1ハンドラで処理される構造を�
 ## 3. 目標の姿: 16bit UNIX (ELKS) が動く構成
 
 CPU単体では計算機にならない。ELKSを動かすには次の装置が要る
-([ADR-0002](adr/0002-devices-and-16bit-unix.md))。
+([ADR-0002](../adr/0002-devices-and-16bit-unix.md))。
 
 ```mermaid
 flowchart TB
@@ -283,7 +283,7 @@ BIOSもOSも同じテーブルを奪い合っているだけ、という実機�
 DOSがBIOSのINT 13hを「フックして自分の処理を挟んでから元へ流す」という
 チェーン構造も、ここが単なるメモリだからこそ成り立つ。
 
-動く実例が [`asm/interrupt.asm`](../asm/interrupt.asm) にある。
+動く実例が [`asm/interrupt.asm`](../../asm/interrupt.asm) にある。
 自前ハンドラの登録、書き換えていないベクタのBIOS継続、ゼロ除算からの復帰を
 ブートセクタ1枚で通している。
 
@@ -340,7 +340,7 @@ OSはPICを初期化するのにICW1〜ICW4という4バイトを順番に書く
 UARTのDLABも同じ発想で、LCRのbit7を立てると先頭2ポートの意味が通信速度の
 分周値に化ける。8本しかないポートに速度設定を置く余裕が無かった。
 
-実装は [`core/src/dev/`](../core/src/dev/) にある。
+実装は [`core/src/dev/`](../../core/src/dev/) にある。
 
 ## 4. BIOSは何のためにあるのか
 
@@ -428,7 +428,7 @@ DRAMは `Vec<u8>` として最初から存在し、PCIも無いので列挙す�
 サービスの実装ミスで詰まったのではない。**サービスを一切呼ばないOSでも、
 立ち上げと説明書が無ければ起動しない** —— 役割の重みがそのまま出ている。
 
-[`power_on_self_test()`](../core/src/bios.rs) がこの3つを1か所に集めているのは、
+[`power_on_self_test()`](../../core/src/bios.rs) がこの3つを1か所に集めているのは、
 そういう意味でも正しい名前になった。
 
 ### 装置が増えたらBIOSも増えるのか
@@ -455,7 +455,7 @@ Tier 6 が分かりやすい例である。Linuxが `bochs-drm` や `virtio-gpu`
 **INT 10h の VBE を呼ぶ**ので、BIOSが増える。
 
 そして我々は bzImage 直接ロードでそのsetupを飛ばすため、**`vesafb` はそもそも
-選べない**。[ADR-0004](adr/0004-how-far-to-follow-the-bios.md) の
+選べない**。[ADR-0004](../adr/0004-how-far-to-follow-the-bios.md) の
 「Linuxには最後までBIOSを使わせない」が、Tier 6 の画面ドライバの選択肢を
 先に狭めている。決定は後ろの階まで効く。
 
@@ -527,7 +527,7 @@ flowchart TB
 そのまま成り立つ。実機のEAXとAXの関係と同じである。
 
 幅は型ではなく**実行時のフラグ**で選んでいる (`alu_w` / `read_op_w` / `push_w`)。
-分岐表を幅ごとに2本書くと [`cpu/mod.rs`](../core/src/cpu/mod.rs) が倍に膨れるためで、
+分岐表を幅ごとに2本書くと [`cpu/mod.rs`](../../core/src/cpu/mod.rs) が倍に膨れるためで、
 入口で吸収する形にした。
 
 **忘れると静かに壊れる。** 幅対応を漏らした命令は、即値の長さが変わるので
@@ -552,7 +552,7 @@ PCのアドレス変換は、地層の各段で計算式が置き換わってき
 ## 6. 検証の仕組み
 
 x86には網羅テストROMが無いため、Unicorn Engine (QEMUのCPU部) をオラクルとした
-比較実行で検証する ([ADR-0001](adr/0001-16bit-cpu-and-cosim.md))。
+比較実行で検証する ([ADR-0001](../adr/0001-16bit-cpu-and-cosim.md))。
 
 ```mermaid
 flowchart TB

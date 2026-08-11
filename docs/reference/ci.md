@@ -43,7 +43,7 @@ GitHub Actions のジョブは自動で Check として表示されるが、**�
 左リストがリンク集と見分けのつかない列になる (実際になった)。
 
 そこで [Checks API](https://docs.github.com/rest/checks) で**本文つきの
-Check run** を自前で発行する ([.github/actions/publish-check](../.github/actions/publish-check/action.yml))。
+Check run** を自前で発行する ([.github/actions/publish-check](../../.github/actions/publish-check/action.yml))。
 出すのは次の2つだけ:
 
 | 項目 | 中身 |
@@ -60,7 +60,7 @@ Check run** を自前で発行する ([.github/actions/publish-check](../.github
 | ステージ | 止める事故 | 実際に起きたか |
 |---|---|---|
 | テスト | ふつうの退行 | (手元の保険) |
-| **wasmビルド** | **ネイティブでは通るのにブラウザでだけ壊れる**。`std::time::Instant` は wasm32 に存在しない ([build.md](build.md)) | 起きた |
+| **wasmビルド** | **ネイティブでは通るのにブラウザでだけ壊れる**。`std::time::Instant` は wasm32 に存在しない ([build.md](../howto/build.md)) | 起きた |
 | 整形 | `cargo fmt` 忘れ | **CIを作ったその日に自分が落ちた** (clippy --fix が崩した整形をそのまま push した) |
 | lint | clippy の指摘 (警告もエラー扱い) | — |
 | CPU照合 | 命令の意味論の退行。フラグ1bitの違いまで毎命令比較 | Tier 1 で多数 (ADCのAF等) |
