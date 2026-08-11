@@ -389,11 +389,12 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
 
 use std::collections::HashMap;
 
-/// 据え付け済みブロック。idx はJS側の関数配列の添字
+/// 据え付け済みブロック。slot は `__indirect_function_table` の添字。
+/// core は `fn()->u32` へ transmute して **call_indirect で直呼び** — JS境界なし
 struct Compiled {
     gen: u32,
     n: u32,
-    idx: u32,
+    slot: u32,
 }
 
 /// 焼き上がってJSのinstantiate待ちのジョブ
@@ -449,8 +450,8 @@ impl JitRt {
         self.jobs.pop()
     }
 
-    pub fn install(&mut self, pa: u32, gen: u32, n: u32, idx: u32) {
-        self.blocks.insert(pa, Compiled { gen, n, idx });
+    pub fn install(&mut self, pa: u32, gen: u32, n: u32, slot: u32) {
+        self.blocks.insert(pa, Compiled { gen, n, slot });
     }
 
     /// スナップショット復元・OS入れ替えで全部捨てる (世代が巻き戻るため)
@@ -481,24 +482,30 @@ pub fn try_enter(ctx: usize, m: &mut Machine, pa: u32, budget: u32) -> u32 {
         let _ = rt.blocks.remove(&pa);
         return 0;
     }
-    call_block(c.idx)
+    call_block(c.slot)
 }
 
-// 生成wasmの呼び出しはJS経由 (globalThis.rx86_call_block)。
-// F1aは正しさ優先 — テーブル直呼び (call_indirect) 化はF1bで測ってから
+/// 生成ブロックを **JS境界なしで** 呼ぶ (F1a call_indirect)。
+///
+/// `slot` は `__indirect_function_table` (= wasm-bindgen の function_table) の添字。
+/// wasm では `fn()->u32` の値はこのテーブルの添字そのものなので、slot を関数
+/// ポインタへ transmute して呼ぶと **call_indirect** が1個出るだけ — JSへの
+/// 往復 (rx86_call_block 経由) が消える。ブロックの export "b" は `()->i32` で
+/// `fn()->u32` と型が一致する (call_indirect は実行時に型照合する)。
+///
+/// # Safety
+/// slot に据わっているのは install 時に table.set した `()->i32` の生成関数。
+/// 型不一致なら call_indirect が trap する — 誤ったslotを渡さないのは
+/// JitRt の責任 (install した slot しか blocks に入らない)
 #[cfg(target_arch = "wasm32")]
-fn call_block(idx: u32) -> u32 {
-    #[wasm_bindgen::prelude::wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = globalThis)]
-        fn rx86_call_block(idx: u32) -> u32;
-    }
-    rx86_call_block(idx)
+fn call_block(slot: u32) -> u32 {
+    let f: fn() -> u32 = unsafe { core::mem::transmute::<usize, fn() -> u32>(slot as usize) };
+    f()
 }
 
 /// ホスト (テスト) では生成wasmを実行できない — 常に「焼けていない」扱い
 #[cfg(not(target_arch = "wasm32"))]
-fn call_block(_idx: u32) -> u32 {
+fn call_block(_slot: u32) -> u32 {
     0
 }
 

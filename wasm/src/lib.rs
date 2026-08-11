@@ -262,6 +262,13 @@ impl Emulator {
         self.jit_rt.installed()
     }
 
+    /// core が call_indirect で叩く関数テーブル (`__indirect_function_table`)。
+    /// JS はここへ生成ブロックの export "b" を table.set し、その添字を
+    /// install_block へ渡す — JS境界を介さずブロックが呼ばれる (F1a call_indirect)
+    pub fn jit_function_table(&self) -> JsValue {
+        wasm_bindgen::function_table()
+    }
+
     /// TSC (実行した仮想命令数の累計)。決定性ゲートの精密な物差し —
     /// JIT on/off で完全一致すべき値。f64は2^53まで無損失で今回の桁は収まる
     pub fn tsc(&self) -> f64 {
