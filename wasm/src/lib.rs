@@ -254,6 +254,11 @@ impl Emulator {
         self.m.jit_instrs as f64
     }
 
+    /// JITブロックに入った回数 (観測用)。jit_instrs/jit_entries = 平均ブロック長
+    pub fn jit_entries(&self) -> f64 {
+        self.m.jit_entries as f64
+    }
+
     /// core が call_indirect で叩く関数テーブル (`__indirect_function_table`)。
     /// JS はここへ生成ブロックの export "b" を table.set し、その添字を
     /// install_block へ渡す — JS境界を介さずブロックが呼ばれる (F1a call_indirect)

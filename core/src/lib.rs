@@ -186,10 +186,17 @@ pub struct Machine {
     /// tsc に対する割合が「JITのカバレッジ」— 次の梃子が語彙 (カバレッジ) か
     /// 単価 (インライン化) かを、この数字で決める
     pub jit_instrs: u64,
+    /// JITブロックに入った回数 (観測用)。jit_instrs / jit_entries = 平均ブロック長 —
+    /// カバレッジ不足の原因が「ブロックが短い」のか「入る頻度が低い」のかを切り分ける
+    pub jit_entries: u64,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
     pub op_counts: Vec<u64>,
+    /// dcacheヒット側の動的uop分布 (opstats時のみ)。(JIT語彙内の数, 語彙外のuop名→数)。
+    /// **JITの語彙をどこへ広げるかはこの実測で決める** — op_countsのuop版
+    #[cfg(feature = "opstats")]
+    pub jit_vocab_counts: (u64, std::collections::HashMap<&'static str, u64>),
     /// フォールト巻き戻し用の命令前CPU控え (常設の器 + この命令で控えたかの印)。
     /// **実行する側が「要るときだけ」控える**: フォールバック経路は従来どおり毎回、
     /// キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算・jcc・lea等は
@@ -293,7 +300,10 @@ impl Machine {
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
             jit: None,
             jit_instrs: 0,
+            jit_entries: 0,
             op_counts: vec![0; 512],
+            #[cfg(feature = "opstats")]
+            jit_vocab_counts: (0, std::collections::HashMap::new()),
             console: Vec::new(),
             disk: None,
             first_fault: None,
