@@ -473,6 +473,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 if jn as u64 <= budget && !irq_waiting {
                     let n = (h.enter)(jslot);
                     let n64 = n as u64;
+                    m.jit_instrs = m.jit_instrs.wrapping_add(n64);
                     // フォールト脱出 (F1b): ブロックが途中で戻った = 次の命令の
                     // メモリアクセスがフォールトしそう。その1命令はインタプリタで
                     // やり直す (guard込み・#PF配送も従来経路)。JITに再入すると

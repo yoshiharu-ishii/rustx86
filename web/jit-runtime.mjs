@@ -28,6 +28,8 @@ export function setupJit(emu, exports) {
         cf: exports.rx86_jit_cf,
         cond: exports.rx86_jit_cond,
         ld32: exports.rx86_jit_ld32, // F1b: メモリロード (フォールト脱出つき)
+        st32: exports.rx86_jit_st32, // F1b-2: ストア
+        rmw32: exports.rx86_jit_rmw32, // F1b-2: alu [mem], b (read→alu→write)
       },
     },
   };

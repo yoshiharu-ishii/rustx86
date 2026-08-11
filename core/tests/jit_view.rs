@@ -56,14 +56,15 @@ fn reg_only_block_until_branch() {
 }
 
 #[test]
-fn loads_join_but_stores_terminate() {
-    // F1b-1: ロードはブロックに入り、ストアの手前で切れる。
-    // mov eax,1 / mov ecx,[ebx+4] / add edx,[esi] / mov [edi],eax (ストア)
+fn mem_ops_join_but_stack_terminates() {
+    // F1b: ロードもストアもRMWもブロックに入り、語彙外 (push) の手前で切れる。
+    // mov eax,1 / mov ecx,[ebx+4] / add edx,[esi] / mov [edi],eax / push eax
     let code = [
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-        0x8B, 0x4B, 0x04, // mov ecx, [ebx+4] (F1bで語彙入り)
+        0x8B, 0x4B, 0x04, // mov ecx, [ebx+4] (F1b-1で語彙入り)
         0x03, 0x16, // add edx, [esi]
-        0x89, 0x07, // mov [edi], eax ← ストアはここで切れる (F1b-2待ち)
+        0x89, 0x07, // mov [edi], eax (F1b-2で語彙入り)
+        0x50, // push eax ← 語彙外。ここで切れる
     ];
     let m = machine_with_code(&code, 0x2000);
     let b = jit::collect_block(&m, 0x2000, 32).unwrap();
@@ -93,14 +94,24 @@ fn loads_join_but_stores_terminate() {
                     disp: 0,
                 },
             },
+            JitOp::StoreMR {
+                mem: JitMem {
+                    base: 7,
+                    index: -1,
+                    scale: 0,
+                    seg: 3,
+                    disp: 0,
+                },
+                src: 0,
+            },
         ]
     );
 }
 
 #[test]
 fn none_when_head_is_not_jittable() {
-    // 先頭からストア形なら焼く物が無い
-    let code = [0x89, 0x03]; // mov [ebx], eax
+    // 先頭からスタック形なら焼く物が無い
+    let code = [0x50, 0x51]; // push eax / push ecx
     let m = machine_with_code(&code, 0x3000);
     assert!(jit::collect_block(&m, 0x3000, 32).is_none());
 }

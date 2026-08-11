@@ -24,9 +24,11 @@
 //!
 //! ## モジュール構造 (jit-probe で固定費実測済みの形)
 //!
-//! type: [() -> i32, (i32) -> i32, (i32,i32) -> i32]
-//! import: e.m = memory / e.cf = CF評価 / e.cond = 条件評価
-//! export: "b" = ブロック本体 (返り値 = 実行した命令数)
+//! type: [()->i32, (i32)->i32, (i32,i32)->i32, (i32,i32,i32)->i64,
+//!        (i32×4)->i32, (i32×5)->i32]
+//! import: e.m = memory / e.cf = CF評価 / e.cond = 条件評価 /
+//!         e.ld32 = ロード / e.st32 = ストア / e.rmw32 = alu [mem],b
+//! export: "b" = ブロック本体 (返り値 = 実行した命令数。全数未満 = フォールト脱出)
 
 use rustx86_core::jit::{JitBlock, JitLayout, JitMem, JitOp};
 use rustx86_core::{cpu, Machine};
@@ -72,6 +74,37 @@ pub unsafe extern "C" fn rx86_jit_ld32(m: *const Machine, seg: i32, off: i32) ->
         Some(v) => v as i64,
         None => 1i64 << 32,
     }
+}
+
+/// メモリストア 32bit (F1b-2)。全チェックを通ってから一括で書く —
+/// 部分的に書いた状態は作らない。返り値: 1 = 完了 / 0 = 脱出 (何も書いていない)
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_st32(m: *mut Machine, seg: i32, off: i32, val: i32) -> i32 {
+    let m = &mut *m;
+    let la = m.cpu.lin(seg as usize, off as u32);
+    m.jit_try_write32(la, val as u32) as i32
+}
+
+/// RMW (`alu [mem], b` — F1b-2)。read→alu_w→write をここで完結する。
+/// 書き込み権限のtranslateを先に試すので、ccが汚れる前に脱出できる。
+/// 返り値: 1 = 完了 (ccとメモリ更新済み) / 0 = 脱出 (状態は無傷)
+///
+/// # Safety
+/// 同上
+#[no_mangle]
+pub unsafe extern "C" fn rx86_jit_rmw32(
+    m: *mut Machine,
+    seg: i32,
+    off: i32,
+    kind: i32,
+    b: i32,
+) -> i32 {
+    let m = &mut *m;
+    let la = m.cpu.lin(seg as usize, off as u32);
+    m.jit_try_rmw32(la, kind as u8, b as u32) as i32
 }
 
 // ---- wasmバイト列の組み立て (依存なしの手組み — jit-probeの移植) ----
@@ -122,6 +155,7 @@ const I32_XOR: u8 = 0x73;
 const I32_SHL: u8 = 0x74;
 const I64_SHR_U: u8 = 0x88;
 const I32_WRAP_I64: u8 = 0xa7;
+const I32_EQZ: u8 = 0x45;
 const LOCAL_GET: u8 = 0x20;
 const LOCAL_SET: u8 = 0x21;
 const CALL: u8 = 0x10;
@@ -236,6 +270,15 @@ impl Gen<'_> {
         self.code.push(I64_SHR_U);
         self.code.push(I32_WRAP_I64);
         self.code.extend_from_slice(&[IF, BT_EMPTY]);
+        self.emit_escape();
+        self.code.push(END);
+        // 成功: 下位32bitが値
+        self.local_get(L_V64);
+        self.code.push(I32_WRAP_I64);
+    }
+
+    /// 脱出の本体: ip = ブロック頭 + cur_ip_off、返り値 = cur_k
+    fn emit_escape(&mut self) {
         self.iconst(self.lay.ip as u32);
         self.load(self.lay.ip);
         self.iconst(self.cur_ip_off);
@@ -243,10 +286,15 @@ impl Gen<'_> {
         self.store_op();
         self.iconst(self.cur_k);
         self.code.push(RETURN);
+    }
+
+    /// ストア/RMWヘルパの返り値 (1=完了/0=脱出) を裁く。
+    /// スタックトップに返り値が積まれた状態で呼ぶ
+    fn escape_if_zero(&mut self) {
+        self.code.push(I32_EQZ);
+        self.code.extend_from_slice(&[IF, BT_EMPTY]);
+        self.emit_escape();
         self.code.push(END);
-        // 成功: 下位32bitが値
-        self.local_get(L_V64);
-        self.code.push(I32_WRAP_I64);
     }
 
     /// ALUの共通部: L_A/L_B が積まれた前提で、kindの演算 + cc材料の書き出し。
@@ -392,6 +440,53 @@ impl Gen<'_> {
                 self.local_set(L_B);
                 self.alu_core(7, None);
             }
+            JitOp::CmpMI { mem, imm } => {
+                self.emit_load32(&mem);
+                self.local_set(L_A);
+                self.iconst(imm);
+                self.local_set(L_B);
+                self.alu_core(7, None);
+            }
+            // ---- F1b-2: ストア/RMW (ヘルパが全チェック後に書く — 部分状態なし) ----
+            JitOp::StoreMR { mem, src } => {
+                self.iconst(self.maddr);
+                self.iconst(mem.seg as u32);
+                self.eff_off(&mem);
+                self.load(self.reg_addr(src));
+                self.code.push(CALL);
+                uleb(&mut self.code, 3); // import 3 = e.st32
+                self.escape_if_zero();
+            }
+            JitOp::StoreMI { mem, imm } => {
+                self.iconst(self.maddr);
+                self.iconst(mem.seg as u32);
+                self.eff_off(&mem);
+                self.iconst(imm);
+                self.code.push(CALL);
+                uleb(&mut self.code, 3);
+                self.escape_if_zero();
+            }
+            JitOp::AluMR { kind, mem, reg } => {
+                // read→alu_w→write はヘルパの中 (ccの更新もRust側で済む)
+                self.iconst(self.maddr);
+                self.iconst(mem.seg as u32);
+                self.eff_off(&mem);
+                self.iconst(kind as u32);
+                self.load(self.reg_addr(reg));
+                self.code.push(CALL);
+                uleb(&mut self.code, 4); // import 4 = e.rmw32
+                self.escape_if_zero();
+            }
+            JitOp::AluMI { kind, mem, imm } => {
+                self.iconst(self.maddr);
+                self.iconst(mem.seg as u32);
+                self.eff_off(&mem);
+                self.iconst(kind as u32);
+                self.iconst(imm);
+                self.code.push(CALL);
+                uleb(&mut self.code, 4);
+                self.escape_if_zero();
+            }
             JitOp::TestMR { mem, reg } => {
                 self.emit_load32(&mem);
                 self.local_set(L_A);
@@ -460,21 +555,26 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
 
     // ---- モジュールに包む ----
     let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    // type: [()->i32, (i32)->i32, (i32,i32)->i32, (i32,i32,i32)->i64]
+    // type: [()->i32, (i32)->i32, (i32,i32)->i32, (i32,i32,i32)->i64,
+    //        (i32×4)->i32, (i32×5)->i32]
     let mut b = Vec::new();
-    uleb(&mut b, 4);
+    uleb(&mut b, 6);
     b.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f]);
     b.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7e]);
+    b.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    b.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
     section(&mut m, 1, &b);
-    // import: e.cf (type1), e.cond (type2), e.ld32 (type3), e.m (memory min1)
+    // import: e.cf/e.cond/e.ld32/e.st32/e.rmw32 (func)、e.m (memory min1)
     let mut b = Vec::new();
-    uleb(&mut b, 4);
+    uleb(&mut b, 6);
     for (name, desc) in [
         ("cf", &[0x00, 0x01][..]),
         ("cond", &[0x00, 0x02][..]),
         ("ld32", &[0x00, 0x03][..]),
+        ("st32", &[0x00, 0x04][..]),
+        ("rmw32", &[0x00, 0x05][..]),
         ("m", &[0x02, 0x00, 0x01][..]),
     ] {
         uleb(&mut b, 1);
@@ -486,8 +586,8 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
     section(&mut m, 2, &b);
     // function: [type0]
     section(&mut m, 3, &[1, 0x00]);
-    // export: "b" = func 3 (関数import 3本の後)
-    section(&mut m, 7, &[1, 1, b'b', 0x00, 3]);
+    // export: "b" = func 5 (関数import 5本の後)
+    section(&mut m, 7, &[1, 1, b'b', 0x00, 5]);
     // code: locals (i32 ×4, i64 ×1) + 本体
     let mut body = Vec::new();
     body.extend_from_slice(&[2, 4, 0x7f, 1, 0x7e]); // 2グループ: i32×4, i64×1
@@ -657,6 +757,15 @@ mod tests {
                 0x85, 0x0B, // test [ebx],ecx
                 0x75, 0xF3, // jne
             ],
+            // F1b-2: ストア/RMW/cmp imm
+            &[
+                0x89, 0x07, // mov [edi],eax
+                0xC7, 0x03, 0x2A, 0x00, 0x00, 0x00, // mov dword [ebx],42
+                0x01, 0x0E, // add [esi],ecx
+                0x83, 0x4B, 0x08, 0x10, // or dword [ebx+8],0x10 (Grp1 RMW)
+                0x83, 0x7F, 0x04, 0x00, // cmp dword [edi+4],0 (Grp1 kind7=ロード)
+                0x75, 0xEC, // jne
+            ],
         ];
         for (i, code) in cases.iter().enumerate() {
             let (_m, blk, lay) = block_from(code);
@@ -680,7 +789,7 @@ mod tests {
             &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
         );
         // export "b" が居る
-        let needle = [1, 1, b'b', 0x00, 3];
+        let needle = [1, 1, b'b', 0x00, 5];
         assert!(
             wasm.windows(needle.len()).any(|w| w == needle),
             "export b が無い"
@@ -722,17 +831,22 @@ mod tests {
     }
 
     #[test]
-    fn load_ops_join_the_block_and_validate() {
-        // ロードを含むブロックが正しく切り出され、生成物が検証を通る
+    fn mem_ops_join_the_block_and_validate() {
+        // ロード+ストア+RMWを含むブロックが切り出され、生成物が検証を通る。
+        // pushはまだ語彙外 — そこで途切れる
         let (_m, blk, lay) = block_from(&[
             0x8B, 0x43, 0x04, // mov eax,[ebx+4]
-            0x03, 0x0E, // add ecx,[esi]
-            0x39, 0x07, // cmp [edi],eax
-            0x89, 0x07, // mov [edi],eax — ストアはF1b-2。ここで途切れる
+            0x89, 0x07, // mov [edi],eax (F1b-2で語彙入り)
+            0x01, 0x0E, // add [esi],ecx (RMW)
+            0x50, // push eax — 語彙外。ここで途切れる
         ]);
-        assert_eq!(blk.ops.len(), 3, "ロード3命令で、ストアの手前まで");
+        assert_eq!(
+            blk.ops.len(),
+            3,
+            "ロード+ストア+RMWの3命令で、pushの手前まで"
+        );
         let wasm = compile_block(&blk, &lay, 0x1000);
-        wasmparser::validate(&wasm).expect("ロード入りブロックの検証");
+        wasmparser::validate(&wasm).expect("メモリop入りブロックの検証");
     }
 
     #[test]
