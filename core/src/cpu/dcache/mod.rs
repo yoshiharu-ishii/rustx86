@@ -473,18 +473,44 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 if jn as u64 <= budget && !irq_waiting {
                     let n = (h.enter)(jslot);
                     let n64 = n as u64;
-                    // 清算 — インタプリタの毎命令順序 (exec後にextra/tsc/tick) を
-                    // n命令まとめて再現する。今の命令の時計は支払い済みなので、
-                    // 払うのは「次の命令たち」のぶん
-                    if n64 > extra {
-                        // チェーンの出し切り: 最後の命令の次の時計は外側が払う
-                        m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
-                        m.tick_countdown -= n - 1;
+                    // フォールト脱出 (F1b): ブロックが途中で戻った = 次の命令の
+                    // メモリアクセスがフォールトしそう。その1命令はインタプリタで
+                    // やり直す (guard込み・#PF配送も従来経路)。JITに再入すると
+                    // 同じ脱出を繰り返して無限ループになるので必ず落とす
+                    if (n as u16) < jn {
+                        skip_jit = true;
+                    }
+                    // n=0 (先頭命令の手前で脱出): 何も実行していない。
+                    // 先頭命令の前払いはそのまま生きているので、時計もextraも
+                    // 動かさずインタプリタにやり直させる
+                    if n == 0 {
+                        continue;
+                    }
+                    // 清算 — インタプリタの帳簿と同じ意味順序で払う。
+                    // 先頭命令は外側 (または前の連結) が前払い済みなので、
+                    // ブロック内の残り I2..In のぶん = n-1 をまず払う。
+                    // tickはブロック内で起きない (budgetの保証で countdown > n-1)
+                    m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
+                    m.tick_countdown -= n - 1;
+                    extra -= n64 - 1;
+                    if extra == 0 {
+                        return; // チェーンの出し切り: 次の時計は外側が払う
+                    }
+                    // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ —
+                    // **着地の時計はここでは払わない** (インタプリタの連結判定と
+                    // 同じ順序)。跨ぎで払ってからreturnすると外側と二重払いになり、
+                    // tscが実行列より先行する (F1aから潜んでいた過払い。ブロックが
+                    // 増えたF1bでrdtsc由来のprintk時刻が µs 単位でずれて発覚)
+                    let new_lin = m.cpu.lin(CS, m.cpu.ip);
+                    if new_lin >> 12 != lin >> 12 {
                         return;
                     }
-                    m.cpu.tsc = m.cpu.tsc.wrapping_add(n64);
-                    m.tick_countdown -= n;
-                    extra -= n64;
+                    pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+                    lin = new_lin;
+                    // 続けて実行する: 次の1命令ぶんを前払い (インタプリタと同じ)
+                    extra -= 1;
+                    m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+                    m.tick_countdown -= 1;
                     if m.tick_countdown == 0 {
                         m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
                         m.tick_devices(1);
@@ -493,13 +519,6 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         // するため、次の1命令はJITに入らず下の本体で実行する
                         skip_jit = true;
                     }
-                    // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ
-                    let new_lin = m.cpu.lin(CS, m.cpu.ip);
-                    if new_lin >> 12 != lin >> 12 {
-                        return;
-                    }
-                    pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-                    lin = new_lin;
                     continue; // at_headは真のまま — ブロックを連続でJITできる
                 }
             }
