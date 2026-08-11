@@ -220,6 +220,28 @@ pub struct Machine {
     /// 決定的なので写しても結果は同じ — 無効化は mov cr3 / invlpg / cr0 で行う。
     /// `Cell` なのは読み経路 (&self) からも埋めるため
     tlb: Vec<std::cell::Cell<TlbEntry>>,
+    /// C7: 変換の**最終結果**の1段キャッシュ (読み用/書き用の2エントリ)。
+    ///
+    /// TLBスロットは「表を歩かない」ための写しだが、それでもヒット経路は
+    /// スロット計算+Cell複写+権限の再判定を毎回払う。ここは**CPL0限定**で
+    /// 「同じページへの連続アクセス」を (vpn, base, gen) の照合3つで返す —
+    /// 実CPUのマイクロTLB/wayプリディクタに相当する層。
+    ///
+    /// 正しさの根拠: CPL0の読みに権限判定は無く、書きのWP変化は mov cr0 が
+    /// 必ず tlb_flush を通るので、**世代 (tlb_gen) の一致だけで安全が閉じる**。
+    /// CPL遷移はフックせず、ヒット時に cpl==0 を見るだけ (CPL3は常に素通し)
+    dtlb_read: std::cell::Cell<DtlbEntry>,
+    dtlb_write: std::cell::Cell<DtlbEntry>,
+    /// tlb_flush / tlb_flush_page で進む世代。dtlb_* の一括無効化に使う
+    tlb_gen: std::cell::Cell<u32>,
+}
+
+/// C7の1エントリ: 仮想ページ番号と物理先頭、焼いた時の世代
+#[derive(Clone, Copy)]
+pub(crate) struct DtlbEntry {
+    pub(crate) vpn: u32,
+    pub(crate) base: u32,
+    pub(crate) gen: u32,
 }
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
@@ -329,6 +351,17 @@ impl Machine {
                     })
                 })
                 .collect(),
+            dtlb_read: std::cell::Cell::new(DtlbEntry {
+                vpn: TLB_INVALID,
+                base: 0,
+                gen: 0,
+            }),
+            dtlb_write: std::cell::Cell::new(DtlbEntry {
+                vpn: TLB_INVALID,
+                base: 0,
+                gen: 0,
+            }),
+            tlb_gen: std::cell::Cell::new(1),
         }
     }
 

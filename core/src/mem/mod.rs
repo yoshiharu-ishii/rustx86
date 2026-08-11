@@ -17,6 +17,7 @@ impl Machine {
             e.tag = TLB_INVALID;
             slot.set(e);
         }
+        self.dtlb_bump();
     }
 
     /// TLBの1ページだけ無効化する (INVLPG)。ページテーブルの1エントリを
@@ -26,6 +27,19 @@ impl Machine {
         let mut e = self.tlb[slot].get();
         e.tag = TLB_INVALID;
         self.tlb[slot].set(e);
+        self.dtlb_bump();
+    }
+
+    /// C7の最終結果キャッシュを一括無効化する。世代を進め、エントリ自体も
+    /// 潰す (世代が一周して偶然一致する天文学的ケースの保険)
+    fn dtlb_bump(&self) {
+        self.tlb_gen.set(self.tlb_gen.get().wrapping_add(1));
+        let mut e = self.dtlb_read.get();
+        e.vpn = TLB_INVALID;
+        self.dtlb_read.set(e);
+        let mut w = self.dtlb_write.get();
+        w.vpn = TLB_INVALID;
+        self.dtlb_write.set(w);
     }
 
     /// RAMのバイト数 (= 実際の確保量)
@@ -138,8 +152,21 @@ impl Machine {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
             return Ok(la); // PG off: 線形がそのまま物理
         }
-        // --- TLBを引く。当たれば表を歩かない ---
         let vpn = la >> 12;
+        // --- C7: 最終結果の1段キャッシュ (CPL0限定) ---
+        // CPL0の読みに権限判定は無く、書きのWP変化は mov cr0 → tlb_flush が
+        // 世代を進めるので、(vpn, gen) の一致 + cpl==0 だけで安全が閉じる。
+        // CPL3は素通し (sys_access/user_ok の再判定が要るため)
+        let dcell = if write {
+            &self.dtlb_write
+        } else {
+            &self.dtlb_read
+        };
+        let dc = dcell.get();
+        if dc.vpn == vpn && dc.gen == self.tlb_gen.get() && self.cpu.cpl() == 0 {
+            return Ok(dc.base | (la & 0xFFF));
+        }
+        // --- TLBを引く。当たれば表を歩かない ---
         let slot = (vpn as usize) & (TLB_SLOTS - 1);
         let e = self.tlb[slot].get();
         let (base, writable, user_ok) = if e.tag == vpn {
@@ -171,6 +198,15 @@ impl Machine {
                 la,
                 write,
                 present: true,
+            });
+        }
+        // C7: 成功した変換をCPL0なら控える (この成功は今のWP/権限で判定済み。
+        // 前提が変わる契機は必ず tlb_flush を通り、世代で失効する)
+        if self.cpu.cpl() == 0 {
+            dcell.set(crate::DtlbEntry {
+                vpn,
+                base,
+                gen: self.tlb_gen.get(),
             });
         }
         Ok(base | (la & 0xFFF))
