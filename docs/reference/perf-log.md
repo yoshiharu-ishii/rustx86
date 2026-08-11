@@ -1,8 +1,8 @@
 # 最適化の実験記 (時系列・追記専用)
 
 [perf.md](perf.md) が「地図」(現在地・カタログ・規律)、ここが「物語」—
-日付つきの実験の経過と謎解きの記録。横断の教訓は [pitfalls.md](pitfalls.md) へ、
-判断の理由は [ADR](adr/) へ。
+日付つきの実験の経過と謎解きの記録。横断の教訓は [pitfalls.md](../explanation/pitfalls.md) へ、
+判断の理由は [ADR](../adr/) へ。
 
 ## 2026-08-10: B4後の現在地とプロファイル
 
@@ -78,14 +78,14 @@ ModRM再デコード→実行→帳簿」を踏む古典的スイッチ型イン
 前払いをしてからページ跨ぎ判定でreturnしており、跨ぎ着地のたびtscが+1先行。
 printk時刻が±20µsずれて発覚し、スナップショット並走の二分探索で
 「同一tscでJIT側だけipが1命令手前」というsignatureから特定 (型は
-[pitfalls.md](pitfalls.md) の2と3)。ゲートより強い審判 jit-lockstep.mjs を常設。
+[pitfalls.md](../explanation/pitfalls.md) の2と3)。ゲートより強い審判 jit-lockstep.mjs を常設。
 
 ## 2026-08-11: F1b-2 (ストア/RMW) — またワッシュ、カバレッジ1.2%の発見
 
 ブロック668→822。中央値13.37s vs 13.37s。jit_instrsカウンタで原因確定:
 **JITカバレッジ1.2%** (600M中7M命令) — 単価でなくカバレッジの問題。
 ついでに「素の線形ストアがnote_writeの網に無い」ことも発見
-([pitfalls.md](pitfalls.md) の4)。
+([pitfalls.md](../explanation/pitfalls.md) の4)。
 
 ## 2026-08-11: F1b-3 — カバレッジ1.2%の謎解き (4人の犯人)
 
@@ -107,10 +107,10 @@ printk時刻が±20µsずれて発覚し、スナップショット並走の二�
 - **panic=abort**: 交互A/B 8周でワッシュ (9.4 vs 9.45s)。不採用
 - **C7 dTLB最終結果キャッシュ**: CPL0限定・read/write別・tlb_flush世代で安全が
   閉じる設計。native 6周 (8.4 vs 8.5s)・wasm 4周 (13.6 vs 13.7s) ともワッシュ —
-  TLBヒット経路はOoOが既に隠している ([pitfalls.md](pitfalls.md) の5)。
+  TLBヒット経路はOoOが既に隠している ([pitfalls.md](../explanation/pitfalls.md) の5)。
   タグ [exp/c7-dtlb](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fc7-dtlb)
 
-PGO (-25%だが寝かせ) の議論は [ADR-0009](adr/0009-pgo-shelved.md) 参照。
+PGO (-25%だが寝かせ) の議論は [ADR-0009](../adr/0009-pgo-shelved.md) 参照。
 
 ## 2026-08-12: タブ税×1.5の正体 — setTimeoutの4msクランプ
 
@@ -122,4 +122,4 @@ PGO (-25%だが寝かせ) の議論は [ADR-0009](adr/0009-pgo-shelved.md) 参�
 | bzImageフル (1000M) | 43s | **23s** | 21.7s |
 | vmlinux直接 (600M) | 21s | **15s** | 14.0〜14.5s |
 
-残るタブ税は**~7%**。型は [pitfalls.md](pitfalls.md) の1 (筆頭)。PR #68。
+残るタブ税は**~7%**。型は [pitfalls.md](../explanation/pitfalls.md) の1 (筆頭)。PR #68。

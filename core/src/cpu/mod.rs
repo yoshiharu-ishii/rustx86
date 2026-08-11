@@ -182,7 +182,7 @@ pub struct Cpu {
     /// (TIビット付きセレクタが実際に来たら、そのとき実装する)
     pub ldtr_sel: u16,
     /// TR (LTRで積む)。TSSの場所 — リング3→0の瞬間に使うスタックの置き場。
-    /// **リングで唯一、本当に新しい部品** (docs/registers.md)
+    /// **リングで唯一、本当に新しい部品** (docs/reference/registers.md)
     pub tr_sel: u16,
     pub tr_base: u32,
     pub tr_limit: u32,

@@ -4,7 +4,7 @@
 // **ビット同一** かつ据え付けが起きた。exit 1 = 食い違い or JIT不発。
 //
 // これがF1aの最終審判 — 生成コードとインタプリタが同じ意味を持つことの証明。
-// 命令数決定性 (docs/perf.md の柱) をJITが崩していないかをCIで見張る。
+// 命令数決定性 (docs/reference/perf.md の柱) をJITが崩していないかをCIで見張る。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';

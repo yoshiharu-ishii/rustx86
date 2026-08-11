@@ -3,10 +3,10 @@
 ここは**地図だけ**: 現在地の数字・北極星・全量カタログ・測定の規律・寝かせ台帳。
 
 - 日付つきの実験の経過と謎解きは **[perf-log.md](perf-log.md)** (物語、追記専用)
-- 横断の教訓は **[pitfalls.md](pitfalls.md)** (踏んだ罠の型)
-- 判断の理由は **ADR**: [0007](adr/0007-cpu-optimization-steps.md) (段階方針) /
-  [0008](adr/0008-template-jit.md) (JIT設計とFシリーズのロードマップ) /
-  [0009](adr/0009-pgo-shelved.md) (PGOを寝かせた議論)
+- 横断の教訓は **[pitfalls.md](../explanation/pitfalls.md)** (踏んだ罠の型)
+- 判断の理由は **ADR**: [0007](../adr/0007-cpu-optimization-steps.md) (段階方針) /
+  [0008](../adr/0008-template-jit.md) (JIT設計とFシリーズのロードマップ) /
+  [0009](../adr/0009-pgo-shelved.md) (PGOを寝かせた議論)
 
 ## 現在地 (2026-08-12)
 
@@ -60,7 +60,7 @@ rustx86と**同じ** vmlinuz-lts + initramfs-mini を食わせて同条件で測
 B5ブロック配列化 (+8%)、C5 tick一括払い (+10%)、C7 dTLBキャッシュ (ワッシュ)、
 D2 TLBサイズ、panic=abort、E3 quiet、C6フェッチ窓。
 **教訓: 現代CPUのOoOは毎命令の照合も帳簿も既に隠蔽している — インタプリタ内の
-再配置は40サイクル/命令の壁を動かせない** ([pitfalls.md](pitfalls.md) 5)。
+再配置は40サイクル/命令の壁を動かせない** ([pitfalls.md](../explanation/pitfalls.md) 5)。
 
 ## いまの実行経路 — どこにどの最適化が住んでいるか
 
@@ -96,7 +96,7 @@ flowchart TD
 |---|---|---|---|---|
 | A1 | codegen-units=1 + LTO | 数% | ✅済 | 交互A/B -2〜3%。Cargo.tomlに常設 |
 | A2 | wasm-opt -O3/-O4 | wasm数% | 💤 | wasm-packが既定で適用済み。-O4は差がノイズ (2026-08-10) |
-| A3 | PGO | -25% | 💤 | **効いたが寝かせ (ユーザー判断)** — 運用判断を開発に持ち込まない。議論と復帰条件は [ADR-0009](adr/0009-pgo-shelved.md)、実験はタグ [exp/pgo-build](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fpgo-build) |
+| A3 | PGO | -25% | 💤 | **効いたが寝かせ (ユーザー判断)** — 運用判断を開発に持ち込まない。議論と復帰条件は [ADR-0009](../adr/0009-pgo-shelved.md)、実験はタグ [exp/pgo-build](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fpgo-build) |
 | A4 | panic=abort | 数% | 💤 | 交互A/B 8周ワッシュ (2026-08-12)。A1が既にunwind経路を最適化済みと推測。不採用 |
 
 ### B. ディスパッチとデコード
@@ -146,7 +146,7 @@ flowchart TD
 
 | # | 案 | 期待 | 状態 | メモ |
 |---|---|---|---|---|
-| F1 | テンプレートJIT (wasm) | 〜4倍 (北極星実証) | ❄️wasm凍結 | F1a〜F1b-3で骨格・脱出モデル・カバレッジ機構 (18.1%) まで完成、3ISAビット同一。収支微赤字の地点で凍結 (2026-08-11 ユーザー決定)。経過は [perf-log.md](perf-log.md)、ロードマップと凍結解除条件は [ADR-0008](adr/0008-template-jit.md) |
+| F1 | テンプレートJIT (wasm) | 〜4倍 (北極星実証) | ❄️wasm凍結 | F1a〜F1b-3で骨格・脱出モデル・カバレッジ機構 (18.1%) まで完成、3ISAビット同一。収支微赤字の地点で凍結 (2026-08-11 ユーザー決定)。経過は [perf-log.md](perf-log.md)、ロードマップと凍結解除条件は [ADR-0008](../adr/0008-template-jit.md) |
 | F1c | Cranelift ネイティブJIT | 185 MIPS超 | 🔒Tier 7 | フロントエンド (脱出モデル・語彙・カバレッジ機構・審判) は全部共有。入口で別ADR |
 | F2 | 投機的な先行デコード | 数% | 💤 | 複雑さに見合わない |
 | F3 | ホストフラグの流用 | — | 💤 | F1cの中でのみ意味を持つ |
@@ -174,11 +174,11 @@ Linuxを選び「再起動」→ 右上ゲージが**アイドル**になるま�
 ## 測定の規律 (これを破った測定は信用しない)
 
 - **交互A/B** — M1は熱ダレで数分のうちに平気で2割ずれる。
-  新旧バイナリを交互に走らせた差だけを信じる ([pitfalls.md](pitfalls.md) 6)
+  新旧バイナリを交互に走らせた差だけを信じる ([pitfalls.md](../explanation/pitfalls.md) 6)
 - **命令数は決定的** — 同じイメージなら到達命令数は毎回同じ。増加は速度ではなく
   **意味の後退**の印。OS起動回帰が上限を見張る
 - **プロファイルの数字は現場ではない** — 容疑者リストであり、判決は壁時計
-  ([pitfalls.md](pitfalls.md) 10)
+  ([pitfalls.md](../explanation/pitfalls.md) 10)
 
 ## 寝かせている案の台帳 (捨てない — 前提が変われば再訪する)
 

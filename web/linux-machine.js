@@ -150,7 +150,7 @@ export function mountLinux(canvas, opts = {}) {
       // **既定は bzImage — 自己解凍ステブごと実行する本物のフル起動。**
       // 実機がやることを全部やるのがこのエミュレータの意味なので、
       // 速さのための近道 (vmlinux直接ロード) は ?kernel=vmlinux の
-      // 明示指定に格下げした (経路比較の計測用、docs/perf.md)
+      // 明示指定に格下げした (経路比較の計測用、docs/reference/perf.md)
       const wantVmlinux = new URLSearchParams(location.search).get('kernel') === 'vmlinux';
       try {
         try {

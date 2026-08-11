@@ -3,7 +3,7 @@
 Rust製のx86エミュレータ。リアルモード8086から始めて、プロテクトモード、
 ページングと歴史の地層を順に登る。同時に**現代PCの成り立ちを辿る教材**でもある。
 
-📚 **[ドキュメント](docs/)** — アーキテクチャ図と設計の記録 (ADR)。
+📚 **[ドキュメント](docs/)** — Diátaxisの4つの棚: 理解する (アーキテクチャ図・JITの仕組み・罠の型) / 手を動かす / 引く (台帳) / 判断の記録 (ADR)。
 「なぜブートセクタは0x7C00なのか」「割り込みをOSが乗っ取るとは何か」といった
 問いから読める。
 
@@ -40,8 +40,8 @@ Alpine の Linux 6.18 (LTS)。`uname -a` が本物のカーネルバージョン
 `/proc/cpuinfo` には自己申告どおり **Pentium II (Klamath)** が並ぶ。
 プロテクトモード+ページングの上で busybox が動き、`snake` や `vi` も遊べる。
 選ぶと起動済みスナップショットから数秒で復帰し、「再起動」で**自己解凍
-ステブから走る本物のフル起動** (bzImage、30〜40秒) をやり直せる。
-速さ比較用の vmlinux 直接ロードは `?kernel=vmlinux` ([docs/perf.md](docs/perf.md))。
+ステブから走る本物のフル起動** (bzImage、約23秒) をやり直せる。
+速さ比較用の vmlinux 直接ロードは `?kernel=vmlinux` ([docs/reference/perf.md](docs/reference/perf.md))。
 
 ### 16bit UNIX (ELKS) — ログインしてシェルが叩ける
 
@@ -120,7 +120,7 @@ ELKSと違って**画面もキーもディスクも全部BIOS経由**なので�
 |---|---|---|
 | 1 | 16bitリアルモードCPUが命令を正しく実行する | ✅ |
 | 2 | **ブラウザの画面でELKSのシェルが叩ける** | ✅ |
-| 3 | 32bit化 — モード・ページング + **速さと道具の足回り** | ✅ フルブート10秒・66 MIPS・32bitデバッガ (残: 3g スナップショット形式) |
+| 3 | 32bit化 — モード・ページング + **速さと道具の足回り** | ✅ フルブート10秒・79 MIPS・32bitデバッガ (残: 3g スナップショット形式) |
 | 4 | **32bit Linuxが起動する** ← 当初の完成ライン | ✅ (残: virtio-blk) |
 | 5 | **そのLinuxから本物のホストにpingが届く** | |
 | 6 | GUI と、いろいろなメディアからの起動 (Xの動くUTM) | 確定 |
@@ -134,11 +134,12 @@ Tierとは別に、**「動いた」と叫べる節目**を順に刻む。tetris
 受け入れテストだったように、節目は機能一覧ではなく**遊べるもの**で判定する。
 
 ```
-1. 100 MIPS         — 検証の単価を下げる投資 (C1 lazy flags → 小物 → 切り札B5)。
-                      以後の全開発が1.5倍速の検証ループに乗る
+1. 100 MIPS         — 検証の単価を下げる投資。インタプリタは~79で構造の上限
+                      (実測済み)。残る道はJIT系 (wasm凍結中 / Cranelift=Tier 7) —
+                      北極星はv86実測185 MIPS (docs/reference/perf.md)
 2. ANSI端末DOOM     — グラフィックス無しで刻む中間マイルストーン。
                       doomgeneric + ANSIバックエンドをi386静的ビルドして initramfs へ。
-                      66 MIPS は DOOM が設計された 486DX2-66 と同格 — 100 MIPS なら余裕
+                      79 MIPS は DOOM が設計された 486DX2-66 を上回る — 現状でも動く算段
 3. Tier 6a フレームバッファ
 4. VGA DOOM         — **Tier 6 の合格判定**。fbdev・キーボード・性能の総合試験
 ```
@@ -171,7 +172,7 @@ Tierとは別に、**「動いた」と叫べる節目**を順に刻む。tetris
 - [x] **1d: 割り込みと例外の機構** — IVTの実ディスパッチ、IF/TF、割り込み受付タイミング、
       ゼロ除算 `#DE`、シングルステップ `INT 1`、HLTからの復帰。
       **CPUが純粋な関数でなくなった**。1サイクルの流れは
-      [アーキテクチャ](docs/architecture.md#1サイクルに何が起きているか)にシーケンス図がある
+      [アーキテクチャ](docs/explanation/architecture.md#1サイクルに何が起きているか)にシーケンス図がある
 
 ### Tier 2: 画面とシェル
 
@@ -186,7 +187,7 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
 - [x] **2b: 装置** — 8259 PIC、8254 PIT、UART 16550。
       **3つとも32bit Linuxでそのまま使う** ([ADR-0002](docs/adr/0002-devices-and-16bit-unix.md))。
       PITが挙手 → PICが交通整理 → CPUが命令境界で受け取る、という
-      [一周](docs/architecture.md#なぜpicとpitが要るのか)が通っている
+      [一周](docs/explanation/architecture.md#なぜpicとpitが要るのか)が通っている
 - [x] **2c: ELKS起動** — BIOS HLE (INT 10h/11h/12h/13h/15h/16h/1Ah、IRQ0/1) と
       BIOSデータエリア、8042 (A20)、CMOS RTC を実装。**loginプロンプトまで到達**。
       さらに8042へスキャンコードを流して**rootでログインし、シェルが動く**。
@@ -218,11 +219,11 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       ホスト側ロードで消す。Firecracker と同じ判断)
 - [x] **3e: CPU高速化** — **フルブート10秒を達成** (2026-08-10)。
       デコード済み命令キャッシュ (P1a/P1b) → 控えの削減 (C4) → ブロック連結 (B4) で
-      13→66 MIPS。ネイティブ 8.8s、ブラウザのフル起動 21s (実測)、
+      13→79 MIPS。ネイティブ 7.3s (vmlinux)、ブラウザのフル起動 23s / vmlinux 15s (実測)、
       スナップショット復帰は数秒。**意味の不変は決定的命令数 (580M/28M) の
       完全一致で毎回証明** — cosim + OS起動回帰の検証網の上で進めた。
       判断は [ADR-0007](docs/adr/0007-cpu-optimization-steps.md)、数字と残り
-      (B3ペア融合など。出口条件 ~100 MIPS) は [docs/perf.md](docs/perf.md)
+      (B3ペア融合など。出口条件 ~100 MIPS) は [docs/reference/perf.md](docs/reference/perf.md)
 - [x] **3f: 32bitデバッガ** — Linuxマシンはワーカーの中で回るので、
       **覗き見RPC** (postMessage、メソッド許可リスト) で境界を渡した。
       デバッガは機械のメソッドを全部 await で呼ぶ — 同期の機械 (16bit) と
@@ -268,7 +269,7 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
 - [ ] **6a: フレームバッファ** — レジスタ直叩きの線形フレームバッファ + fbdev上のX。
       **`vesafb` は選べない** — Tier 5b で bzImage を直接ロードしてリアルモードの
       setup を飛ばすため、`INT 10h` の VBE を呼ぶ者が居なくなる
-      ([なぜか](docs/architecture.md#装置が増えたらbiosも増えるのか))
+      ([なぜか](docs/explanation/architecture.md#装置が増えたらbiosも増えるのか))
 - [ ] **6b: PS/2 マウス** — 8042 の第2ポート
 - [ ] **6c: ISO起動** — ATA/ATAPI (PIOで読むだけ) + El Torito。
       **ISOの中に埋めたフロッピーイメージをドライブAに見せる**のが El Torito の
@@ -413,7 +414,7 @@ cargo install wasm-pack                    # JSとの繋ぎを自動生成する
 
 `core` は**外部クレートに依存していない**ので、`cargo test` はこれだけで通る。
 
-**何が起きているかまで知りたいときは [ビルドの最小構成](docs/build.md) を参照。**
+**何が起きているかまで知りたいときは [ビルドの最小構成](docs/howto/build.md) を参照。**
 `--target web` を選んだ理由、wasm-pack が生成するもの、wasm特有の落とし穴
 (メモリが伸びるとJSのビューが死ぬ / panicの中身が消える) を書いてある。
 NASM は `asm/*.asm` を書き換えるときだけ要る (`.bin` はコミット済み)。
@@ -581,7 +582,7 @@ FreeDOS で Tab がカーソルを先頭へ飛ばすバグが出ていた。
 
 Tier 2 時点の 90 MIPS から半減しているのは劣化の放置ではなく、**32bit化の税**である
 — ディスパッチが増え、16bit経路はデコードキャッシュの対象外 (32bit専用) のまま。
-16bit機の体感には十分で、投資は32bit側 ([docs/perf.md](docs/perf.md)、66 MIPS) に
+16bit機の体感には十分で、投資は32bit側 ([docs/reference/perf.md](docs/reference/perf.md)、79 MIPS) に
 寄せている。
 
 #### 「HLTで必ず止まる」が破れていた (2026-08-10 の教訓)
