@@ -385,31 +385,28 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
     m
 }
 
-// ---- ランタイム (増分3): 焼き・据え付け・実行の台帳 ----
+// ---- ランタイム (増分5): 焼き・据え付けの台帳 ----
+//
+// **据え付け先は core の Entry** (dcache.set_jit) — hashmapは持たない。
+// JitRt が持つのは「instantiate待ちのジョブ」と「重複焼き防止の記憶」だけ。
+// 実行時の照合 (現世代か・命令数) は Entry が担う (毎ブロック頭のhashmapを消す)
 
-use std::collections::HashMap;
-
-/// 据え付け済みブロック。slot は `__indirect_function_table` の添字。
-/// core は `fn()->u32` へ transmute して **call_indirect で直呼び** — JS境界なし
-struct Compiled {
-    gen: u32,
-    n: u32,
-    slot: u32,
-}
+use std::collections::HashSet;
 
 /// 焼き上がってJSのinstantiate待ちのジョブ
 pub struct Job {
     pub pa: u32,
-    pub gen: u32,
     pub n: u32,
     pub bytes: Vec<u8>,
 }
 
-/// JITランタイムの台帳。Emulatorが1個持つ (Boxで住所固定 — hookのctxになる)
+/// JITランタイムの台帳。Emulatorが1個持つ
 #[derive(Default)]
 pub struct JitRt {
-    blocks: HashMap<u32, Compiled>,
+    /// 一度焼いたブロック頭 (同じ頭を二度焼かないため)。据え付け本体はEntry側
+    compiled: HashSet<u32>,
     jobs: Vec<Job>,
+    installed: usize,
 }
 
 impl JitRt {
@@ -427,8 +424,8 @@ impl JitRt {
         let lay = rustx86_core::jit::layout(m);
         let maddr = m as *const Machine as u32;
         for pa in hot {
-            if self.blocks.contains_key(&pa) {
-                continue;
+            if !self.compiled.insert(pa) {
+                continue; // 焼き済み
             }
             let Some(blk) = rustx86_core::jit::collect_block(m, pa, 32) else {
                 continue;
@@ -439,7 +436,6 @@ impl JitRt {
             }
             self.jobs.push(Job {
                 pa,
-                gen: rustx86_core::jit::page_gen(m, pa),
                 n: blk.ops.len() as u32,
                 bytes: compile_block(&blk, &lay, maddr),
             });
@@ -450,39 +446,27 @@ impl JitRt {
         self.jobs.pop()
     }
 
-    pub fn install(&mut self, pa: u32, gen: u32, n: u32, slot: u32) {
-        self.blocks.insert(pa, Compiled { gen, n, slot });
+    pub fn note_installed(&mut self) {
+        self.installed += 1;
     }
 
-    /// スナップショット復元・OS入れ替えで全部捨てる (世代が巻き戻るため)
+    /// スナップショット復元・OS入れ替えで全部捨てる (dcacheごと作り直されるので、
+    /// Entry側のjit据え付けは自動で消える — ここは焼き記憶と残ジョブを捨てる)
     pub fn flush(&mut self) {
-        self.blocks.clear();
+        self.compiled.clear();
         self.jobs.clear();
+        self.installed = 0;
     }
 
     pub fn installed(&self) -> usize {
-        self.blocks.len()
+        self.installed
     }
 }
 
-/// coreのJitHookに挿す実行口。契約はcore側 (jit::JitHook) のdocを参照
-pub fn try_enter(ctx: usize, m: &mut Machine, pa: u32, budget: u32) -> u32 {
-    // ctxはEmulatorが持つBox<JitRt>の中身 — Emulatorより長生きしない
-    let rt = unsafe { &mut *(ctx as *mut JitRt) };
-    let Some(c) = rt.blocks.get(&pa) else {
-        return 0;
-    };
-    // 部分実行はしない契約 — 予算に収まらないなら丸ごと断る
-    if c.n > budget {
-        return 0;
-    }
-    // 自己書き換えの見張り: 焼いた時と世代が違えば捨てる。
-    // F1aの語彙はメモリに書かないので、頭での照合で十分
-    if rustx86_core::jit::page_gen(m, pa) != c.gen {
-        let _ = rt.blocks.remove(&pa);
-        return 0;
-    }
-    call_block(c.slot)
+/// coreのJitHookに挿す実行口 — スロットのブロックを call_indirect で直呼び。
+/// 世代照合も命令数も Entry が済ませているので、ここは「呼ぶ」だけ
+pub fn enter(slot: u32) -> u32 {
+    call_block(slot)
 }
 
 /// 生成ブロックを **JS境界なしで** 呼ぶ (F1a call_indirect)。
