@@ -60,13 +60,33 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     super::operand::write_op16(m, &rm, v);
                 }
                 2 => {
+                    // LLDT: LDT記述子 (これ自体は必ずGDTに居る、type 0x2) を
+                    // 読んで、LDTの所在を隠しレジスタへ写す
                     let sel = read_op16(m, &rm);
-                    if sel & !0x7 != 0 {
-                        // 実LDTを積もうとした — 保持だけでは嘘になるので止める
-                        m.trap(format!("LLDT with non-null selector {sel:#06x}"));
+                    if sel & !0x3 == 0 {
+                        // ヌル: LDTを空にする (使った瞬間にlimit超過で咎まる)
+                        m.cpu.ldtr_sel = sel;
+                        m.cpu.ldtr_base = 0;
+                        m.cpu.ldtr_limit = 0;
                         return;
                     }
+                    let off = (sel & !0x7) as u32;
+                    let a = m.cpu.gdtr_base.wrapping_add(off);
+                    let prev_sys = m.sys_access.replace(true);
+                    let lo = m.read32(a);
+                    let hi = m.read32(a.wrapping_add(4));
+                    m.sys_access.set(prev_sys);
+                    let ty = ((hi >> 8) & 0x1F) as u8;
+                    if ty != 0x02 {
+                        panic!("LLDT: not an LDT descriptor (type {ty:#04x})");
+                    }
                     m.cpu.ldtr_sel = sel;
+                    m.cpu.ldtr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
+                    let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
+                    if hi & 0x0080_0000 != 0 {
+                        limit = (limit << 12) | 0xFFF;
+                    }
+                    m.cpu.ldtr_limit = limit;
                 }
                 // LTR: TSSの場所をTRへ。記述子はGDTから読む
                 3 => {
@@ -90,11 +110,12 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 // 副作用の方が本体になった珍しい命令
                 4 | 5 => {
                     let sel = read_op16(m, &rm);
-                    let ok = if sel & !0x7 == 0 {
+                    let ok = if sel & !0x3 == 0 {
                         false // ヌルセレクタは常に不成立
                     } else {
                         let off = (sel & !0x7) as u32;
-                        let a = m.cpu.gdtr_base.wrapping_add(off);
+                        // TIビットでGDT/LDTを選ぶ (セグメントロードと同じ規則)
+                        let a = super::segment::descriptor_table(m, sel).0.wrapping_add(off);
                         let prev_sys = m.sys_access.replace(true);
                         let hi = m.read32(a.wrapping_add(4));
                         m.sys_access.set(prev_sys);

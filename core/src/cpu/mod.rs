@@ -50,7 +50,7 @@ use crate::Machine;
 // `cpu::interrupt` / `cpu::iret` をそのまま保つため再エクスポートする
 pub use interrupt::{interrupt, iret, page_fault};
 // セグメンテーションは segment.rs へ。step() と interrupt.rs が使う
-pub(crate) use interrupt::{divide_error, software_int};
+pub(crate) use interrupt::{divide_error, gp_fault, software_int};
 pub(crate) use segment::{load_seg, load_seg_raw, SegHidden};
 
 /// lib.rs (bzImageロード) から GDT 経由でセグメントを積むための公開口
@@ -177,10 +177,12 @@ pub struct Cpu {
     /// 実装しない (カーネルが初期化で触るのに答えるため)。
     /// DR6/DR7 はリセット値に意味がある (それぞれ 0xFFFF0FF0 / 0x400)
     pub dr: [u32; 8],
-    /// LDTR (LLDTで積む)。プロセス別セグメント表のセレクタ。
-    /// カーネルはブートでヌル(0)を積むだけなので、**保持のみ**で表は引かない
-    /// (TIビット付きセレクタが実際に来たら、そのとき実装する)
+    /// LDTR (LLDTで積む)。プロセス別セグメント表の所在。
+    /// TIビット (bit2) の立ったセレクタはGDTでなくこの表を引く。
+    /// base/limit はLLDT時にGDTの記述子から写す (セグメントの隠しレジスタと同型)
     pub ldtr_sel: u16,
+    pub ldtr_base: u32,
+    pub ldtr_limit: u32,
     /// TR (LTRで積む)。TSSの場所 — リング3→0の瞬間に使うスタックの置き場。
     /// **リングで唯一、本当に新しい部品** (docs/reference/registers.md)
     pub tr_sel: u16,
@@ -232,6 +234,8 @@ impl Cpu {
             idtr_limit: 0,
             dr: [0, 0, 0, 0, 0, 0, 0xFFFF_0FF0, 0x400],
             ldtr_sel: 0,
+            ldtr_base: 0,
+            ldtr_limit: 0,
             tr_sel: 0,
             tr_base: 0,
             tr_limit: 0,
@@ -255,6 +259,12 @@ impl Cpu {
         } else {
             0
         }
+    }
+
+    /// IOPL (EFLAGS bit 12-13)。CLI/STI/IN/OUT が「どのリングまで許すか」の閾値。
+    /// IOPLは遅延フラグの外なので flags を直に読める
+    pub fn iopl(&self) -> u8 {
+        ((self.flags >> 12) & 3) as u8
     }
 
     /// セグメントのbase。
