@@ -443,16 +443,38 @@ function advanceScript() {
 /** 今選んでいるマシン */
 let current = null;
 
-function renderMachines() {
+/** イメージが実在するか (HEADで聞く)。**無いOSはライブラリに並べない** —
+ *  選べないものを見せて「取ってきて置け」と言うより、置いたら現れる方が素直。
+ *  取得の案内はスタートの1行とREADMEが持つ */
+async function imageAvailable(m) {
+  const urls = m.probe ?? (m.image ? [m.image] : null);
+  if (!urls) return true; // イメージを要しない項目 (スタート・メディア)
+  for (const u of urls) {
+    try {
+      const r = await fetch(u, { method: 'HEAD' });
+      if (r.ok) return true;
+    } catch {
+      /* 続けて次の候補 */
+    }
+  }
+  return false;
+}
+
+async function renderMachines() {
   const nav = $('machines');
+  const avail = new Map(
+    await Promise.all(MACHINES.map(async (m) => [m.id, await imageAvailable(m)])),
+  );
   nav.textContent = '';
   for (const [group, list] of byGroup()) {
+    const rows = list.filter((m) => avail.get(m.id));
+    if (rows.length === 0) continue; // 空のグループは見出しごと出さない
     if (group) {
       const h = document.createElement('h2');
       h.textContent = group;
       nav.append(h);
     }
-    for (const m of list) {
+    for (const m of rows) {
       // **別ページに住むマシンはリンクにする** (Linux)。見た目はボタンと揃えるが、
       // 中身は本物の <a> — 新しいタブで開く・URLをコピーする、が普通にできる
       const b = document.createElement(m.href ? 'a' : 'button');
@@ -608,15 +630,8 @@ try {
     panicMessage = detail;
     setStatus(`停止: ${detail} — 画面は倒れた瞬間のまま`, true);
   });
-  renderMachines();
+  await renderMachines();
   markCurrent('start');
-  // オープニングのカードからも起動できる (メニューと同じ select を通す)
-  for (const b of document.querySelectorAll('#welcomePane [data-boot]')) {
-    b.addEventListener('click', () => {
-      const m = MACHINES.find((x) => x.id === b.dataset.boot);
-      if (m) select(m);
-    });
-  }
   for (const b of document.querySelectorAll('#welcomePane [data-open]')) {
     b.addEventListener('click', () => $('imageFile').click());
   }

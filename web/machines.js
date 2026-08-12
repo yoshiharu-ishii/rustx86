@@ -83,6 +83,8 @@ export const MACHINES = [
     // linux-machine.js (ワーカー)。**選び方と見た目はELKSと同じ**にする。
     kind: 'linux',
     status: 'ok',
+    // ライブラリに並べる条件: どれか1つでも取れれば起動できる
+    probe: ['./linux-booted.snap.gz', './vmlinux-lts.gz', './vmlinuz-lts'],
     note:
       'BIOSは通さず、カーネルを直接ロードして32bitエントリへ飛ぶ。' +
       'コンソールはシリアル (ttyS0)。選ぶと起動済みスナップショットから数秒で復帰し、' +
