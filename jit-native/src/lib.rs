@@ -247,16 +247,165 @@ impl Tr<'_, '_> {
         self.escape_if(z);
     }
 
-    fn emit_ld32(&mut self, mem: &JitMem) -> Value {
-        let m = self.m_ptr();
-        let seg = self.c32(mem.seg as u32);
+    /// 実効オフセットとリニアアドレス (seg baseは実行時に隠しレジスタから読む)
+    fn lin_val(&mut self, mem: &JitMem) -> (Value, Value) {
         let off = self.eff_off(mem);
-        let v64 = self.helper1(self.sigs.ld32, h_ld32 as usize, &[m, seg, off]);
-        self.check_v64(v64)
+        let sbase = self.ld32_at(self.lay.hidden + 12 * mem.seg as usize);
+        let la = self.fb.ins().iadd(off, sbase);
+        (off, la)
     }
 
-    /// ALU共通部: 演算 + cc材料の書き出し + (kind7以外) dstへ格納
-    fn alu_core(&mut self, kind: u8, a: Value, b: Value, dst: Option<u8>) {
+    /// TLB高速路の判定部 (F1c-b)。la から (pa, 遅い道へ落ちる条件) を作る。
+    /// `need` = base_flags に要求する旗 (読み: U / 書き: W|U|D)。
+    /// 条件はインタプリタの translate_for + jit_try_* を**保守的に**写す —
+    /// 高速路が通る場合に限り意味が一致し、迷いは全部ヘルパ (原本) へ落とす:
+    /// ページ跨ぎ・TLBミス・旗不足・RAM外はヘルパ行き
+    fn tlb_probe(&mut self, la: Value, need: u32) -> (Value, Value) {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let lo = self.fb.ins().band_imm(la, 0xFFF);
+        let cross = self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, lo, 0xFFC);
+        let vpn = self.fb.ins().ushr_imm(la, 12);
+        let slot = self
+            .fb
+            .ins()
+            .band_imm(vpn, (self.lay.tlb_slots - 1) as i64);
+        let slot64 = self.fb.ins().uextend(types::I64, slot);
+        let stride = self.fb.ins().imul_imm(slot64, 12);
+        let tlb = self.addr(self.lay.tlb);
+        let e = self.fb.ins().iadd(tlb, stride);
+        let tag = self.fb.ins().load(types::I32, F, e, 0);
+        let miss = self.fb.ins().icmp(IntCC::NotEqual, tag, vpn);
+        let bf = self.fb.ins().load(types::I32, F, e, 4);
+        let got = self.fb.ins().band_imm(bf, need as i64);
+        let noperm = self.fb.ins().icmp_imm(IntCC::NotEqual, got, need as i64);
+        let mask = self.c32(0xFFFF_F000);
+        let base = self.fb.ins().band(bf, mask);
+        let pa = self.fb.ins().bor(base, lo);
+        let oob = self.fb.ins().icmp_imm(
+            IntCC::UnsignedGreaterThan,
+            pa,
+            (self.lay.mem_len as i64) - 4,
+        );
+        let s1 = self.fb.ins().bor(cross, miss);
+        let s2 = self.fb.ins().bor(s1, noperm);
+        let slow = self.fb.ins().bor(s2, oob);
+        (pa, slow)
+    }
+
+    /// 書き込み高速路の追加条件: テキストVRAM窓は遅い道 (vram_dirtyの約束)
+    fn vram_hit(&mut self, pa: Value) -> Value {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let hi3 = self.fb.ins().iadd_imm(pa, 3);
+        let a = self
+            .fb
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, hi3, self.lay.vram_lo as i64);
+        let b = self
+            .fb
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThanOrEqual, pa, self.lay.vram_hi as i64);
+        self.fb.ins().band(a, b)
+    }
+
+    /// ゲストRAMの pa から直接 i32 を読む
+    fn ram_ld32(&mut self, pa: Value) -> Value {
+        let pa64 = self.fb.ins().uextend(types::I64, pa);
+        let membase = self.addr(self.lay.mem);
+        let p = self.fb.ins().iadd(membase, pa64);
+        self.fb.ins().load(types::I32, F, p, 0)
+    }
+
+    fn ram_st32(&mut self, pa: Value, v: Value) {
+        let pa64 = self.fb.ins().uextend(types::I64, pa);
+        let membase = self.addr(self.lay.mem);
+        let p = self.fb.ins().iadd(membase, pa64);
+        self.fb.ins().store(F, v, p, 0);
+    }
+
+    /// 32bitロード: TLBヒットならインライン (F1c-b)、外れたらヘルパ (原本)
+    fn emit_ld32(&mut self, mem: &JitMem) -> Value {
+        let (off, la) = self.lin_val(mem);
+        let (pa, slow) = self.tlb_probe(la, rustx86_core::jit::TLB_U);
+        let slow_b = self.fb.create_block();
+        let fast_b = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.append_block_param(cont, types::I32);
+        self.fb.ins().brif(slow, slow_b, &[], fast_b, &[]);
+        self.fb.switch_to_block(fast_b);
+        self.fb.seal_block(fast_b);
+        let v = self.ram_ld32(pa);
+        self.fb.ins().jump(cont, &[v]);
+        self.fb.switch_to_block(slow_b);
+        self.fb.seal_block(slow_b);
+        let m = self.m_ptr();
+        let seg = self.c32(mem.seg as u32);
+        let v64 = self.helper1(self.sigs.ld32, h_ld32 as usize, &[m, seg, off]);
+        let sv = self.check_v64(v64);
+        self.fb.ins().jump(cont, &[sv]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+        self.fb.block_params(cont)[0]
+    }
+
+    /// 32bitストア: TLBヒット (W|U|D、VRAM外) ならインライン、外れたらヘルパ
+    fn emit_st32(&mut self, mem: &JitMem, v: Value) {
+        use rustx86_core::jit::{TLB_D, TLB_U, TLB_W};
+        let (off, la) = self.lin_val(mem);
+        let (pa, slow0) = self.tlb_probe(la, TLB_W | TLB_U | TLB_D);
+        let vr = self.vram_hit(pa);
+        let slow = self.fb.ins().bor(slow0, vr);
+        let slow_b = self.fb.create_block();
+        let fast_b = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.ins().brif(slow, slow_b, &[], fast_b, &[]);
+        self.fb.switch_to_block(fast_b);
+        self.fb.seal_block(fast_b);
+        self.ram_st32(pa, v);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(slow_b);
+        self.fb.seal_block(slow_b);
+        let m = self.m_ptr();
+        let seg = self.c32(mem.seg as u32);
+        let ok = self.helper1(self.sigs.st32, h_st32 as usize, &[m, seg, off, v]);
+        self.check_ok(ok);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// RMW (`alu [mem], b`): TLBヒットならロード→alu (ccインライン)→ストア、
+    /// 外れたらヘルパ (read→alu_w→writeをRustで完結 — 意味は同一)
+    fn emit_rmw32(&mut self, mem: &JitMem, kind: u8, b: Value) {
+        use rustx86_core::jit::{TLB_D, TLB_U, TLB_W};
+        let (off, la) = self.lin_val(mem);
+        let (pa, slow0) = self.tlb_probe(la, TLB_W | TLB_U | TLB_D);
+        let vr = self.vram_hit(pa);
+        let slow = self.fb.ins().bor(slow0, vr);
+        let slow_b = self.fb.create_block();
+        let fast_b = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.ins().brif(slow, slow_b, &[], fast_b, &[]);
+        self.fb.switch_to_block(fast_b);
+        self.fb.seal_block(fast_b);
+        let a = self.ram_ld32(pa);
+        let r = self.alu_core(kind, a, b, None);
+        self.ram_st32(pa, r);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(slow_b);
+        self.fb.seal_block(slow_b);
+        let m = self.m_ptr();
+        let seg = self.c32(mem.seg as u32);
+        let k = self.c32(kind as u32);
+        let ok = self.helper1(self.sigs.rmw32, h_rmw32 as usize, &[m, seg, off, k, b]);
+        self.check_ok(ok);
+        self.fb.ins().jump(cont, &[]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
+    /// ALU共通部: 演算 + cc材料の書き出し + (kind7以外) dstへ格納。
+    /// 返り値 = 結果r (RMWインラインがメモリへ書き戻すのに使う)
+    fn alu_core(&mut self, kind: u8, a: Value, b: Value, dst: Option<u8>) -> Value {
         let cin = if kind == 2 || kind == 3 {
             self.call_cf()
         } else {
@@ -286,6 +435,7 @@ impl Tr<'_, '_> {
                 self.set_reg(d, r);
             }
         }
+        r
     }
 
     fn op(&mut self, op: &JitOp) {
@@ -379,38 +529,20 @@ impl Tr<'_, '_> {
                 self.alu_core(4, a, b, None);
             }
             JitOp::StoreMR { mem, src } => {
-                let m = self.m_ptr();
-                let seg = self.c32(mem.seg as u32);
-                let off = self.eff_off(&mem);
                 let v = self.reg(src);
-                let ok = self.helper1(self.sigs.st32, h_st32 as usize, &[m, seg, off, v]);
-                self.check_ok(ok);
+                self.emit_st32(&mem, v);
             }
             JitOp::StoreMI { mem, imm } => {
-                let m = self.m_ptr();
-                let seg = self.c32(mem.seg as u32);
-                let off = self.eff_off(&mem);
                 let v = self.c32(imm);
-                let ok = self.helper1(self.sigs.st32, h_st32 as usize, &[m, seg, off, v]);
-                self.check_ok(ok);
+                self.emit_st32(&mem, v);
             }
             JitOp::AluMR { kind, mem, reg } => {
-                let m = self.m_ptr();
-                let seg = self.c32(mem.seg as u32);
-                let off = self.eff_off(&mem);
-                let k = self.c32(kind as u32);
                 let b = self.reg(reg);
-                let ok = self.helper1(self.sigs.rmw32, h_rmw32 as usize, &[m, seg, off, k, b]);
-                self.check_ok(ok);
+                self.emit_rmw32(&mem, kind, b);
             }
             JitOp::AluMI { kind, mem, imm } => {
-                let m = self.m_ptr();
-                let seg = self.c32(mem.seg as u32);
-                let off = self.eff_off(&mem);
-                let k = self.c32(kind as u32);
                 let b = self.c32(imm);
-                let ok = self.helper1(self.sigs.rmw32, h_rmw32 as usize, &[m, seg, off, k, b]);
-                self.check_ok(ok);
+                self.emit_rmw32(&mem, kind, b);
             }
             JitOp::PushR { src } => {
                 let m = self.m_ptr();
