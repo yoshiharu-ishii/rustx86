@@ -397,6 +397,31 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             m.cpu.set_flag(super::CF, ext);
             m.cpu.set_flag(super::OF, ext);
         }
+        // LSS/LFS/LGS (386〜): far pointer をレジスタとセグメントへ同時ロード。
+        // LES/LDS (C4/C5) の親戚で、オフセットの幅はオペランドサイズに従う
+        0xB2 | 0xB4 | 0xB5 => {
+            let (reg, rm) = modrm(m, d);
+            let addr = match rm {
+                Operand::Mem { addr, .. } => addr,
+                Operand::Reg(_) => {
+                    m.trap(format!("LSS/LFS/LGS with register operand (0f {op2:#04x})"));
+                    return;
+                }
+            };
+            let off = if d.opsize32 {
+                m.read32(addr)
+            } else {
+                m.read16(addr) as u32
+            };
+            let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
+            m.cpu.set_reg_w(reg, off, d.opsize32);
+            let sr = match op2 {
+                0xB2 => super::SS,
+                0xB4 => super::FS,
+                _ => super::GS,
+            };
+            load_seg(m, sr, seg);
+        }
         // MOVZX/MOVSX (386〜): 小さい値をゼロ拡張/符号拡張して広いレジスタへ。
         // Cコンパイラが u8/i8/u16/i16 → int の変換で山ほど出す
         0xB6 | 0xB7 | 0xBE | 0xBF => {

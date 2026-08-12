@@ -40,8 +40,8 @@ pub mod twobyte;
 
 use alu::{alu8, alu_w, condition};
 use operand::{
-    fetch16, fetch32, fetch8, fetch_w, modrm, pop16, pop_w, push16, push_w, read_op16, read_op8,
-    read_op_w, sp_read, sp_write, write_op16, write_op8, write_op_w, Operand,
+    fetch16, fetch32, fetch8, fetch_w, modrm, pop_w, push_w, read_op16, read_op8, read_op_w,
+    sp_read, sp_write, write_op16, write_op8, write_op_w, Operand,
 };
 use shift::shift_rot;
 

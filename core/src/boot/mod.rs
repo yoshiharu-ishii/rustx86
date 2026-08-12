@@ -22,6 +22,28 @@ impl Machine {
         Ok(())
     }
 
+    /// テストROM (test386.asm など) を生で実行する。
+    ///
+    /// ROMをRAM上端の1MB境界に合わせて置き (64KBなら 0xF0000〜)、リセット直後の
+    /// 姿勢 `F000:FFF0` から**BIOS HLEを通さずに**実行する。うちは普段
+    /// CS==0xF000 を全部ホスト関数で肩代わりしているが、テストROMにとって
+    /// そこは**実行すべき本物のコード**なので素通しにする (`bios_hle = false`)。
+    ///
+    /// power_on_self_test は呼ばない — IVT/BDAを撒くのはBIOSの仕事で、
+    /// テストROMは自前のIDT/GDTを組む。RAMはゼロ初期化のまま渡す
+    pub fn boot_rom(&mut self, rom: &[u8]) -> Result<(), String> {
+        if rom.len() > 0x2_0000 {
+            return Err(format!("ROMが大きすぎる ({} バイト > 128KB)", rom.len()));
+        }
+        let base = 0x10_0000 - rom.len();
+        self.mem[base..0x10_0000].copy_from_slice(rom);
+        self.bios_hle = false;
+        // リセットベクタ。実CPUは 0xFFFFFFF0 (CS base 0xFFFF0000) から走り出すが、
+        // ROMは1MB内の別名 (F000:FFF0) にも同じ jmp が見えるよう作られている
+        self.cpu.set_cs_ip(0xF000, 0xFFF0);
+        Ok(())
+    }
+
     /// bzImage を直接ロードして 32bit カーネルエントリへ飛ぶ (Tier 3b)。
     ///
     /// ブートローダ (GRUB) がやることを肩代わりする「32bit ブートプロトコル」:

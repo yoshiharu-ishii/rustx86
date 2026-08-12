@@ -149,6 +149,13 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
         0x8E => {
             let (reg, rm) = modrm(m, d);
+            // mov cs, r/m は 386 では #UD。まだ何も書いていないので
+            // IPを命令頭へ戻して INT 6 を配送する (test386 が実挙動を要求する)
+            if reg == 1 {
+                m.cpu.set_ip(start_ip);
+                interrupt(m, 6);
+                return;
+            }
             if reg > 5 {
                 m.trap(format!("mov sreg, r/m16 with reg={reg} (reserved)"));
                 return;
@@ -376,15 +383,20 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // far ポインタ (4バイト) を読み、下位2バイトを汎用レジスタへ、
         // 上位2バイトをセグメントレジスタへ入れる
         0xC4 | 0xC5 => {
+            // オフセットの幅はオペランドサイズ (o32ならoff32+seg16の6バイト)
             let (reg, rm) = modrm(m, d);
             let addr = match rm {
                 Operand::Mem { addr, .. } => addr,
                 Operand::Reg(_) => panic!("LES/LDS with register operand"),
             };
-            let off = m.read16(addr);
-            let seg = m.read16(addr.wrapping_add(2));
-            m.cpu.set_reg16(reg, off);
-            m.cpu.sregs[if op == 0xC4 { ES } else { DS }] = seg;
+            let off = if d.opsize32 {
+                m.read32(addr)
+            } else {
+                m.read16(addr) as u32
+            };
+            let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
+            m.cpu.set_reg_w(reg, off, d.opsize32);
+            load_seg(m, if op == 0xC4 { ES } else { DS }, seg);
         }
 
         // --- XLAT: AL = [BX + AL] ---
@@ -491,25 +503,29 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             load_seg(m, CS, seg);
             m.cpu.set_ip(off);
         }
+        // far call / far ret も**オフセットとpush/popの幅はオペランドサイズ**。
+        // 16bit固定にしていると `o32 call dword seg:off32` が off32 の上位16bitを
+        // セグメントとして食い、CS=0000 の空RAMへ飛ぶ (test386 POST 05 が暴いた)
         0x9A => {
-            let off = fetch16(m);
+            let off = fetch_w(m, d.opsize32);
             let seg = fetch16(m);
-            let cs = m.cpu.sregs[CS];
-            push16(m, cs);
-            let ret = m.cpu.ip as u16;
-            push16(m, ret);
-            m.cpu.sregs[CS] = seg;
-            m.cpu.set_ip(off as u32);
+            let cs = m.cpu.sregs[CS] as u32;
+            push_w(m, cs, d.opsize32);
+            push_w(m, m.cpu.ip, d.opsize32);
+            load_seg(m, CS, seg);
+            m.cpu.set_ip(off);
         }
         0xCB => {
-            let ip = pop16(m) as u32;
-            m.cpu.sregs[CS] = pop16(m);
+            let ip = pop_w(m, d.opsize32);
+            let seg = pop_w(m, d.opsize32) as u16;
+            load_seg(m, CS, seg);
             m.cpu.set_ip(ip);
         }
         0xCA => {
             let n = fetch16(m) as u32;
-            let ip = pop16(m) as u32;
-            m.cpu.sregs[CS] = pop16(m);
+            let ip = pop_w(m, d.opsize32);
+            let seg = pop_w(m, d.opsize32) as u16;
+            load_seg(m, CS, seg);
             m.cpu.set_ip(ip);
             let sp = sp_read(m).wrapping_add(n);
             sp_write(m, sp);
@@ -727,10 +743,15 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         0xD5 => decimal::aad(m),
 
         // --- ループ/条件ジャンプの残り ---
+        // カウンタの幅は**アドレスサイズ**が選ぶ (0x67付きは16bitコードでもECX)。
+        // E2 (LOOP) だけ直してこの2つがCX固定のままだった — test386のPOST 01
+        // (JECXZがECX=0x10000で飛んでしまう) が最初に暴いた
         0xE0 | 0xE1 => {
             let rel = fetch8(m) as i8;
-            let cx = m.cpu.reg16(CX).wrapping_sub(1);
-            m.cpu.set_reg16(CX, cx);
+            let a32 = d.addrsize32;
+            let cx = m.cpu.reg_w(CX, a32).wrapping_sub(1);
+            m.cpu.set_reg_w(CX, cx, a32);
+            let cx = if a32 { cx } else { cx & 0xFFFF };
             let zcond = if op == 0xE1 {
                 m.cpu.flag(ZF)
             } else {
@@ -743,7 +764,12 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
         0xE3 => {
             let rel = fetch8(m) as i8;
-            if m.cpu.reg16(CX) == 0 {
+            let cx = if d.addrsize32 {
+                m.cpu.regs[CX]
+            } else {
+                m.cpu.reg16(CX) as u32
+            };
+            if cx == 0 {
                 let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
                 m.cpu.set_ip(ip);
             }
