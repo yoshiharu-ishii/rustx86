@@ -37,6 +37,8 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut n: u64 = 0;
     let mut serial = Vec::new();
+    // bootphaseと同じ区間内訳 (絶対の物差しはこのバイナリに一本化 — perf-log 2026-08-12)
+    let mut first_serial: Option<(u64, f32)> = None;
     // ポンプ間隔はwasmと同じ2M命令 (F1b-3の実測値を引き継ぐ)
     while n < 3_000_000_000 {
         n += m.run(2_000_000);
@@ -46,6 +48,9 @@ fn main() {
         let before = serial.len();
         serial.extend_from_slice(&m.devices.uart.tx);
         m.devices.uart.tx.clear();
+        if first_serial.is_none() && !serial.is_empty() {
+            first_serial = Some((n, t0.elapsed().as_secs_f32()));
+        }
         if let Some(rt) = rt.as_mut() {
             rt.pump(&mut m);
         }
@@ -71,6 +76,14 @@ fn main() {
         n / 1_000_000,
         secs,
         n as f64 / 1e6 / secs as f64,
+    );
+    let (fs_n, fs_t) = first_serial.unwrap_or((0, 0.0));
+    println!(
+        "区間: 展開ステブ (無言) {}M命令 {:.1}s / dmesg〜シェル {}M命令 {:.1}s",
+        fs_n / 1_000_000,
+        fs_t,
+        (n - fs_n) / 1_000_000,
+        secs - fs_t
     );
     println!("決定性の指紋: 命令数={n} シリアルFNV={h:016x}");
     if jit_on {
