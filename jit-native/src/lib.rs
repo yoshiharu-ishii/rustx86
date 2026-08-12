@@ -30,7 +30,7 @@
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature, Value};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 use rustx86_core::jit::{JitBlock, JitLayout, JitMem, JitOp};
@@ -226,6 +226,12 @@ struct Tr<'a, 'b> {
     cur_ip_off: u32,
     /// エントリで読んだ jit_budget (このブロック実行の最大命令数) — F1c-c4
     budget: Option<Value>,
+    /// ブロック内レジスタ割付 (F1c-d3): GPRをCranelift変数 (= ホストレジスタ) に
+    /// 載せる。liveビット = 変数が現値を持つ (初回読みで遅延ロード)。
+    /// dirtyビット = 変数がメモリより新しい — **全脱出点・全終端・GPRを触る
+    /// ヘルパの前**で書き戻すのが規律 (脱出モデルとの整合はこれで保つ)
+    live: u8,
+    dirty: u8,
 }
 
 const F: MemFlags = MemFlags::trusted();
@@ -254,10 +260,45 @@ impl Tr<'_, '_> {
         self.fb.ins().istore8(F, c, p, 0);
     }
     fn reg(&mut self, r: u8) -> Value {
-        self.ld32_at(self.lay.regs + 4 * r as usize)
+        let var = Variable::from_u32(r as u32);
+        if self.live & (1 << r) == 0 {
+            let mv = self.ld32_at(self.lay.regs + 4 * r as usize);
+            self.fb.def_var(var, mv);
+            self.live |= 1 << r;
+        }
+        self.fb.use_var(var)
     }
     fn set_reg(&mut self, r: u8, v: Value) {
-        self.st32_at(self.lay.regs + 4 * r as usize, v);
+        self.fb.def_var(Variable::from_u32(r as u32), v);
+        self.live |= 1 << r;
+        self.dirty |= 1 << r;
+    }
+    /// dirtyなGPRを**今いるブロックに**書き戻すストアを吐く。compile-time状態は
+    /// 変えない — 脱出側ブロック専用 (fall-through側では引き続きdirty)
+    fn flush_here(&mut self) {
+        let d = self.dirty;
+        for r in 0..8u8 {
+            if d & (1 << r) != 0 {
+                let v = self.fb.use_var(Variable::from_u32(r as u32));
+                self.st32_at(self.lay.regs + 4 * r as usize, v);
+            }
+        }
+    }
+    /// maskのdirtyなGPRを書き戻してdirty解除 (GPRを読むヘルパの前・終端用)
+    fn flush_regs(&mut self, mask: u8) {
+        let d = self.dirty & mask;
+        for r in 0..8u8 {
+            if d & (1 << r) != 0 {
+                let v = self.fb.use_var(Variable::from_u32(r as u32));
+                self.st32_at(self.lay.regs + 4 * r as usize, v);
+            }
+        }
+        self.dirty &= !mask;
+    }
+    /// GPRを書くヘルパの後で変数を無効化 (次の読みはメモリから)
+    fn invalidate(&mut self, mask: u8) {
+        self.live &= !mask;
+        self.dirty &= !mask;
     }
     fn helper1(&mut self, sr: cranelift_codegen::ir::SigRef, f: usize, args: &[Value]) -> Value {
         let callee = self.fb.ins().iconst(types::I64, f as i64);
@@ -418,6 +459,8 @@ impl Tr<'_, '_> {
         self.fb.ins().brif(cond_escape, esc, &[], cont, &[]);
         self.fb.switch_to_block(esc);
         self.fb.seal_block(esc);
+        // 脱出 = interpが「実行済みk命令のメモリ状態」から再開する — dirtyを実体化
+        self.flush_here();
         let ip = self.ld32_at(self.lay.ip);
         let off = self.c32(self.cur_ip_off);
         let nip = self.fb.ins().iadd(ip, off);
@@ -453,6 +496,8 @@ impl Tr<'_, '_> {
         self.fb.ins().brif(cond, taken, &[], cont, &[]);
         self.fb.switch_to_block(taken);
         self.fb.seal_block(taken);
+        // 正規の途中退出もメモリ状態を実体化してから戻る
+        self.flush_here();
         let ip = self.ld32_at(self.lay.ip);
         let d = self.c32(self.cur_ip_off.wrapping_add(len).wrapping_add(rel));
         let nip = self.fb.ins().iadd(ip, d);
@@ -782,25 +827,33 @@ impl Tr<'_, '_> {
             JitOp::PushR { src } => {
                 let m = self.m_ptr();
                 let v = self.reg(src);
+                self.flush_regs(1 << 4); // ヘルパがESPを読み書きする
                 let ok = self.helper1(self.sigs.push32, h_push32 as usize, &[m, v]);
+                self.invalidate(1 << 4);
                 self.check_ok(ok);
             }
             JitOp::PushI { imm } => {
                 let m = self.m_ptr();
                 let v = self.c32(imm);
+                self.flush_regs(1 << 4);
                 let ok = self.helper1(self.sigs.push32, h_push32 as usize, &[m, v]);
+                self.invalidate(1 << 4);
                 self.check_ok(ok);
             }
             JitOp::PopR { dst } => {
                 let m = self.m_ptr();
+                self.flush_regs(1 << 4);
                 let v64 = self.helper1(self.sigs.pop32, h_pop32 as usize, &[m]);
+                self.invalidate(1 << 4);
                 let v = self.check_v64(v64);
                 // pop esp もこの順で正しい (SP更新→上書き)
                 self.set_reg(dst, v);
             }
             JitOp::Leave => {
                 let m = self.m_ptr();
+                self.flush_regs(0x30); // ヘルパがESP・EBPを読み書きする
                 let ok = self.helper1(self.sigs.leave, h_leave as usize, &[m]);
+                self.invalidate(0x30);
                 self.check_ok(ok);
             }
             JitOp::XchgA { reg } => {
@@ -815,7 +868,9 @@ impl Tr<'_, '_> {
                 let k = self.c32(kind as u32);
                 let r = self.c32(reg as u32);
                 let c = self.c32(count as u32);
+                self.flush_regs(1 << reg); // ヘルパが対象regを読み書きする
                 self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
+                self.invalidate(1 << reg);
             }
             JitOp::ShiftRC { kind, reg } => {
                 // countはCL (ECXの下位8bit) を実行時に読む
@@ -823,7 +878,9 @@ impl Tr<'_, '_> {
                 let k = self.c32(kind as u32);
                 let r = self.c32(reg as u32);
                 let c = self.reg8v(1);
+                self.flush_regs(1 << reg);
                 self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
+                self.invalidate(1 << reg);
             }
             JitOp::MovzxBR { dst, src8 } => {
                 let v = self.reg8v(src8);
@@ -891,7 +948,11 @@ impl Tr<'_, '_> {
                 let k = self.c32(kind as u32);
                 let r = self.c32(reg8 as u32);
                 let i = self.c32(imm as u32);
+                // ヘルパはreg8の土台 (AH形は r-4) を読み書きする
+                let backing = if reg8 < 4 { reg8 } else { reg8 - 4 };
+                self.flush_regs(1 << backing);
                 self.helper0(self.sigs.quad_void, h_grp3b8_r as usize, &[m, k, r, i]);
+                self.invalidate(1 << backing);
             }
             JitOp::Mov8RR { dst8, src8 } => {
                 let v = self.reg8v(src8);
@@ -922,6 +983,10 @@ fn translate(
     ctx.func.signature.returns.push(AbiParam::new(types::I32));
 
     let mut fb = FunctionBuilder::new(&mut ctx.func, fbc);
+    // GPR 8本の変数 (F1c-d3 ブロック内レジスタ割付)
+    for r in 0..8u32 {
+        fb.declare_var(Variable::from_u32(r), types::I32);
+    }
     let entry = fb.create_block();
     fb.switch_to_block(entry);
     fb.seal_block(entry);
@@ -957,6 +1022,8 @@ fn translate(
         cur_k: 0,
         cur_ip_off: 0,
         budget: None,
+        live: 0,
+        dirty: 0,
     };
     // 予算 (jit_budget) はエントリで1回読む — coreがenter直前に書いている
     let b = tr.ld32_at(lay.jit_budget);
@@ -994,7 +1061,10 @@ fn translate(
         }
     }
 
-    // 出口: ipの帳尻と (call/retなら) スタック操作
+    // 出口: 全終端でdirtyなGPRを実体化してから帳尻を合わせる (F1c-d3)。
+    // Call/Retのヘルパ (push/pop) がESPを読むのもこのflushが前提
+    tr.flush_regs(0xFF);
+    // ipの帳尻と (call/retなら) スタック操作
     match term {
         None => {
             let ip = tr.ld32_at(tr.lay.ip);
