@@ -220,8 +220,8 @@ pub(crate) fn grp5(m: &mut Machine, d: &Decoder, start_ip: u32) {
             if kind == 3 {
                 // CALL far はコールゲート経由のリング遷移になり得る — 共通経路へ
                 super::segment::far_call(m, seg, off, w);
-            } else {
-                super::load_seg(m, CS, seg);
+            } else if super::load_seg(m, CS, seg) {
+                // JMP far。CS検査に落ちたらIPは据えない
                 m.cpu.set_ip(off);
             }
         }

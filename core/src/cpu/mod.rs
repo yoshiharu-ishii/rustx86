@@ -55,7 +55,7 @@ pub(crate) use segment::{load_seg, load_seg_raw, SegHidden};
 
 /// lib.rs (bzImageロード) から GDT 経由でセグメントを積むための公開口
 pub fn load_seg_pub(m: &mut Machine, idx: usize, sel: u16) {
-    load_seg(m, idx, sel);
+    let _ = load_seg(m, idx, sel);
 }
 
 /// 最小のx87 — 検出と初期化に答えるだけ。
