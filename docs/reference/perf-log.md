@@ -123,3 +123,34 @@ PGO (-25%だが寝かせ) の議論は [ADR-0009](../adr/0009-pgo-shelved.md) �
 | vmlinux直接 (600M) | 21s | **15s** | 14.0〜14.5s |
 
 残るタブ税は**~7%**。型は [pitfalls.md](../explanation/pitfalls.md) の1 (筆頭)。PR #68。
+
+## 2026-08-12: ブート解剖 — 580Mの正体と2連撃 (-36%)
+
+**新しい道具**: ipを4096命令ごとにサンプリングし、System.mapで関数名に解決する
+ブートプロファイラ (core/examples/bootprof.rs + tools/bootprof-resolve.py)。
+決定的なので毎回同じヒストグラムが出る。
+※最初に取ったSystem.mapがカーネルと版ズレしていて全attributionがゴミだった
+(zstd解凍が犯人に見えた)。版一致を確認してから読むこと — fetch-images.shは
+版固定 (v3.24) + System.map同時取得に修正済み。
+
+**580Mの本当の内訳 (上位)**:
+
+| 犯人 | 命令数 | 正体 |
+|---|---|---|
+| blake2s+chacha+sched_clock | ~130M (22%) | **CRNG** — RDRAND無しCPUなのでジッタエントロピーをblake2sで稼いでいた |
+| trace_event_update_all+kallsyms検索群 | ~145M (25%) | **ftrace/トレースポイント初期化** (シスコール名のkallsyms総当たり) |
+| inflate_fast | 56M (9%) | initramfs (cpio.gz) の解凍 |
+| mpihelp (RSA) | ~14M | X.509証明書検証 |
+
+**打った手 (どちらも「入れたら終わり」・Linux直接ブート経路のみ・他OS互換に無関係)**:
+
+1. **initramfs非圧縮化** (make-mini-initramfs.sh): カーネルは非圧縮cpioを自動判別。
+   580→530M (-50M)。代償はファイル 1.3→2.2MB
+2. **SETUP_RNG_SEED** (boot/mod.rs): x86ブートプロトコルの setup_data type 9 で
+   エントロピー32バイトを渡す — 実ブートローダ (GRUB等) と同じ義務の履行。
+   ジッタループごと消えて 530→**370M (-160M)**。種は**固定値** (決定性の柱を守る。
+   代償: ゲストの/dev/urandomは予測可能 — 教材としては妥当、秘密用途は不可)
+
+**結果**: ネイティブ5.7s (熱あり)、wasm 8.8s。**ブラウザ10秒切りが射程に入った**。
+残りの大物 = ftrace初期化~145MはcmdlineでOFFにできず、E5 (自前カーネルconfig、
+CONFIG_FTRACE=n) の獲物として台帳へ。

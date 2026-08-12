@@ -48,7 +48,10 @@ chmod 755 "$work/root/init"
 # cpioは自前で書く (tools/mkcpio.py) — /dev/console ノードを非rootで
 # 含めるため。コンソールノードが無いとinitは入出力ゼロの盲目で走る
 python3 tools/mkcpio.py "$work/mini.cpio" "$work/root" --console
-gzip -c "$work/mini.cpio" > images/initramfs-mini
+# 非圧縮のまま置く (2026-08-12): カーネルは非圧縮cpioを自動判別する。
+# gzipだと展開に~56M命令 (ブートの9%) を払っていた — bootprofの実測。
+# 代償はファイルサイズ 1.3MB→2.2MB のみ
+cp "$work/mini.cpio" images/initramfs-mini
 # ブラウザ版 (linux-machine.js) は web/ から読む。置き忘れると initrd 無しで
 # 起動して VFS パニックになる (実際になった) ので、作ったその場で配る
 cp images/initramfs-mini web/initramfs-mini

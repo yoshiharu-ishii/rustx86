@@ -51,7 +51,9 @@ ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
 # Alpine の netboot 配布物 (32bit x86)。カーネルと initramfs の2つで起動できる
-ALPINE_BASE=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86/netboot
+# 版は固定する (latest-stableは中身が動き、System.mapとカーネルの版ズレで
+# プロファイルが全部ゴミになる — 2026-08-12に踏んだ)。上げるときは3点セットで
+ALPINE_BASE=https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86/netboot
 
 # 入れるゲーム。形式は「パッケージ名:イメージへ入れるファイル…」
 #
@@ -126,7 +128,10 @@ build_linux() {
   mkdir -p "$IMAGES"
   fetch "$ALPINE_BASE/vmlinuz-lts" "$IMAGES/vmlinuz-lts"
   fetch "$ALPINE_BASE/initramfs-lts" "$IMAGES/initramfs-lts"
-  say "Linux (Alpine lts カーネル + initramfs) 完了"
+  # System.map (ブート解剖 bootprof 用)。ファイル名に版が入るので一覧から拾う
+  SYSMAP=$(curl -sL --max-time 30 "$ALPINE_BASE/" | grep -o 'System.map-[^"<]*' | head -1)
+  [ -n "$SYSMAP" ] && fetch "$ALPINE_BASE/$SYSMAP" "$IMAGES/System.map-lts"
+  say "Linux (Alpine lts カーネル + initramfs + System.map) 完了"
 }
 
 build_freedos() {

@@ -166,9 +166,37 @@ impl Machine {
             None => None,
         };
 
+        // --- SETUP_RNG_SEED: ブートローダの義務としてエントロピーを渡す ---
+        //
+        // これが無いと、RDRANDの無いこのCPUでカーネルはジッタエントロピー
+        // (sched_clockを叩きながらblake2sで混ぜ続けるループ) で乱数を稼ぎ、
+        // **ブート580Mのうち~100M命令**を乱数生成に燃やしていた (bootprofの実測)。
+        // x86ブートプロトコルの setup_data (type 9 = SETUP_RNG_SEED) で32バイト
+        // 渡せば、カーネルは起動時にCRNGを種付けして即readyになる
+        // (6.x系は random.trust_bootloader が既定で有効)。
+        //
+        // **種は固定値** — このエミュレータの柱は決定性 (同じイメージなら
+        // 命令数もビット同一) なので、ここを乱数にはできない。代償として
+        // ゲストの/dev/urandomは予測可能になる。教材エミュレータとしては
+        // 妥当な取引だが、秘密を扱う用途には使えない (READMEにも明記)
+        const RNG_SEED_ADDR: u32 = 0x0002_1000;
+        {
+            let mut node = Vec::with_capacity(16 + 32);
+            node.extend_from_slice(&0u64.to_le_bytes()); // next: 終端
+            node.extend_from_slice(&9u32.to_le_bytes()); // type: SETUP_RNG_SEED
+            node.extend_from_slice(&32u32.to_le_bytes()); // len
+            node.extend_from_slice(b"rustx86 deterministic seed v1..!"); // 32B固定
+            for (i, b) in node.iter().enumerate() {
+                self.write_phys8(RNG_SEED_ADDR + i as u32, *b);
+            }
+        }
+
         // zero page を組んで低位に置く (慣習の 0x1_0000)
         const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
+        let mut zp =
+            bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
+        // setup_data (0x250, u64) を種ノードへ向ける
+        zp[0x250..0x258].copy_from_slice(&(RNG_SEED_ADDR as u64).to_le_bytes());
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }
