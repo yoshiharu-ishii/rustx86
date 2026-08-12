@@ -161,8 +161,9 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
                 return;
             }
             let v = read_op16(m, &rm);
-            // 保護モードではGDTから隠しレジスタへ写す。リアルモードなら従来どおり
-            load_seg(m, reg, v);
+            // 保護モードではGDTから隠しレジスタへ写す。リアルモードなら従来どおり。
+            // 失敗 (#GP/#NP/#SS) はload_seg内で配送済み — この命令はここで終わり
+            let _ = load_seg(m, reg, v);
         }
         0xB0..=0xB7 => {
             let v = fetch8(m);
@@ -257,8 +258,9 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // ここでは実装しない (Tier 3 で 0x0F を二バイト空間として使う)
         0x07 | 0x17 | 0x1F => {
             let v = pop_w(m, d.opsize32) as u16;
-            // 保護モードでは記述子を読み直して隠しレジスタも更新する
-            load_seg(m, (op >> 3) as usize & 3, v);
+            // 保護モードでは記述子を読み直して隠しレジスタも更新する。
+            // POPはもう起きた (SPは進んだ) 上でのセグメント検査 — 実CPUも同順
+            let _ = load_seg(m, (op >> 3) as usize & 3, v);
         }
 
         // --- PUSHA/POPA (186)。オペランドサイズ32ならPUSHAD/POPAD ---
@@ -395,8 +397,10 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
                 m.read16(addr) as u32
             };
             let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
-            m.cpu.set_reg_w(reg, off, d.opsize32);
-            load_seg(m, if op == 0xC4 { ES } else { DS }, seg);
+            // セグメントを先に検査してからレジスタを書く (失敗なら何も変えない)
+            if load_seg(m, if op == 0xC4 { ES } else { DS }, seg) {
+                m.cpu.set_reg_w(reg, off, d.opsize32);
+            }
         }
 
         // --- XLAT: AL = [BX + AL] ---
@@ -505,9 +509,10 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             let seg = fetch16(m);
             // 保護モードではこれが**遷移を完成させる**一撃になる。
             // PE=1にしただけではまだ16bitのまま走っていて、CSに記述子が
-            // 積まれて初めて32bitコードが始まる
-            load_seg(m, CS, seg);
-            m.cpu.set_ip(off);
+            // 積まれて初めて32bitコードが始まる (CS検査に落ちたらIPは据えない)
+            if load_seg(m, CS, seg) {
+                m.cpu.set_ip(off);
+            }
         }
         // far call / far ret も**オフセットとpush/popの幅はオペランドサイズ**。
         // 16bit固定にしていると `o32 call dword seg:off32` が off32 の上位16bitを

@@ -435,13 +435,15 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 m.read16(addr) as u32
             };
             let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
-            m.cpu.set_reg_w(reg, off, d.opsize32);
             let sr = match op2 {
                 0xB2 => super::SS,
                 0xB4 => super::FS,
                 _ => super::GS,
             };
-            load_seg(m, sr, seg);
+            // セグメントを先に検査してからレジスタを書く (失敗なら何も変えない)
+            if load_seg(m, sr, seg) {
+                m.cpu.set_reg_w(reg, off, d.opsize32);
+            }
         }
         // MOVZX/MOVSX (386〜): 小さい値をゼロ拡張/符号拡張して広いレジスタへ。
         // Cコンパイラが u8/i8/u16/i16 → int の変換で山ほど出す
@@ -476,7 +478,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
         0xA1 | 0xA9 => {
             let s = if op2 == 0xA1 { FS } else { GS };
             let v = super::operand::pop_w(m, d.opsize32) as u16;
-            super::load_seg(m, s, v);
+            let _ = super::load_seg(m, s, v);
         }
         // SHLD/SHRD (386〜): 倍精度シフト。隣のレジスタから溢れたビットを
         // 継ぎ足しながらずらす — 64bit値を32bitレジスタ2本でずらすための命令
