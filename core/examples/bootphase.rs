@@ -52,6 +52,22 @@ fn main() {
                     d.fallbacks / 1_000_000
                 );
             }
+            // 連結の退出理由 (opstats時のみ) — B4続編 (ページ跨ぎ連結など) の的を
+            // 推測でなくこの分布で決める
+            let ex = &m.dcache.chain_exits;
+            let ex_total: u64 = ex.iter().sum();
+            if ex_total > 0 {
+                println!(
+                    "連結退出: 使い切り{}M ({:.0}%) / フォールト系{}M / IRQ境界{}M / ページ跨ぎ{}M ({:.0}%)  — 平均連結長 {:.1}命令",
+                    ex[0] / 1_000_000,
+                    ex[0] as f64 * 100.0 / ex_total as f64,
+                    ex[1] / 1_000_000,
+                    ex[2] / 1_000_000,
+                    ex[3] / 1_000_000,
+                    ex[3] as f64 * 100.0 / ex_total as f64,
+                    n as f64 / ex_total as f64
+                );
+            }
             // opstats フィーチャ付きなら、実行回数の上位を出す
             // (デコードキャッシュの対象選定は推測でなくこの実測で行う)
             let total: u64 = m.op_counts.iter().sum();
