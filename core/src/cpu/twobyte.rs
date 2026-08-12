@@ -110,24 +110,38 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 // 副作用の方が本体になった珍しい命令
                 4 | 5 => {
                     let sel = read_op16(m, &rm);
-                    let ok = if sel & !0x3 == 0 {
-                        false // ヌルセレクタは常に不成立
-                    } else {
+                    // 「ロードしたら通るか」をロードせずに答える命令なので、
+                    // 検査の順序と条件はセグメントロードの写し:
+                    // 表の範囲→present→コード/データ→特権 (適合は免除) →可否
+                    let ok = 'v: {
+                        if sel & !0x3 == 0 {
+                            break 'v false; // ヌルセレクタは常に不成立
+                        }
+                        let (tbase, tlimit) = super::segment::descriptor_table(m, sel);
                         let off = (sel & !0x7) as u32;
-                        // TIビットでGDT/LDTを選ぶ (セグメントロードと同じ規則)
-                        let a = super::segment::descriptor_table(m, sel).0.wrapping_add(off);
+                        if off + 7 > tlimit {
+                            break 'v false; // 表の外
+                        }
+                        let a = tbase.wrapping_add(off);
                         let prev_sys = m.sys_access.replace(true);
                         let hi = m.read32(a.wrapping_add(4));
                         m.sys_access.set(prev_sys);
                         let access = ((hi >> 8) & 0xFF) as u8;
-                        let present = access & 0x80 != 0;
-                        let is_data = access & 0x18 == 0x10;
+                        if access & 0x80 == 0 || access & 0x10 == 0 {
+                            break 'v false; // 不在、またはシステム記述子
+                        }
+                        let code = access & 0x08 != 0;
+                        let conforming = code && access & 0x04 != 0;
+                        let dpl = (access >> 5) & 3;
+                        if !conforming && (dpl < m.cpu.cpl() || dpl < (sel & 3) as u8) {
+                            break 'v false; // 特権が届かない (適合コードだけ免除)
+                        }
                         if reg == 5 {
                             // VERW: 書けるのは data かつ writable
-                            present && is_data && access & 0x02 != 0
+                            !code && access & 0x02 != 0
                         } else {
                             // VERR: data は常に読める、code は readable ビット
-                            present && (is_data || (access & 0x18 == 0x18 && access & 0x02 != 0))
+                            !code || access & 0x02 != 0
                         }
                     };
                     m.cpu.set_flag(super::ZF, ok);
@@ -495,23 +509,29 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             let bits: u32 = if d.opsize32 { 32 } else { 16 };
             let dst = read_op_w(m, &rm, d.opsize32);
             let src = m.cpu.reg_w(reg, d.opsize32);
-            let n = count as u32 % bits;
-            let (r, cf) = if op2 & 0x08 == 0 {
-                // SHLD: 左へ。srcの上位ビットが右から入る
-                if n == 0 {
-                    (dst, m.cpu.flag(super::CF))
+            let count = count as u32;
+            let (r, cf) = if bits == 16 {
+                // 16bit形の実386挙動 (test386のEE照合が要求): dst:src (SHLDは
+                // dstが上位、SHRDは逆) の**32bit連結**を count ぶんずらした続き。
+                // count>=16 でも count%16 に畳まず、srcのビットが流れ込み続ける
+                // (shld ax,dx,16 → ax=dx)
+                if op2 & 0x08 == 0 {
+                    let t = ((dst as u64) << 16) | src as u64;
+                    let r = ((t << count) >> 16) as u32 & 0xFFFF;
+                    (r, (t >> (32 - count)) & 1 != 0)
                 } else {
-                    let r = (dst << n) | (src >> (bits - n));
-                    (r, (dst >> (bits - n)) & 1 != 0)
+                    let t = ((src as u64) << 16) | dst as u64;
+                    let r = (t >> count) as u32 & 0xFFFF;
+                    (r, (t >> (count - 1)) & 1 != 0)
                 }
+            } else if op2 & 0x08 == 0 {
+                // SHLD: 左へ。srcの上位ビットが右から入る
+                let r = (dst << count) | (src >> (bits - count));
+                (r, (dst >> (bits - count)) & 1 != 0)
             } else {
                 // SHRD: 右へ。srcの下位ビットが左から入る
-                if n == 0 {
-                    (dst, m.cpu.flag(super::CF))
-                } else {
-                    let r = (dst >> n) | (src << (bits - n));
-                    (r, (dst >> (n - 1)) & 1 != 0)
-                }
+                let r = (dst >> count) | (src << (bits - count));
+                (r, (dst >> (count - 1)) & 1 != 0)
             };
             super::operand::write_op_w(m, &rm, r, d.opsize32);
             m.cpu.set_flag(super::CF, cf);

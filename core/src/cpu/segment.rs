@@ -67,7 +67,9 @@ fn seg_exc(m: &mut Machine, vector: u8, sel: u16) {
 /// CPU内部のロード (ゲート・リング遷移・iret) は [`load_seg_raw`] を直に呼ぶ
 #[must_use]
 pub(crate) fn load_seg(m: &mut Machine, idx: usize, sel: u16) -> bool {
-    if !m.cpu.pe() {
+    // V86もリアルモード同様: 記述子表は引かず sel×16。検査も無い
+    // (檻の外に出る手段がセグメントロードに無いから許される)
+    if !m.cpu.pe() || m.cpu.vm86() {
         m.cpu.sregs[idx] = sel;
         m.cpu.hidden[idx] = SegHidden::real(sel);
         return true;
@@ -368,7 +370,7 @@ pub(crate) fn null_unreachable_data_segs(m: &mut Machine, new_cpl: u8) {
 /// セグメントレジスタへ記述子を写す (**特権チェック無し**)。
 /// CPUが内部でやるロード — ゲートのCS、リング遷移のSS0、iretの復帰 — 用。
 pub(crate) fn load_seg_raw(m: &mut Machine, idx: usize, sel: u16) {
-    if !m.cpu.pe() {
+    if !m.cpu.pe() || m.cpu.vm86() {
         m.cpu.sregs[idx] = sel;
         m.cpu.hidden[idx] = SegHidden::real(sel);
         return;

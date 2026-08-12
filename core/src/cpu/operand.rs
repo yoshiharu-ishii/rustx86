@@ -13,10 +13,13 @@ pub fn linear(seg: u16, off: u16) -> u32 {
 /// ModRMのデコード結果
 pub enum Operand {
     Reg(usize),
-    /// addr = セグメント適用後のリニアアドレス、off = セグメント内オフセット (LEA用)
+    /// addr = セグメント適用後のリニアアドレス (無検査、LEA/SSE用)、
+    /// off = セグメント内オフセット、seg = セグメントレジスタ番号。
+    /// 検査つきアクセス (read_op/write_op) は off+seg から data_addr で引き直す
     Mem {
         addr: u32,
         off: u32,
+        seg: usize,
     },
 }
 
@@ -85,6 +88,7 @@ pub fn modrm(m: &mut Machine, d: &Decoder) -> (usize, Operand) {
         Operand::Mem {
             addr: m.cpu.lin(seg, off),
             off,
+            seg,
         },
     )
 }
@@ -138,6 +142,7 @@ fn modrm32(m: &mut Machine, d: &Decoder, md: u8, reg: usize, rm: usize) -> (usiz
         Operand::Mem {
             addr: m.cpu.lin(seg, off),
             off,
+            seg,
         },
     )
 }
@@ -145,42 +150,51 @@ fn modrm32(m: &mut Machine, d: &Decoder, md: u8, reg: usize, rm: usize) -> (usiz
 pub fn read_op8(m: &Machine, op: &Operand) -> u8 {
     match *op {
         Operand::Reg(r) => m.cpu.reg8(r),
-        Operand::Mem { addr, .. } => m.read8(addr),
+        Operand::Mem { off, seg, .. } => m.read8(m.data_addr(seg, off, 1, false)),
     }
 }
 
 pub fn write_op8(m: &mut Machine, op: &Operand, v: u8) {
     match *op {
         Operand::Reg(r) => m.cpu.set_reg8(r, v),
-        Operand::Mem { addr, .. } => m.write8(addr, v),
+        Operand::Mem { off, seg, .. } => {
+            let a = m.data_addr(seg, off, 1, true);
+            m.write8(a, v);
+        }
     }
 }
 
 pub fn read_op16(m: &Machine, op: &Operand) -> u16 {
     match *op {
         Operand::Reg(r) => m.cpu.reg16(r),
-        Operand::Mem { addr, .. } => m.read16(addr),
+        Operand::Mem { off, seg, .. } => m.read16(m.data_addr(seg, off, 2, false)),
     }
 }
 
 pub fn write_op16(m: &mut Machine, op: &Operand, v: u16) {
     match *op {
         Operand::Reg(r) => m.cpu.set_reg16(r, v),
-        Operand::Mem { addr, .. } => m.write16(addr, v),
+        Operand::Mem { off, seg, .. } => {
+            let a = m.data_addr(seg, off, 2, true);
+            m.write16(a, v);
+        }
     }
 }
 
 pub fn read_op32(m: &Machine, op: &Operand) -> u32 {
     match *op {
         Operand::Reg(r) => m.cpu.reg32(r),
-        Operand::Mem { addr, .. } => m.read32(addr),
+        Operand::Mem { off, seg, .. } => m.read32(m.data_addr(seg, off, 4, false)),
     }
 }
 
 pub fn write_op32(m: &mut Machine, op: &Operand, v: u32) {
     match *op {
         Operand::Reg(r) => m.cpu.set_reg32(r, v),
-        Operand::Mem { addr, .. } => m.write32(addr, v),
+        Operand::Mem { off, seg, .. } => {
+            let a = m.data_addr(seg, off, 4, true);
+            m.write32(a, v);
+        }
     }
 }
 

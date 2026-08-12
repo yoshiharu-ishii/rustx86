@@ -518,6 +518,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     let mut skip_jit = false;
 
     loop {
+        // 前の命令 (またはJITブロック) のページウォークが立てた A/D を表へ反映。
+        // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
+        m.flush_ad();
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
