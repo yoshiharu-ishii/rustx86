@@ -677,7 +677,7 @@ impl Machine {
             // 回っているのと同じ状態になる
             if self.bios_interrupt(vec) {
                 self.return_flags_to_caller();
-                cpu::iret(self);
+                cpu::iret(self, false);
             }
             return;
         }

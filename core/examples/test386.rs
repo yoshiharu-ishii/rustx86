@@ -9,7 +9,7 @@
 //! POSTの足跡が途中で止まっていたら、その番号が「落ちたテスト」を指す
 //! (番号→内容の対応は test386.asm のソースと .lst を引く)
 
-use rustx86_core::Machine;
+use rustx86_core::{Machine, MachineProfile};
 
 fn main() {
     let rom_path = std::env::args()
@@ -22,7 +22,9 @@ fn main() {
     let reference =
         std::fs::read_to_string(&ref_path).unwrap_or_else(|e| panic!("{ref_path}: {e}"));
 
-    let mut m = Machine::new();
+    // 386のテストなので32bit機で走らせる (16bit機は8086を名乗る —
+    // PUSHFの上位4bit等、CPUの世代がプロファイルで変わる)
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(16));
     m.boot_rom(&rom).expect("boot_rom");
 
     // TEST386_TRACE=1 で直近命令のトレースを出す (落ちた場所を .lst と突き合わせる用)

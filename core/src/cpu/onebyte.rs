@@ -417,6 +417,12 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // オペコードのビットがそのまま形式を表す:
         //   bit0 = 幅 (0:8bit 1:16bit)  bit1 = 向き (0:IN 1:OUT)  bit3 = ポート指定 (0:imm8 1:DX)
         0xE4..=0xE7 | 0xEC..=0xEF => {
+            // IOPL特権: CPL > IOPL は #GP(0)。
+            // (TSSのI/O許可ビットマップは未実装 — 必要になった実測で足す)
+            if m.cpu.pe() && m.cpu.cpl() > m.cpu.iopl() {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
             let port = if op & 8 != 0 {
                 m.cpu.reg16(DX)
             } else {
@@ -509,30 +515,17 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         0x9A => {
             let off = fetch_w(m, d.opsize32);
             let seg = fetch16(m);
-            let cs = m.cpu.sregs[CS] as u32;
-            push_w(m, cs, d.opsize32);
-            push_w(m, m.cpu.ip, d.opsize32);
-            load_seg(m, CS, seg);
-            m.cpu.set_ip(off);
+            // 保護モードではコールゲート経由のリング遷移になり得る — 共通経路へ
+            segment::far_call(m, seg, off, d.opsize32);
         }
-        0xCB => {
-            let ip = pop_w(m, d.opsize32);
-            let seg = pop_w(m, d.opsize32) as u16;
-            load_seg(m, CS, seg);
-            m.cpu.set_ip(ip);
-        }
+        0xCB => segment::far_ret(m, d.opsize32, 0),
         0xCA => {
             let n = fetch16(m) as u32;
-            let ip = pop_w(m, d.opsize32);
-            let seg = pop_w(m, d.opsize32) as u16;
-            load_seg(m, CS, seg);
-            m.cpu.set_ip(ip);
-            let sp = sp_read(m).wrapping_add(n);
-            sp_write(m, sp);
+            segment::far_ret(m, d.opsize32, n);
         }
         // IRET: 割り込みハンドラからの復帰。CALLと違いFLAGSも戻す。
         // 割り込み中に変わったIF/DFを呼び出し前の値へ戻すのが要点。
-        0xCF => iret(m),
+        0xCF => iret(m, d.opsize32),
         0xE2 => {
             // LOOP。カウンタの幅は**アドレスサイズ** (32bitではECX)
             let rel = fetch8(m) as i8;
@@ -552,9 +545,9 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // ホスト関数へ横流しする今の方式ではOSが動かない。
         0xCD => {
             let n = fetch8(m);
-            software_int(m, n);
+            software_int(m, n, start_ip);
         }
-        0xCC => software_int(m, 3), // INT3 (デバッガのブレークポイント)
+        0xCC => software_int(m, 3, start_ip), // INT3 (デバッガのブレークポイント)
         0xCE => {
             // INTO: OFが立っているときだけ割り込み4。立っていなければ何もしない
             if m.cpu.flag(OF) {
@@ -563,15 +556,29 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
 
         // --- フラグ/制御 ---
-        0xF4 => m.halted = true,
+        // HLT — 特権命令 (CPL0限定、IOPLは関係ない)。ring3のhltは #GP(0)
+        0xF4 => {
+            if m.cpu.pe() && m.cpu.cpl() != 0 {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
+            m.halted = true;
+        }
         0xF5 => {
             let c = m.cpu.flag(CF);
             m.cpu.set_flag(CF, !c);
         } // CMC
         0xF8 => m.cpu.set_flag(CF, false), // CLC
         0xF9 => m.cpu.set_flag(CF, true),  // STC
-        0xFA => m.cpu.set_flag(IF, false), // CLI
-        0xFB => m.cpu.set_flag(IF, true),  // STI
+        // CLI/STI — IOPL特権命令。CPL > IOPL のリングが割り込みを握るのは
+        // #GP(0) (リング3が cli でカーネルを止められたら保護にならない)
+        0xFA | 0xFB => {
+            if m.cpu.pe() && m.cpu.cpl() > m.cpu.iopl() {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
+            m.cpu.set_flag(IF, op == 0xFB);
+        }
         0xFC => m.cpu.set_flag(DF, false), // CLD
         0xFD => m.cpu.set_flag(DF, true),  // STD
 
@@ -671,7 +678,13 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             if d.opsize32 {
                 // 上位2bit (VM/RF) はPUSHFDでは常に0で出る
                 push_w(m, f & 0x00FC_FFFF, true);
+            } else if m.profile.has_fpu {
+                // 386以降のPUSHF(16bit形): bit15は0、IOPL/NTは実値のまま。
+                // (0xF000強制は8086だけ — test386のPOST 09が0xF603/0x0603の
+                //  差として暴いた)
+                push_w(m, (f as u16 & 0x7FFF | 0x0002) as u32, false);
             } else {
+                // 8086: 上位4bit (15-12) は常に1で出る。ソフトはこれで世代を知る
                 push_w(m, (f as u16 | 0xF002) as u32, false);
             }
         }
