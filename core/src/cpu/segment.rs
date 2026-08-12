@@ -187,7 +187,7 @@ pub(crate) fn read_descriptor(m: &mut Machine, sel: u16) -> (u32, u32) {
 /// 積み替え) になる。OSのシステムコール以前の、セグメント機構そのものの
 /// リング渡り — test386のPOST 20 (switchToRing0) が要求する
 pub(crate) fn far_call(m: &mut Machine, sel: u16, off: u32, wide: bool) {
-    use super::operand::{push32, push_w};
+    use super::operand::push_w;
     if !m.cpu.pe() {
         let cs = m.cpu.sregs[CS] as u32;
         push_w(m, cs, wide);
@@ -210,10 +210,18 @@ pub(crate) fn far_call(m: &mut Machine, sel: u16, off: u32, wide: bool) {
         return;
     }
     match access & 0x1F {
-        // 386コールゲート。ゲートが持つのは「行き先」と「引数のdword数」
-        0x0C => {
+        // コールゲート (0x04=286の16bit / 0x0C=386の32bit)。ゲートが持つのは
+        // 「行き先」と「引数の個数」。**ゲートの幅が積む幅を決める** — CALL命令の
+        // オペランド幅ではない (16bitゲート越しはSS/SP/引数/CS/IP全部ワード)
+        t @ (0x04 | 0x0C) => {
+            let gate32 = t == 0x0C;
             let gate_sel = (lo >> 16) as u16;
-            let gate_off = (lo & 0xFFFF) | (hi & 0xFFFF_0000);
+            // 286ゲートはオフセット16bitのみ (上位16bitの席が記述子に無い)
+            let gate_off = if gate32 {
+                (lo & 0xFFFF) | (hi & 0xFFFF_0000)
+            } else {
+                lo & 0xFFFF
+            };
             let parc = hi & 0x1F;
             let (_, thi) = read_descriptor(m, gate_sel);
             let target_dpl = ((thi >> 13) & 3) as u8;
@@ -229,24 +237,30 @@ pub(crate) fn far_call(m: &mut Machine, sel: u16, off: u32, wide: bool) {
                 let new_ss = m.read16(t.wrapping_add(4));
                 load_seg_raw(m, SS, new_ss);
                 m.cpu.regs[super::SP] = new_esp;
-                push32(m, old_ss as u32);
-                push32(m, old_esp);
+                push_w(m, old_ss as u32, gate32);
+                push_w(m, old_esp, gate32);
                 // 引数を旧スタックから写す (呼び出し側が積んだ順のまま)
+                let unit = if gate32 { 4 } else { 2 };
                 for i in (0..parc).rev() {
-                    let v = m.read32(old_ss_base.wrapping_add(old_esp).wrapping_add(4 * i));
-                    push32(m, v);
+                    let a = old_ss_base.wrapping_add(old_esp).wrapping_add(unit * i);
+                    let v = if gate32 {
+                        m.read32(a)
+                    } else {
+                        m.read16(a) as u32
+                    };
+                    push_w(m, v, gate32);
                 }
                 let cs = m.cpu.sregs[CS] as u32;
-                push32(m, cs);
-                push32(m, m.cpu.ip);
+                push_w(m, cs, gate32);
+                push_w(m, m.cpu.ip, gate32);
                 // 行き先のCSはRPL=行き先DPL (=新しいCPL) で据える
                 load_seg_raw(m, CS, (gate_sel & !0x3) | target_dpl as u16);
                 m.cpu.set_ip(gate_off);
             } else {
                 // 同じリング: 行き先だけゲートが決める
                 let cs = m.cpu.sregs[CS] as u32;
-                push32(m, cs);
-                push32(m, m.cpu.ip);
+                push_w(m, cs, gate32);
+                push_w(m, m.cpu.ip, gate32);
                 load_seg_raw(m, CS, (gate_sel & !0x3) | cpl as u16);
                 m.cpu.set_ip(gate_off);
             }
@@ -288,8 +302,10 @@ pub(crate) fn far_ret(m: &mut Machine, wide: bool, extra_pop: u32) {
             seg_exc(m, 11, sel);
             return;
         }
-        // 呼び出し側が積んだ引数 (extra_pop) は**外側のESPに足す**前に、
-        // まず内側スタックの ESP/SS を取り出す
+        // ゲート経由で来た引数の**写し**が内側スタックにも積まれている —
+        // extra_pop は「内側で写しを捨てる」「外側で原本を捨てる」の二度使う
+        // (Intel SDMのRET(n)外側復帰の順序)。写しを飛ばしてから ESP/SS を取り出す
+        sp_write(m, sp_read(m).wrapping_add(extra_pop));
         let esp = pop_w(m, wide);
         let ss = pop_w(m, wide) as u16;
         // 戻り先SSは書けるデータ・RPL==新CPL・DPL==新CPL・present。

@@ -134,6 +134,15 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
         let (_, hi) = super::segment::read_descriptor(m, sel);
         (((hi >> 13) & 3) as u8, hi & 0x0400 != 0)
     };
+    // 割り込みで**外側リングへは行けない** — ハンドラCSのDPLがCPLより浅い
+    // (数字が大きい) なら配送そのものが #GP(そのセレクタ)。カーネル実行中に
+    // ユーザーセグメント向きのゲートを踏んでも、ユーザーコードに特権では
+    // 降りない (test386のPOST 20が要求する検査)。まだ何も積んでいないので
+    // 巻き戻しは trap_ip だけでよい
+    if target_dpl > old_cpl {
+        gp_fault(m, m.trap_ip, (sel & 0xFFFC) as u32);
+        return;
+    }
     // 新しいCPL: 適合コードなら元のまま、そうでなければハンドラCSのDPL。
     // **CSのRPLは新CPLに書き換えて載せる** — ゲートのセレクタを生のまま
     // 載せると、DPL3ハンドラ (RPL0で書かれたセレクタ) に飛んだring3の例外が
