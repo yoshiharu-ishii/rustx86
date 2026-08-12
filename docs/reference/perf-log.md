@@ -323,3 +323,38 @@ JitHookにbudget_aware旗 — wasm凍結世代はfalseで従来の入場規則�
 残る天井は「無ブロック」= 冷コードの裾野のみ。**次の正確な計測は冷間の
 朝一で基準を取り直してから** — 同一バイナリの絶対値が晩に1.5倍暴れる環境で
 これ以上の微差は読めない。
+
+## 2026-08-12深夜 jbootの絶対値の正体 — cranelift依存のコードレイアウト税
+
+ユーザーの指摘「熱でも処理能力でもなく、単純に処理の問題」を追った結果、
+**別バイナリの絶対値を比べていた**という計測の落とし穴を発見した。
+
+同じ vmlinux 576M命令を、条件を1つずつ揃えて2バイナリで測った:
+
+| バイナリ | 条件 | 秒 |
+|---|---|---|
+| bootphase (core example) | run 10M | 9.5〜10.9 |
+| bootphase | run **2M** | 9.8〜10.0 |
+| bootphase | run 2M + **Box化** | 9.7〜9.8 |
+| **jboot (jit-native bin)** | run 2M, Box, JIT=off | **12.0〜13.2** |
+
+Machine構成・Box化・run粒度・serial処理を**全部揃えても** core-example 9.7s
+vs jit-native bin 12.7s。差は**リンクされる依存 (cranelift ~3MB) だけ**。
+ループボディを空 (m.runのみ) にしても jboot は12.7sのまま — ハーネスの
+ロジックではなく、**巨大な無関係コードのリンクでホットループ機械語の
+アラインメント/iキャッシュ挙動が変わる**実在の現象 (Mytkowicz 2009
+"Producing Wrong Data Without Doing Anything Obviously Wrong")。
+
+### 教訓 (pitfalls行き)
+
+- **絶対値は同一バイナリ内のA/Bでのみ信じる。** 別バイナリ間の絶対値の
+  比較は、コードレイアウトで20%以上動くので無意味
+- **JITのoff/on (-9〜13%) は正しい** — 同一jbootバイナリの相対だから
+- ただし今日の記述「冷間14.2s換算で~12.8s相当」等、**jbootの相対を
+  bootphaseの絶対へ貼り付けた換算は撤回する**。真の絶対の物差しは
+  bootphase (vmlinux 10s / bzImageフル 14.2s、いずれもJIT非対応)。
+  JITの絶対実効を同じ土俵で測るには bootphase にJITフックを載せた
+  ハーネスが要る (次の宿題)
+- 本番 (Firecracker/ネイティブ配布) は cranelift をリンクした
+  バイナリなので、レイアウト税込みの jboot 側の絶対値の方がむしろ
+  本番に近い — LTO/PGOでレイアウトが再び動くまでは

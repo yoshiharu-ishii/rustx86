@@ -43,17 +43,16 @@ fn main() {
         if let Some(t) = &m.trap {
             panic!("trap: {t:?}");
         }
+        let before = serial.len();
         serial.extend_from_slice(&m.devices.uart.tx);
         m.devices.uart.tx.clear();
         if let Some(rt) = rt.as_mut() {
             rt.pump(&mut m);
         }
-        if serial
-            .windows(13)
-            .rev()
-            .take(4000)
-            .any(|w| w == b"busybox shell")
-        {
+        // 検出は**増分だけ** (前スライス末尾12バイトを糊しろに継ぐ) — 毎スライス
+        // serial全体を走査すると起動終盤で重くなる (ハーネス税の犯人だった)
+        let from = before.saturating_sub(12);
+        if serial[from..].windows(13).any(|w| w == b"busybox shell") {
             break;
         }
     }
