@@ -270,6 +270,10 @@ pub enum JitOp {
 /// 語彙の世代 (collectに渡す)。wasm生成器は凍結時点のF1B、ネイティブはV2
 pub const CAP_F1B: u32 = 0;
 pub const CAP_VOCAB2: u32 = 1;
+/// F1c-c: jccを終端にせず、**不成立側をブロック内で続ける** (両側焼き)。
+/// 成立側は「ipを成立先に書いてk+1で途中退出」— 脱出と同じ形だが完全実行済み。
+/// ブロックの最大命令数は変わらない (ループは作らない — 清算の契約 jn を守る)
+pub const CAP_CHAIN: u32 = 2;
 
 /// 焼き候補ブロック: 先頭物理アドレスと (命令長, op) の列。
 /// 終端は Jcc/Jmp、またはJIT対象外の命令の手前
@@ -534,7 +538,8 @@ fn convert(u: &Uop, caps: u32) -> Option<(JitOp, bool)> {
         Uop::PopR { reg } => JitOp::PopR { dst: reg },
         Uop::Leave => JitOp::Leave,
         Uop::XchgAR { reg } => JitOp::XchgA { reg },
-        Uop::Jcc { cc, rel } => return Some((JitOp::Jcc { cc, rel }, true)),
+        // CAP_CHAIN: jccは終端でなく「条件つき途中退出」— 続きを同じブロックに焼く
+        Uop::Jcc { cc, rel } => return Some((JitOp::Jcc { cc, rel }, caps & CAP_CHAIN == 0)),
         Uop::JmpRel { rel } => return Some((JitOp::Jmp { rel }, true)),
         Uop::CallRel { rel } => return Some((JitOp::CallRel { rel }, true)),
         Uop::Ret => return Some((JitOp::Ret, true)),
