@@ -356,8 +356,19 @@ for (const ev of ['dragleave', 'drop']) {
 consoleBox.addEventListener('drop', async e => {
   e.preventDefault();
   const f = e.dataTransfer?.files?.[0];
-  if (!f) return;
-  // 落とされたものがスナップショットならそこへ戻る。ディスクなら起動する
+  if (f) insertMedia(f);
+});
+
+// 「イメージを開く…」(メニュー/カード) も同じ口。実機で言えばドライブは1つ —
+// ドロップもファイル選択も**同じメディア投入**として扱う
+$('imageFile').addEventListener('change', () => {
+  const f = $('imageFile').files?.[0];
+  $('imageFile').value = ''; // 同じファイルをもう一度選べるように
+  if (f) insertMedia(f);
+});
+
+async function insertMedia(f) {
+  // スナップショット (JSON) ならそこへ戻る。ディスクなら起動する
   if (f.name.endsWith('.json')) {
     if (!machine) {
       setStatus('先にディスクイメージを起動してください', true);
@@ -375,7 +386,7 @@ consoleBox.addEventListener('drop', async e => {
   }
   setStatus(`${f.name} を読み込み中…`);
   boot(new Uint8Array(await f.arrayBuffer()), f.name);
-});
+}
 
 // ---------- 起動シナリオ ----------
 //
@@ -489,6 +500,12 @@ function showNote(m) {
 }
 
 async function select(m) {
+  // 「イメージを開く…」はまだ何も切り替えない — ファイルが選ばれた瞬間に
+  // insertMedia が起動する (キャンセルなら何も起きない)
+  if (m.kind === 'open') {
+    $('imageFile').click();
+    return;
+  }
   // **切り替えたら前の機械は捨てる。**
   //
   // OSもベンチも同じCPUを回している。片方を残したまま次を始めると、
@@ -514,7 +531,7 @@ async function select(m) {
     $('welcomePane').hidden = false;
     $('gauge').textContent = ''; // 前のマシンの「アイドル」等を持ち越さない
     showNote(null);
-    setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
+    setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
     dbg.reset();
     syncControls();
     return;
@@ -600,7 +617,10 @@ try {
       if (m) select(m);
     });
   }
-  setStatus('左からマシンを選ぶか、ディスクイメージをここにドロップしてください');
+  for (const b of document.querySelectorAll('#welcomePane [data-open]')) {
+    b.addEventListener('click', () => $('imageFile').click());
+  }
+  setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
   syncControls();
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
