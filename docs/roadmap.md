@@ -199,6 +199,29 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       `INT 13h AH=42` (LBA拡張) も足す
 - [ ] **6d: HDD** — ATA。**B5 (Web Worker + OPFS) とセット**。理由は下記
 
+### GUIの階段 (2026-08-13 追記 — DOOMの先)
+
+DOOM合格後のGUIは、この順に登る (ユーザー方針「ReactOS・軽量GUIを動かしたい」):
+
+- [ ] **6e: Xなしの軽量GUI** — fbdev直描画の世界。`links2 -g`・Nano-X
+      (microwindows)・SDL1/fbdev。X要らず = 6a+6bだけで届く最初のGUI
+- [ ] **6f: Xfbdev (TinyX/KDrive) + 軽量WM** — twm / fluxbox / IceWM + xterm。
+      イメージ候補は **Tiny Core Linux** (FLWM込み~50MB RAM、この用途の定番)
+- [ ] **6g: 古典デスクトップ** — LXDE/XFCE級は要実測。**KDE/GNOMEは古典版
+      (KDE3・GNOME1〜2世代) のみ視野** — 現代のPlasma/GNOME3+はGLコンポジット
+      前提で、グラボを作らない判断 (ADR-0011) と正面衝突するため対象外
+- [ ] **6h: ReactOSトレイル** — 速度はPentium 200MHz級 (~150-200 MIPS、JITの
+      射程内)。**隠れた前提 = x87 FPU本体** (現状は検出スタブのみ。Windows系
+      ユーザーランドはx87を本気で使う。cosim/Unicornで検証可能)。
+      加えて 6b マウス・6c El Torito・6d ATA・PCI無しHALの実測。
+      合格判定:「ReactOSがデスクトップを出す」— DOOMの次の絵になる節目
+
+**FBの設計原則 (6a着手時の約束)**: フレームバッファは**装置の窓ではなく
+ただのRAM** — 書き込みフックなし、表示側が毎フレーム全読みして描く
+(320×200×8bppで64KB — dirty追跡の賢さは不要)。テキストVRAMのような
+書き込みフック式にすると、ゲストのピクセルストアが全部JITの高速路から
+弾かれてDOOMの内側ループが死ぬ。
+
 VGAのplanarモードや mode 13h はやらない。DOSアプリ領域であり
 [ADR-0004](adr/0004-how-far-to-follow-the-bios.md) の「底が無い」側にあたる。
 
