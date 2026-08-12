@@ -137,3 +137,38 @@ cargo fmt --all --check                     # 整形 (直すのは cargo fmt --a
 cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings
 cargo test -p rustx86-cosim                 # CPU照合 (初回はUnicornのビルドで数分)
 ```
+
+
+## 互換ピラミッド (2026-08-12 設計 — 対象: UNIX / Linux / Windows / Android)
+
+「CPUの互換」を1発で担保する魔法のバイナリは無いが、**層ごとに定番がある**。
+安い層から積む:
+
+| 層 | 審判 | 何を担保するか | いつ回すか |
+|---|---|---|---|
+| **L0 命令単位** | cosim (Unicornと毎命令照合) | 個々の命令の意味論・フラグ | **毎PR** (現行のCPU照合) |
+| **L1 CPU総合バイナリ** | **test386.asm** (86Box/PCem界隈の定番CPUテストROM。実機で検証済みの期待値とPOST/シリアル出力を照合) | 命令の**組み合わせ**・例外・モード遷移。「CPUだけの互換」に一番近い既製バイナリ | mainマージ時 (導入予定) |
+| **L2 カーネルロックステップ** | kernel_lockstep (実カーネルをUnicornと毎命令) | 実コードでの長距離の意味論 | mainマージ時 |
+| **L3 OS起動 (バイナリレベル)** | 3OS起動回帰 (ELKS/FreeDOS/Linux) → 将来: **ReactOS** (Windows系の自由な代理)・**Android-x86** を追加 | CPU+装置+ブートの総合 | mainマージ時 |
+
+対象OSごとの現実:
+
+- **Linux / UNIX (ELKS)**: 現行の3OS回帰がそのまま担保。決定的命令数が意味の後退を検出
+- **Windows**: 本物のWindowsは**ライセンス上CIに置けない** — CIの代理は
+  ReactOS (Win2000互換のOSS、v86も採用)。本物 (95/98/2000) はユーザー手持ちの
+  イメージでローカル手動スイート (tools/) として整備する
+- **Android**: Android-x86 (OSSでISO配布) = 実体はLinuxカーネル+大きなuserspace。
+  L3にISOブート→ロゴ/コンソール到達のマーカーで追加できる
+- **L1 test386.asm の導入メモ**: リセットベクタから走るROMバイナリなので、
+  「ROMを0xF0000に置いてF000:FFF0から実行」の起動口が要る (BIOS HLEと同居の設計)。
+  出力はPOSTポート+シリアル — 期待値ファイルと突き合わせるだけでCI化できる
+
+運用 (段構え2.0、2026-08-12):
+
+- **PR**: コードチェックは常時、CPU照合 (L0) は **core/cosimを触ったときだけ**
+  (web/toolsのみのPRではUnicornビルドを省く)。docsだけの変更はCI自体スキップ。
+  同一ブランチの連続pushは古いRunを自動キャンセル。
+  なおpublicリポジトリのActionsは無料無制限 — 削っているのは金ではなく待ち時間と電気
+- **mainへのpush**: 上記 + OS起動回帰 (L3) + JIT決定性。L1/L2と4OS拡張はここに積む
+- 思想: PRの門番は「壊れたコードを弾く」最小、mainの門番は「互換の全層」。
+  重い層をPRに置かない代わりに、**mainが赤くなったら最優先で直す**
