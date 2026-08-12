@@ -284,6 +284,11 @@ pub struct DecodeCache {
     pub hits: u64,
     pub fills: u64,
     pub fallbacks: u64,
+    /// 連結ループの退出理由 (opstats時のみ計上)。B4の続きをどこに打つかは
+    /// 推測せずこの実測で決める:
+    /// [0]=使い切り (extra=0) [1]=フォールト/トラップ/HLT [2]=割り込み境界
+    /// [3]=ページ跨ぎ
+    pub chain_exits: [u64; 4],
 }
 
 impl DecodeCache {
@@ -296,6 +301,7 @@ impl DecodeCache {
             hits: 0,
             fills: 0,
             fallbacks: 0,
+            chain_exits: [0; 4],
         }
     }
 
@@ -503,14 +509,23 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
 
         // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
         if extra == 0 {
+            if cfg!(feature = "opstats") {
+                m.dcache.chain_exits[0] += 1;
+            }
             return;
         }
         // フォールトの巻き戻しと#UDの裁きは外側の担当。割り込みが受けられる
         // 状態になったら境界で外へ返す (配送点は非連結時と同じ)
         if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+            if cfg!(feature = "opstats") {
+                m.dcache.chain_exits[1] += 1;
+            }
             return;
         }
         if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+            if cfg!(feature = "opstats") {
+                m.dcache.chain_exits[2] += 1;
+            }
             return;
         }
         // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
@@ -520,9 +535,26 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             m.cpu.lin(CS, m.cpu.ip)
         };
         if new_lin >> 12 != lin >> 12 {
-            return; // ページを跨いだら外へ (変換からやり直し)
+            // ページ跨ぎ連結 (B4続編)。退出理由の実測 (2026-08-13) で退出の
+            // ほぼ100%がページ跨ぎ (14M回、平均連結長69命令) だった — 新ページを
+            // 変換して居座り、変換とはしごの払い直しを省く。
+            //
+            // 意味を変えないための約束 (B4の約束に上乗せ):
+            // - CS/TFを変える命令 (far call/jmp・int・iret・popf) は語彙外で
+            //   連結が切れる — BIOS HLE入口 (CS=F000) の判定を飛ばさない
+            // - フェッチがフォールトしそうなら従来どおり外へ (配送は従来経路)
+            match m.translate_for(new_lin, false) {
+                Ok(npa) => pa = npa,
+                Err(_) => {
+                    if cfg!(feature = "opstats") {
+                        m.dcache.chain_exits[3] += 1;
+                    }
+                    return;
+                }
+            }
+        } else {
+            pa = (pa & !0xFFF) | (new_lin & 0xFFF);
         }
-        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
         lin = new_lin;
         // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
         extra -= 1;
