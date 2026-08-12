@@ -516,6 +516,10 @@ impl Machine {
     }
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
+        // POST診断ポート。テストROM (test386) が進行番号を書く — 足跡として残す
+        if port == 0x190 {
+            self.post_trail.push(val);
+        }
         if self.dbg.on && self.dbg.io_write.contains(&port) {
             self.dbg.stop = Some(debug::Stop::WriteIo {
                 port,

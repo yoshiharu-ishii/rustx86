@@ -175,6 +175,14 @@ pub struct Machine {
     pub trap_ip: u32,
     pub trap: Option<Trap>,
     pub halted: bool,
+    /// BIOS HLE (CS==0xF000 をホスト関数で肩代わり) を使うか。
+    /// 生ROM実行 (test386などのテストROM) では 0xF000 が**実行すべき実コード**
+    /// なので、`boot_rom` がこれを下ろして素通しにする。
+    /// スナップショットには入れない (ROM実行は使い切りのテスト走行)
+    pub bios_hle: bool,
+    /// POST診断ポート (0x190) に書かれた進行コードの足跡。
+    /// テストROM (test386) がテスト番号を書く — どこまで進んで死んだかの証跡
+    pub post_trail: Vec<u8>,
     /// デコード済み命令キャッシュ (ADR-0007 P1a)。中身は cpu::dcache
     pub dcache: cpu::dcache::DecodeCache,
     /// JIT実行フック (F1a、ADR-0008)。ランタイム (wasmシェル等) が挿す。
@@ -315,6 +323,8 @@ impl Machine {
             trap_ip: 0,
             trap: None,
             halted: false,
+            bios_hle: true,
+            post_trail: Vec::new(),
             fault_save: Cpu::new(),
             fault_slim: cpu::SlimSave::default(),
             fault_save_kind: FaultSaveKind::None,
@@ -658,8 +668,9 @@ impl Machine {
         }
 
         // 3. BIOS HLE の入口に居るなら、バイト列を実行せずホスト関数で肩代わりする。
-        //    OSがIVTを書き換えていればここには来ない
-        if self.cpu.sregs[cpu::CS] == BIOS_SEG {
+        //    OSがIVTを書き換えていればここには来ない。
+        //    生ROM実行 (boot_rom) では 0xF000 が実コードなので素通しする
+        if self.bios_hle && self.cpu.sregs[cpu::CS] == BIOS_SEG {
             let vec = self.cpu.ip as u8;
             // 完了しなかったサービス (キー待ちなど) はIRETせずに戻る。
             // 次のサイクルで同じINTがやり直され、実BIOSが割り込みを待って

@@ -180,13 +180,34 @@ build_freedos_boot() {
   cp "$WORK/x86BOOT.img" "$IMAGES/fd14boot.img"
 }
 
+
+# test386.asm — CPU互換テストROM (互換ピラミッドL1、GPLv3)。
+# ソースをpinしたコミットで取り、nasmでROMを焼く (COM1へASCII出力する構成)。
+# バイナリを配らないのはOSイメージと同じ理由 — ビルド経路がここに一意に決まる
+TEST386_COMMIT="master"   # 導入時点のHEAD。壊れたら実測で選び直す
+build_test386() {
+  command -v nasm >/dev/null || { echo "nasm が要る (brew install nasm / apt-get install nasm)" >&2; exit 1; }
+  mkdir -p "$IMAGES"
+  fetch "https://github.com/barotto/test386.asm/archive/refs/heads/$TEST386_COMMIT.tar.gz" "$WORK/test386-src.tar.gz"
+  say "test386.asm をビルドする (COM1出力構成)"
+  rm -rf "$WORK/test386-src"
+  mkdir -p "$WORK/test386-src"
+  tar xzf "$WORK/test386-src.tar.gz" -C "$WORK/test386-src" --strip-components=1
+  ( cd "$WORK/test386-src" \
+    && sed -i.bak 's/^COM_PORT equ 0$/COM_PORT equ 1/' src/configuration.asm \
+    && nasm -i./src/ -f bin src/test386.asm -w-all -o test386.bin )
+  cp "$WORK/test386-src/test386.bin" "$IMAGES/test386.bin"
+  cp "$WORK/test386-src/test386-EE-reference.txt" "$IMAGES/test386-EE-reference.txt"
+}
+
 case "${1:-all}" in
   elks) build_elks ;;
   freedos) build_freedos ;;
   freedos-boot) build_freedos_boot ;;
   linux) build_linux ;;
+  test386) build_test386 ;;
   all) build_elks; build_freedos; build_linux ;;
-  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux]" >&2; exit 1 ;;
+  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux|test386]" >&2; exit 1 ;;
 esac
 publish_to_web
 
