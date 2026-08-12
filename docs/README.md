@@ -53,6 +53,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [0008](adr/0008-template-jit.md) | テンプレートJITの設計・Fシリーズのロードマップ・wasm凍結 |
 | [0009](adr/0009-pgo-shelved.md) | PGOは効いたが寝かせる — 運用判断を開発に持ち込まない |
 | [0010](adr/0010-test386-full-compat.md) | test386でCPU互換を完璧にする — 速さの前に正しさを積む |
+| [0011](adr/0011-tier-redraw-after-compat.md) | 互換達成後のTier引き直し — JIT完走を前倒し、バスは作らない |
 
 ## 読む順番 (初見の人向けの道)
 

@@ -116,12 +116,17 @@ ELKSと違って**画面もキーもディスクも全部BIOS経由**なので�
 ネットワークだけは踏み台 (EC2・ドメイン・TLS) の用意が要るので最後に置いた
 ([ADR-0005](docs/adr/0005-local-first-roadmap.md))。
 
+**着手順の現在形 (2026-08-12 引き直し)**: 互換が全緑になったので
+**F1c (Cranelift JIT) をTier 7から前倒し** → Tier 6 (グラフィック) → Tier 5 (NW)。
+PCIバス・ISAバス・グラボは**作らない** (virtio-mmio・線形FB・既存ポートI/Oで足りる) —
+判断の全文は [ADR-0011](docs/adr/0011-tier-redraw-after-compat.md)。
+
 | Tier | 到達点 | 状態 |
 |---|---|---|
 | 1 | 16bitリアルモードCPUが命令を正しく実行する | ✅ |
 | 2 | **ブラウザの画面でELKSのシェルが叩ける** | ✅ |
 | 3 | 32bit化 — モード・ページング + **速さと道具の足回り** | ✅ フルブート10秒・79 MIPS・32bitデバッガ (残: 3g スナップショット形式) |
-| 4 | **32bit Linuxが起動する** ← 当初の完成ライン | ✅ (残: virtio-blk) |
+| 4 | **32bit Linuxが起動する** ← 当初の完成ライン | ✅ (残: virtio-blk)・**互換ピラミッドL1全緑** (test386完全合格、CI常設 2026-08-12) |
 | 5 | **そのLinuxから本物のホストにpingが届く** | |
 | 6 | GUI と、いろいろなメディアからの起動 (Xの動くUTM) | 確定 |
 | 7 | **ネイティブ化** — M1 Mac / Windows 10、ヘッドレスランナー | |
@@ -135,8 +140,9 @@ Tierとは別に、**「動いた」と叫べる節目**を順に刻む。tetris
 
 ```
 1. 100 MIPS         — 検証の単価を下げる投資。インタプリタは~79で構造の上限
-                      (実測済み)。残る道はJIT系 (wasm凍結中 / Cranelift=Tier 7) —
-                      北極星はv86実測185 MIPS (docs/reference/perf.md)
+                      (実測済み)。**F1c Craneliftを前倒しで着手** (ADR-0011、
+                      wasm JITは凍結のまま) — 北極星はv86実測185 MIPS
+                      (docs/reference/perf.md)
 2. ANSI端末DOOM     — グラフィックス無しで刻む中間マイルストーン。
                       doomgeneric + ANSIバックエンドをi386静的ビルドして initramfs へ。
                       79 MIPS は DOOM が設計された 486DX2-66 を上回る — 現状でも動く算段
