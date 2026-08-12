@@ -20,6 +20,16 @@ pub struct SegHidden {
 }
 
 impl SegHidden {
+    /// 平坦か: base=0・limit=4GB・present な書けるデータ (伸長方向は通常)。
+    /// **Linuxの常態**であり、このときデータアクセスの検査 (limit・書込可否・
+    /// ヌル) は読み書きどちらでも恒真、base加算も恒等 — data_addr が
+    /// 1分岐で素通しする根拠 (S1、互換税+10%の取り返し)。
+    /// マスク 0x9E = P|S|code|E|W、値 0x92 = P=1,S=1,データ,通常伸長,W=1
+    #[inline]
+    pub fn flat_rw(&self) -> bool {
+        self.base == 0 && self.limit == 0xFFFF_FFFF && self.access & 0x9E == 0x92
+    }
+
     /// リアルモードの写し: base = sel×16、64K、16bit
     pub(crate) fn real(sel: u16) -> Self {
         Self {
