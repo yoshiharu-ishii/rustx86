@@ -261,20 +261,29 @@ pub(crate) enum Uop {
     },
 }
 
+/// 照合部 (SoA分割の前半)。毎命令必ず読むのはここだけ — 8B/スロットに
+/// 詰めて、照合パスのキャッシュ密度を上げる (受け口の税-22%と同じ狙い)
 #[derive(Clone, Copy)]
-struct Entry {
+struct Probe {
     /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
     tag: u32,
     /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
     gen: u32,
+}
+
+/// ペイロード (SoA分割の後半)。照合が通ったときだけ読む
+#[derive(Clone, Copy)]
+struct Payload {
     len: u8,
     uop: Uop,
 }
 
 pub struct DecodeCache {
-    /// 直接マップ。**最初の32bitデコードまで確保しない** —
-    /// 16bit機やcosimの単発Machineに768KBずつ払わせない
-    entries: Vec<Entry>,
+    /// 直接マップ (照合部)。**最初の32bitデコードまで確保しない** —
+    /// 16bit機やcosimの単発Machineに払わせない
+    probes: Vec<Probe>,
+    /// 直接マップ (ペイロード)。probesと同じ添字
+    payloads: Vec<Payload>,
     /// 物理4Kページごとの世代。書き込みで進む
     page_gen: Vec<u32>,
     /// そのページにデコード済みコードがあるか。
@@ -290,7 +299,8 @@ impl DecodeCache {
     pub fn new(ram_bytes: usize) -> Self {
         let pages = ram_bytes.div_ceil(4096);
         DecodeCache {
-            entries: Vec::new(),
+            probes: Vec::new(),
+            payloads: Vec::new(),
             page_gen: vec![0; pages],
             page_has_code: vec![false; pages],
             hits: 0,
@@ -441,13 +451,15 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
-        // Entry照合 (gen一致 = 「この命令は現世代」の保証)
+        // 照合 (gen一致 = 「この命令は現世代」の保証)。ペイロードは
+        // 照合が通ったときだけ読む — 毎命令の必読は8Bのprobeだけ
         let mut cached = None;
-        if !m.dcache.entries.is_empty() {
+        if !m.dcache.probes.is_empty() {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            let e = &m.dcache.entries[slot];
-            if e.tag == pa && e.gen == gen_now {
-                cached = Some((e.len, e.uop));
+            let pr = &m.dcache.probes[slot];
+            if pr.tag == pa && pr.gen == gen_now {
+                let pl = &m.dcache.payloads[slot];
+                cached = Some((pl.len, pl.uop));
                 m.dcache.hits += 1;
             }
         }
@@ -456,24 +468,19 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             Some(x) => x,
             None => match decode::decode_at(m, pa) {
                 Some((len, uop)) => {
-                    if m.dcache.entries.is_empty() {
-                        m.dcache.entries = vec![
-                            Entry {
+                    if m.dcache.probes.is_empty() {
+                        m.dcache.probes = vec![
+                            Probe {
                                 tag: TAG_INVALID,
                                 gen: 0,
-                                len: 0,
-                                uop: Uop::Ret,
                             };
                             SLOTS
                         ];
+                        m.dcache.payloads = vec![Payload { len: 0, uop: Uop::Ret }; SLOTS];
                     }
                     let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-                    m.dcache.entries[slot] = Entry {
-                        tag: pa,
-                        gen,
-                        len,
-                        uop,
-                    };
+                    m.dcache.probes[slot] = Probe { tag: pa, gen };
+                    m.dcache.payloads[slot] = Payload { len, uop };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
                         *h = true;
                     }
