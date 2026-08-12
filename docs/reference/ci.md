@@ -7,53 +7,60 @@
 Checkのレポートには**何をしたかと結果だけ**を書く。設計の理由 (この文書) を
 毎回のCheckに繰り返し載せても、読む人は同じ文章を何十回も見ることになる。
 
-## 全体図 (2026-08-12 段構え2.1)
+## 全体図 (2026-08-12 合否掲示板)
 
 1本のワークフロー (ci.yml) を**段構え**にしてある。安いコードチェックが
 先に走り、通ったときだけ重い検査が並行して走る — 壊れたコードに
-数分の検査を払わない。
+数分の検査を払わない。最後の OK が合流点。
 
 ```mermaid
 flowchart LR
-    PR[PR / mainへマージ] --> CI
+    PR[PR / mainへマージ] --> CHECKJ
 
-    subgraph CI["CI 結果 (~30秒)"]
+    subgraph CHECKJ["段1: コードチェック (~30秒)"]
         T[テスト] & W[wasmビルド] & F[整形] & L[lint]
     end
 
-    CI --> COS & REG
+    CHECKJ --> COS & REG
 
-    subgraph COS["CPU照合 結果 (~3分)"]
+    subgraph COS["段2a: CPU照合 (~3分)"]
         C[Unicornと毎命令比較<br>PRではcore/cosimを触ったときだけ]
     end
-    subgraph REG["OS起動回帰 結果 (~3分、mainのみ)"]
+    subgraph REG["段2b: OS起動回帰 (~3分、mainのみ)"]
         G[ELKS / FreeDOS / Linux を<br>プロンプトまで起動 + JIT決定性]
     end
+
+    COS & REG --> OK[OK — 全段の合流点]
 ```
 
-## Checksタブは「ジョブ数=行数」まで削る (2026-08-12)
+## Checksタブ = 合否掲示板 (2026-08-12)
 
-GitHub Actions のジョブは**必ずChecksタブに1行載る** — これは消せない仕様。
-以前は「中間ジョブ (コードチェック/CPU照合/OS起動回帰/OK) + 本文つき結果Check
-(Checks APIで自前発行)」の二重出しで、Checksが6行のリンク集になっていた。
+確認の導線を「PRを開く→Checksタブ」の1回にする。サイドバーは**2つの束**:
 
-そこで**ジョブそのものを結果の単位まで削り、ジョブ名=Checkの行**にした:
+```
+CI Actions (ワークフローの束 — ∨で畳める。中身はログへのリンク)
+  コードチェック / CPU照合 / OS起動回帰 / OK
+合否掲示板 (自前GitHub Appの束 — 1関門=1行、クリックで右ペインに本文)
+  ✓ テスト   ✓ 整形   ✓ lint   ✓ wasmビルド
+  ✓ CPU照合   (main: ✓ OS起動回帰   ✓ JIT決定性)
+  (将来: ✓ CPU互換 = test386)
+```
 
-| PRのChecks | 中身 |
-|---|---|
-| **CI 結果** | テスト・wasmビルド・整形・lint。レポートはジョブのStep Summary |
-| **CPU照合 結果** | Unicornと毎命令比較 (core/cosimを触ったPRだけ。他はskipped) |
-| (将来) **CPU互換 結果** | test386.asm — 導入されたらここに並ぶ (下の互換ピラミッド) |
+仕組みと制約 (GitHubの仕様に沿った設計):
 
-mainへのpushではこれに **OS起動回帰 結果** (JIT決定性込み) が加わる。
-OS起動回帰は **pushトリガだけの別ワークフロー (regress.yml)** — 同じ
-ワークフローに置くとPRのChecksに「skipped」の灰色行が必ず載るため
-(GitHubの仕様で、同一ワークフロー内のジョブは条件でスキップしても行が残る)。
-
-- **OK合流ジョブは廃止** — 結果ジョブを直接見ればよく、合流点は行を増やすだけだった
-- **Checks APIの自前発行 (publish-check) も廃止** — ジョブ二重出しの片割れだったため。
-  レポート本文は各ジョブの **Step Summary** に移した (Checkをクリックした先のRunページに出る)
-- 各ステージは `continue-on-error` で最後まで走らせてから束ねる
+- **Actionsのジョブは必ずChecksに1行載る** (隠せない)。束の単位は
+  「アプリ×ワークフロー」で、グループ内の小分け見出しは作れない
+- 右ペインに本文を出せるのは **Checks APIで発行したCheck run だけ**
+  (ジョブのStep Summaryは右ペインに出ない)。発行は
+  [.github/actions/publish-check](../../.github/actions/publish-check/action.yml)
+- **GITHUB_TOKENで発行するとActionsの束に同居してしまう**ので、
+  **自前GitHub Appのトークン**で発行して独立した束にする
+  (Check run作成はAppにしか許されない、という制約の逆利用)。
+  Appの`APP_ID`/秘密鍵はSecrets `CI_APP_ID` / `CI_APP_PRIVATE_KEY`。
+  未設定でも壊れない — GITHUB_TOKENに退避してActionsの束に出る
+- 掲示板の行は**ジョブではない**ので、粒度を上げてもActionsのコストはゼロ。
+  「lint通った?」に0クリックで答えるための細粒度 (1関門=1行)
+- 各ステージは `continue-on-error` で最後まで走らせてから発行する
   (テストが落ちてもビルドの結果は見たい)
 
 ## ステージと、それぞれが止める事故

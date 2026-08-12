@@ -1,22 +1,24 @@
-# CI パイプライン (段構え2.1、2026-08-12):
-#   PR:        CI 結果 → CPU照合 結果 (core/cosimを触ったときだけ)
+# CI パイプライン (合否掲示板、2026-08-12):
+#   PR:        コードチェック → CPU照合(core/cosimを触ったときだけ) → OK
 #              (docsのみの変更はワークフローごとスキップ)
-#   main push: CI 結果 → CPU照合 結果 (OS起動回帰は regress.yml — PRのChecksに
-#              灰色のskipped行を出さないため、pushトリガだけの別ワークフロー)
+#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK (常に全部)
 #
 # 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
 # 要点:
 # - **段構え**: 安いコードチェックが先に走り、通ったときだけ重い検査
-#   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を払わない
-# - **Checksにはジョブをそのまま出す** (ユーザー決定 2026-08-12)。
-#   GitHubの仕様でジョブは必ずChecksに1行載るので、「中間ジョブ+結果Check」の
-#   二重出しをやめ、**ジョブ数=Checkの行数**まで削った。合流点のOKジョブも廃止
-#   (結果ジョブを直接見ればよい)。レポートは各ジョブの Step Summary に載せる
+#   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を
+#   払わない。最後の OK は全段の合流点
+# - **Checksタブは2つの束** (ユーザー決定 2026-08-12):
+#   「CI Actions」= 素のジョブ (この名のワークフローグループに自動で束なる)、
+#   「合否掲示板」= 関門ごとの結果Check (テスト/整形/lint/wasm/CPU照合/…)。
+#   掲示板は**自前GitHub Appのトークン**で発行すると独立した束になる。
+#   Secrets (CI_APP_ID / CI_APP_PRIVATE_KEY) 未設定ならGITHUB_TOKENに退避
+#   (Checkは出るがActionsの束に同居する)
 # - レポートは**何をしたかと結果だけ**。説明の文章は docs/reference/ci.md に書く
 # - 各ステージは continue-on-error で最後まで走らせてから束ねる
 #   (テストが落ちてもビルドの結果は見たい)
-name: CI
+name: CI Actions
 
 on:
   pull_request:
@@ -34,6 +36,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 # 同一ブランチへの連続pushは古いRunをキャンセル (無駄な並走を消す)
 concurrency:
@@ -44,9 +47,11 @@ env:
   CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
 
 jobs:
-  ci:
-    name: CI 結果
+  check:
+    name: コードチェック
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
     steps:
@@ -129,31 +134,46 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
-      # 全ステージを Step Summary に束ねる。表は「何をしたか」と「結果」だけ
-      - name: レポート発行
+      # ---- 合否掲示板への発行。1関門=1行、本文は右ペイン ----
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
         if: always()
-        run: |
-          {
-            echo '| 何をしたか | 結果 |'
-            echo '|---|---|'
-            for row in \
-              "test:cargo test" \
-              "wasm:cargo build --target wasm32-unknown-unknown" \
-              "fmt:cargo fmt --check" \
-              "lint:cargo clippy -- -D warnings"; do
-              id=${row%%:*}; cmd=${row#*:}
-              case $id in
-                test) outcome='${{ steps.test.outcome }}' ;;
-                wasm) outcome='${{ steps.wasm.outcome }}' ;;
-                fmt)  outcome='${{ steps.fmt.outcome }}' ;;
-                lint) outcome='${{ steps.lint.outcome }}' ;;
-              esac
-              [ "$outcome" = success ] && mark='✅' || mark='❌'
-              echo "| \`$cmd\` | $mark |"
-            done
-            echo ''
-            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
-          } >> "$GITHUB_STEP_SUMMARY"
+        with:
+          name: テスト
+          title: ${{ steps.test.outcome == 'success' && 'cargo test 合格' || 'cargo test 失敗' }}
+          outcome: ${{ steps.test.outcome }}
+          report-file: report-test.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: wasmビルド
+          title: ${{ steps.wasm.outcome == 'success' && 'wasm32ビルド成功' || 'wasm32ビルド失敗' }}
+          outcome: ${{ steps.wasm.outcome }}
+          report-file: report-wasm.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 整形
+          title: ${{ steps.fmt.outcome == 'success' && 'cargo fmt 整形済み' || '未整形 (cargo fmt --all で直る)' }}
+          outcome: ${{ steps.fmt.outcome }}
+          report-file: report-fmt.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: lint
+          title: ${{ steps.lint.outcome == 'success' && 'clippy 指摘なし' || 'clippy 指摘あり' }}
+          outcome: ${{ steps.lint.outcome }}
+          report-file: report-lint.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: |
@@ -162,14 +182,16 @@ jobs:
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"
 
-  # ---- 段2: 重い検査。CI 結果が通ったときだけ、並行して走る ----
+  # ---- 段2: 重い検査。コードチェックが通ったときだけ、並行して走る ----
 
   cosim:
     # PRではCPUの意味論に触れたときだけ (L0)。mainへのpushでは常に回す
-    name: CPU照合 結果
-    if: github.event_name != 'pull_request' || needs.ci.outputs.cpu == 'true'
-    needs: ci
+    name: CPU照合
+    if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
+    needs: check
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
     timeout-minutes: 30
     steps:
@@ -189,10 +211,142 @@ jobs:
             echo '```'
             exit ${RC:-0}
           } > cosim-report.md
-
-      - name: レポート発行
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
         if: always()
-        run: cat cosim-report.md >> "$GITHUB_STEP_SUMMARY"
+        with:
+          name: CPU照合
+          title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
+          outcome: ${{ steps.cosim.outcome }}
+          report-file: cosim-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: test "${{ steps.cosim.outcome }}" = "success"
+
+  regress:
+    name: OS起動回帰
+    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
+    # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
+    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
+      # 入手経路は tools/fetch-images.sh ただ一つ — CIだけの取り方を作ると
+      # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/fetch-images.sh elks
+          tools/fetch-images.sh freedos-boot
+          tools/fetch-images.sh linux
+          tools/extract-vmlinux.sh
+          tools/make-mini-initramfs.sh
+
+      - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
+        id: regress
+        continue-on-error: true
+        # MIPS下限は「壊滅の検出」用の粗い値。共有ランナーは±10〜30%揺れるので、
+        # きつくするとランナーの運で赤くなる。日々の推移はレポートの数字を見る
+        env:
+          REGRESS_MIN_MIPS: 10
+        run: cargo run --release --example regress | tee regress.md
+
+      # JITの決定性ゲート (F1a、ADR-0008)。生成コードとインタプリタが
+      # 「シェル到達までの命令数」も「シリアル出力全文」もビット同一かを見張る。
+      # 命令数決定性 (docs/perf.md の柱) をJITが崩したら即赤くする
+      - name: Node の用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: wasm-pack の用意
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: wasm を焼く
+        run: bash tools/build-web.sh
+      - name: JIT決定性ゲート (interp と jit がビット同一)
+        id: jitcheck
+        continue-on-error: true
+        run: node tools/webtest/jit-check.mjs | tee jitcheck.md
+
+      # ブートログを証跡として残す。ゲストの時計は決定的なので、
+      # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
+      # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
+      - name: ブートログを証跡に残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-logs
+          path: regress-out/
+          if-no-files-found: warn
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: OS起動回帰
+          title: ${{ steps.regress.outcome == 'success' && 'ELKS / FreeDOS / Linux 合格' || '失敗あり' }}
+          outcome: ${{ steps.regress.outcome }}
+          report-file: regress.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: JIT決定性
+          title: ${{ steps.jitcheck.outcome == 'success' && 'interp と jit がビット同一' || '食い違い or JIT不発' }}
+          outcome: ${{ steps.jitcheck.outcome }}
+          report-file: jitcheck.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: |
+          test "${{ steps.regress.outcome }}" = "success" \
+            && test "${{ steps.jitcheck.outcome }}" = "success"
+
+  # ---- 合流点。全部通って初めて OK ----
+
+  ok:
+    name: OK
+    if: always()
+    needs: [check, cosim, regress]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 全段の合否
+        # regress はPRではskippedになる (mainへのpush時のみ必須)
+        run: |
+          test "${{ needs.check.result }}" = "success" \
+            && { test "${{ needs.cosim.result }}" = "success" \
+                 || test "${{ needs.cosim.result }}" = "skipped"; } \
+            && { test "${{ needs.regress.result }}" = "success" \
+                 || test "${{ needs.regress.result }}" = "skipped"; }
