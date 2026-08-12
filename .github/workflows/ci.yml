@@ -1,4 +1,6 @@
-# CI パイプライン — コードチェック → (CPU照合 ∥ OS起動回帰) → OK
+# CI パイプライン (段構え2.0、2026-08-12):
+#   PR:        コードチェック → CPU照合 → OK          (docsのみの変更はスキップ)
+#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK
 #
 # 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
 #
@@ -15,8 +17,16 @@ name: CI
 
 on:
   pull_request:
+    # docsだけの変更に重い検査を回さない (コードに触れないため)。
+    # ci.yml自身とツール類は対象のまま
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
 
 permissions:
@@ -178,6 +188,10 @@ jobs:
 
   regress:
     name: OS起動回帰
+    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
+    # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
+    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
+    if: github.event_name != 'pull_request'
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -274,7 +288,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
+        # regress はPRではskippedになる (mainへのpush時のみ必須)
         run: |
           test "${{ needs.check.result }}" = "success" \
             && test "${{ needs.cosim.result }}" = "success" \
-            && test "${{ needs.regress.result }}" = "success"
+            && { test "${{ needs.regress.result }}" = "success" \
+                 || test "${{ needs.regress.result }}" = "skipped"; }
