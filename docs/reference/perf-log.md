@@ -358,3 +358,23 @@ vs jit-native bin 12.7s。差は**リンクされる依存 (cranelift ~3MB) だ�
 - 本番 (Firecracker/ネイティブ配布) は cranelift をリンクした
   バイナリなので、レイアウト税込みの jboot 側の絶対値の方がむしろ
   本番に近い — LTO/PGOでレイアウトが再び動くまでは
+
+## 2026-08-13 F1c-d3 ブロック内レジスタ割付 — 引き分け、構造資産として採用
+
+GPRの毎uopメモリ往復をCranelift変数 (use_var/def_var) に載せ替え。
+遅延ロード (live) + ダーティ書き戻し (dirty) をcompile-timeビットで追跡し、
+全脱出点・途中jcc成立側・全終端・GPRを触るヘルパ (push/pop/leave/shift_r/
+grp3b8_r) の前後でflushする規律。決定性ゲート2カーネル一発合格。
+
+冷却A/B 6周 (bzImage): **3勝3敗**、中央値 17.6s vs 18.0s — ノイズ内。
+壁時計に出ない理由の見立て: (a) M1はstore-to-load forwardingが強く、
+L1往復のGPRトラフィックは元々ほぼ無料。(b) 支配項は依然として
+**ALU 1回あたり6本のcc材料ストア** とヘルパ呼び (cf/cond 各~3ns)。
+(c) カバレッジ44%では生成コード内の微差が総時間に薄まる。
+
+採用理由 (b1と同型の構造資産): ④cc遅延化は「値がレジスタに居る」ことと
+このflush規律の上に建つ。単独で出なくても土台として要る。
+
+計器の注記: tools/jit-probe-native は素のCranelift固定費 (合成uop) の
+関門プローブであって、jit-nativeの翻訳器は通らない — 語彙の単価変化の
+判定には使えない。単価の判定器が要るなら翻訳器を通す実uopベンチを作ること。
