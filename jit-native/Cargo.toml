@@ -1,0 +1,15 @@
+# F1c: ネイティブJITランナー (ADR-0012)。
+# Craneliftを背負うのはこのクレートだけ — coreの無依存は不変。
+# coreとの境界は core::jit (JitBlock / JitLayout / JitHook / collect_run)
+[package]
+name = "rustx86-jit-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustx86-core = { path = "../core" }
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-frontend = "0.116"
+cranelift-codegen = "0.116"
+cranelift-native = "0.116"
