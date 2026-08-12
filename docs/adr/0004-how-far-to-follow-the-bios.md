@@ -46,7 +46,7 @@ DOSは「BIOSの上に薄く乗るだけ」の設計で、**アプリが直接BI
 setupコード (`arch/x86/boot/`) で、そこがINT 10hで早期のコンソールを出し、
 INT 13hでカーネル本体を読み、INT 15h AH=E820でメモリマップを取る。
 
-だが [ロードマップ Tier 4b](../../README.md#tier-4-linux起動--ここで完成) で選んだのは
+だが [ロードマップ Tier 4b](../roadmap.md) で選んだのは
 **bzImage + initrd を直接ロードして32bitエントリへ飛ぶ方式** (QEMUの `-kernel` 相当)
 である。これは**そのsetupコードを丸ごと飛ばす**。呼び出し側が居なくなるので、
 BIOSサービスも要らない。メモリマップは `boot_params` に自分で書いて渡す。
