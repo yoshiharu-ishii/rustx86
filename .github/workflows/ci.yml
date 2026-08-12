@@ -1,19 +1,20 @@
-# CI パイプライン (段構え2.0、2026-08-12):
-#   PR:        コードチェック → CPU照合(core/cosimを触ったときだけ) → OK
+# CI パイプライン (段構え2.1、2026-08-12):
+#   PR:        CI 結果 → CPU照合 結果 (core/cosimを触ったときだけ)
 #              (docsのみの変更はワークフローごとスキップ)
-#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK (常に全部)
+#   main push: CI 結果 → CPU照合 結果 ∥ OS起動回帰 結果 (常に全部)
 #
-# 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
+# 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
 # 要点:
 # - **段構え**: 安いコードチェックが先に走り、通ったときだけ重い検査
-#   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を
-#   払わない。最後の OK は全段の合流点
-# - レポートは**何をしたかと結果だけ**。説明の文章は docs/ci.md に書く
+#   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を払わない
+# - **Checksにはジョブをそのまま出す** (ユーザー決定 2026-08-12)。
+#   GitHubの仕様でジョブは必ずChecksに1行載るので、「中間ジョブ+結果Check」の
+#   二重出しをやめ、**ジョブ数=Checkの行数**まで削った。合流点のOKジョブも廃止
+#   (結果ジョブを直接見ればよい)。レポートは各ジョブの Step Summary に載せる
+# - レポートは**何をしたかと結果だけ**。説明の文章は docs/reference/ci.md に書く
 # - 各ステージは continue-on-error で最後まで走らせてから束ねる
 #   (テストが落ちてもビルドの結果は見たい)
-# - CPU照合は以前 paths で「CPUを触ったPRだけ」に絞っていたが、段構えに
-#   したので常に回す — 回る時間は起動回帰と並行で隠れ、条件が単純になる
 name: CI
 
 on:
@@ -32,7 +33,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
 
 # 同一ブランチへの連続pushは古いRunをキャンセル (無駄な並走を消す)
 concurrency:
@@ -43,8 +43,8 @@ env:
   CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
 
 jobs:
-  check:
-    name: コードチェック
+  ci:
+    name: CI 結果
     runs-on: ubuntu-latest
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
@@ -128,12 +128,10 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
-      # 全ステージを1つのレポートに束ねる。表は「何をしたか」と「結果」だけ
+      # 全ステージを Step Summary に束ねる。表は「何をしたか」と「結果」だけ
       - name: レポート発行
         if: always()
-        id: report
         run: |
-          ok=0
           {
             echo '| 何をしたか | 結果 |'
             echo '|---|---|'
@@ -149,20 +147,12 @@ jobs:
                 fmt)  outcome='${{ steps.fmt.outcome }}' ;;
                 lint) outcome='${{ steps.lint.outcome }}' ;;
               esac
-              [ "$outcome" = success ] && { mark='✅'; ok=$((ok+1)); } || mark='❌'
+              [ "$outcome" = success ] && mark='✅' || mark='❌'
               echo "| \`$cmd\` | $mark |"
             done
             echo ''
             cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
-          } > report.md
-          echo "title=$ok/4 合格" >> "$GITHUB_OUTPUT"
-      - uses: ./.github/actions/publish-check
-        if: always()
-        with:
-          name: CI 結果
-          title: ${{ steps.report.outputs.title }}
-          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
-          report-file: report.md
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 合否判定
         run: |
@@ -171,13 +161,13 @@ jobs:
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"
 
-  # ---- 段2: 重い検査。コードチェックが通ったときだけ、並行して走る ----
+  # ---- 段2: 重い検査。CI 結果が通ったときだけ、並行して走る ----
 
   cosim:
     # PRではCPUの意味論に触れたときだけ (L0)。mainへのpushでは常に回す
-    name: CPU照合
-    if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
-    needs: check
+    name: CPU照合 結果
+    if: github.event_name != 'pull_request' || needs.ci.outputs.cpu == 'true'
+    needs: ci
     runs-on: ubuntu-latest
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
     timeout-minutes: 30
@@ -198,23 +188,21 @@ jobs:
             echo '```'
             exit ${RC:-0}
           } > cosim-report.md
-      - uses: ./.github/actions/publish-check
-        with:
-          name: CPU照合 結果
-          title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
-          outcome: ${{ steps.cosim.outcome }}
-          report-file: cosim-report.md
+
+      - name: レポート発行
+        if: always()
+        run: cat cosim-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: 合否判定
         run: test "${{ steps.cosim.outcome }}" = "success"
 
   regress:
-    name: OS起動回帰
-    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
+    name: OS起動回帰 結果
+    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はCI結果+CPU照合、
     # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
     # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
     if: github.event_name != 'pull_request'
-    needs: check
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -280,40 +268,17 @@ jobs:
           path: regress-out/
           if-no-files-found: warn
 
-      - uses: ./.github/actions/publish-check
+      - name: レポート発行
         if: always()
-        with:
-          name: OS起動回帰 結果
-          title: ${{ steps.regress.outcome == 'success' && 'ELKS / FreeDOS / Linux 合格' || '失敗あり' }}
-          outcome: ${{ steps.regress.outcome }}
-          report-file: regress.md
-
-      - uses: ./.github/actions/publish-check
-        if: always()
-        with:
-          name: JIT決定性 結果
-          title: ${{ steps.jitcheck.outcome == 'success' && 'interp と jit がビット同一' || '食い違い or JIT不発' }}
-          outcome: ${{ steps.jitcheck.outcome }}
-          report-file: jitcheck.md
+        run: |
+          {
+            cat regress.md 2>/dev/null
+            echo ''
+            echo '## JIT決定性 (interp と jit がビット同一か)'
+            cat jitcheck.md 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 合否判定
         run: |
           test "${{ steps.regress.outcome }}" = "success" \
             && test "${{ steps.jitcheck.outcome }}" = "success"
-
-  # ---- 合流点。全部通って初めて OK ----
-
-  ok:
-    name: OK
-    if: always()
-    needs: [check, cosim, regress]
-    runs-on: ubuntu-latest
-    steps:
-      - name: 全段の合否
-        # regress はPRではskippedになる (mainへのpush時のみ必須)
-        run: |
-          test "${{ needs.check.result }}" = "success" \
-            && { test "${{ needs.cosim.result }}" = "success" \
-                 || test "${{ needs.cosim.result }}" = "skipped"; } \
-            && { test "${{ needs.regress.result }}" = "success" \
-                 || test "${{ needs.regress.result }}" = "skipped"; }
