@@ -82,6 +82,13 @@ fn main() {
             rt.dropped_stale,
         );
         println!("カバレッジ: {:.1}%", 100.0 * m.jit_instrs as f64 / n as f64);
+        println!(
+            "入場診断: 無ブロック {}M / 予算不足 {}M / IRQ保留 {}M / tick直後 {}M",
+            m.jit_denied[0] / 1_000_000,
+            m.jit_denied[1] / 1_000_000,
+            m.jit_denied[2] / 1_000_000,
+            m.jit_denied[3] / 1_000_000,
+        );
     }
     // 語彙の実測 (--features opstats のときだけ)。語彙をどこへ広げるかは
     // 推測せずこの分布で決める — wasm時代 (F1b-3) と同じ流儀
