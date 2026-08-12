@@ -83,4 +83,21 @@ fn main() {
         );
         println!("カバレッジ: {:.1}%", 100.0 * m.jit_instrs as f64 / n as f64);
     }
+    // 語彙の実測 (--features opstats のときだけ)。語彙をどこへ広げるかは
+    // 推測せずこの分布で決める — wasm時代 (F1b-3) と同じ流儀
+    #[cfg(feature = "opstats")]
+    {
+        let (in_vocab, ref out) = m.jit_vocab_counts;
+        let out_total: u64 = out.values().sum();
+        println!(
+            "uop分布: 語彙内 {:.1}% / 語彙外 {:.1}%",
+            100.0 * in_vocab as f64 / (in_vocab + out_total) as f64,
+            100.0 * out_total as f64 / (in_vocab + out_total) as f64
+        );
+        let mut v: Vec<_> = out.iter().collect();
+        v.sort_by_key(|&(_, c)| std::cmp::Reverse(*c));
+        for (name, c) in v.iter().take(12) {
+            println!("  語彙外 {name}: {}M", **c / 1_000_000);
+        }
+    }
 }

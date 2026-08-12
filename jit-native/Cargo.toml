@@ -13,3 +13,7 @@ cranelift-module = "0.116"
 cranelift-frontend = "0.116"
 cranelift-codegen = "0.116"
 cranelift-native = "0.116"
+
+[features]
+# coreのuop分布計測を通す (語彙をどこへ広げるかの実測用)
+opstats = ["rustx86-core/opstats"]
