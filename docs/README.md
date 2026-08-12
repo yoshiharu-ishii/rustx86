@@ -25,6 +25,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 
 | 文書 | 一言で |
 |---|---|
+| [チートシート](howto/cheatsheet.md) | よく打つコマンドの早見表 (走らせる/測る/検証する/焼く) |
 | [ビルドの最小構成](howto/build.md) | Rust導入〜wasm-packの中身、wasmの落とし穴 |
 | [perf.md の「起動経路の測り方」](reference/perf.md#起動経路の測り方) | bootphase / headless / ブラウザでの測定コマンド |
 | [ルートREADME](../README.md) | 実行方法・ロードマップ (Tier表) の本体 |
@@ -51,6 +52,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [0007](adr/0007-cpu-optimization-steps.md) | 最適化はデコード済みキャッシュを本丸に段階を刻む |
 | [0008](adr/0008-template-jit.md) | テンプレートJITの設計・Fシリーズのロードマップ・wasm凍結 |
 | [0009](adr/0009-pgo-shelved.md) | PGOは効いたが寝かせる — 運用判断を開発に持ち込まない |
+| [0010](adr/0010-test386-full-compat.md) | test386でCPU互換を完璧にする — 速さの前に正しさを積む |
 
 ## 読む順番 (初見の人向けの道)
 

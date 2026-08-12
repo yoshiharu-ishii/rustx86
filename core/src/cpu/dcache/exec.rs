@@ -68,10 +68,11 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
 
 // ---------- 実行 (従来経路と同じヘルパで) ----------
 
-/// 実効アドレス。レジスタの**今の**値から組む
+/// 実効アドレス。レジスタの**今の**値から組む。
+/// セグメント検査つき (data_addr) — 違反は控えられ、毒番地が返る
 #[inline]
-fn addr_of(m: &Machine, r: &MemRef) -> u32 {
-    m.cpu.lin(r.seg as usize, off_of(m, r))
+fn addr_of(m: &Machine, r: &MemRef, size: u32, write: bool) -> u32 {
+    m.data_addr(r.seg as usize, off_of(m, r), size, write)
 }
 
 /// セグメント適用前の実効オフセット (LEAが使う)
@@ -94,7 +95,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
             match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize] = v,
                 Rm::Mem(mr) => {
-                    let a = addr_of(m, &mr);
+                    let a = addr_of(m, &mr, 4, true);
                     m.write32(a, v);
                 }
             }
@@ -102,7 +103,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::MovRRm { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
             };
             m.cpu.regs[reg as usize] = v;
         }
@@ -111,7 +112,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
             match rm {
                 Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
                 Rm::Mem(mr) => {
-                    let a = addr_of(m, &mr);
+                    let a = addr_of(m, &mr, 1, true);
                     m.write8(a, v);
                 }
             }
@@ -119,7 +120,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::Mov8RRm { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
             };
             m.cpu.set_reg8(reg as usize, v);
         }
@@ -135,7 +136,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                     }
                 }
                 Rm::Mem(mr) => {
-                    let addr = addr_of(m, &mr);
+                    let addr = addr_of(m, &mr, 4, kind != 7);
                     let a = m.read32(addr);
                     let v = alu_w(&mut m.cpu, kind, a, b, true);
                     if kind != 7 {
@@ -148,7 +149,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
             let a = m.cpu.regs[reg as usize];
             let b = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
             };
             let v = alu_w(&mut m.cpu, kind, a, b, true);
             if kind != 7 {
@@ -166,7 +167,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                     }
                 }
                 Rm::Mem(mr) => {
-                    let addr = addr_of(m, &mr);
+                    let addr = addr_of(m, &mr, 1, kind != 7);
                     let a = m.read8(addr);
                     let v = alu8(&mut m.cpu, kind, a, b);
                     if kind != 7 {
@@ -179,7 +180,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
             let a = m.cpu.reg8(reg as usize);
             let b = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
             };
             let v = alu8(&mut m.cpu, kind, a, b);
             if kind != 7 {
@@ -209,7 +210,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                 }
             }
             Rm::Mem(mr) => {
-                let addr = addr_of(m, &mr);
+                let addr = addr_of(m, &mr, 4, kind != 7);
                 let a = m.read32(addr);
                 let v = alu_w(&mut m.cpu, kind, a, imm, true);
                 if kind != 7 {
@@ -226,7 +227,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                 }
             }
             Rm::Mem(mr) => {
-                let addr = addr_of(m, &mr);
+                let addr = addr_of(m, &mr, 1, kind != 7);
                 let a = m.read8(addr);
                 let v = alu8(&mut m.cpu, kind, a, imm);
                 if kind != 7 {
@@ -237,7 +238,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::TestRmR { rm, reg } => {
             let a = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
             };
             let b = m.cpu.regs[reg as usize];
             alu_w(&mut m.cpu, 4, a, b, true);
@@ -245,7 +246,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::Test8RmR { rm, reg } => {
             let a = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
             };
             let b = m.cpu.reg8(reg as usize);
             alu8(&mut m.cpu, 4, a, b);
@@ -289,7 +290,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::MovzxB { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
             };
             m.cpu.regs[reg as usize] = v as u32;
         }
@@ -305,19 +306,19 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::MovRmImm { rm, imm } => match rm {
             Rm::Reg(r) => m.cpu.regs[r as usize] = imm,
             Rm::Mem(mr) => {
-                let a = addr_of(m, &mr);
+                let a = addr_of(m, &mr, 4, true);
                 m.write32(a, imm);
             }
         },
         Uop::MovRm8Imm { rm, imm } => match rm {
             Rm::Reg(r) => m.cpu.set_reg8(r as usize, imm),
             Rm::Mem(mr) => {
-                let a = addr_of(m, &mr);
+                let a = addr_of(m, &mr, 1, true);
                 m.write8(a, imm);
             }
         },
         Uop::MovAMoffs { load, seg, off } => {
-            let a = m.cpu.lin(seg as usize, off);
+            let a = m.data_addr(seg as usize, off, 4, !load);
             if load {
                 let v = m.read32(a);
                 m.cpu.regs[AX] = v;
@@ -326,7 +327,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
             }
         }
         Uop::Mov8AMoffs { load, seg, off } => {
-            let a = m.cpu.lin(seg as usize, off);
+            let a = m.data_addr(seg as usize, off, 1, !load);
             if load {
                 let v = m.read8(a);
                 m.cpu.set_reg8(0, v);
@@ -348,7 +349,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::Grp3b { kind, rm, imm } => {
             let a = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
             };
             match kind {
                 0 | 1 => {
@@ -365,7 +366,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::Grp3w { kind, rm, imm } => {
             let a = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
             };
             match kind {
                 0 | 1 => {
@@ -415,7 +416,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
         Uop::MovzxW { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize] as u16,
-                Rm::Mem(mr) => m.read16(addr_of(m, &mr)),
+                Rm::Mem(mr) => m.read16(addr_of(m, &mr, 2, false)),
             };
             m.cpu.regs[reg as usize] = v as u32;
         }
@@ -436,19 +437,20 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                 rep: None,
                 opsize32: true,
                 addrsize32: true,
+                lock: false,
             };
             string::exec(m, &d, op);
         }
     }
 }
 
-/// r/m32 の読み。メモリなら番地も返す (RMWで再変換しないため)
+/// r/m32 の読み。メモリなら番地も返す (RMWで再変換しないため — 検査も書き込みで受ける)
 #[inline]
 fn read_rm32_addr(m: &Machine, rm: Rm) -> (u32, Option<u32>) {
     match rm {
         Rm::Reg(r) => (m.cpu.regs[r as usize], None),
         Rm::Mem(mr) => {
-            let a = addr_of(m, &mr);
+            let a = addr_of(m, &mr, 4, true);
             (m.read32(a), Some(a))
         }
     }
@@ -458,7 +460,7 @@ fn read_rm32_addr(m: &Machine, rm: Rm) -> (u32, Option<u32>) {
 fn read_rm32(m: &Machine, rm: Rm) -> u32 {
     match rm {
         Rm::Reg(r) => m.cpu.regs[r as usize],
-        Rm::Mem(mr) => m.read32(addr_of(m, &mr)),
+        Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
     }
 }
 
@@ -467,7 +469,7 @@ fn write_rm8(m: &mut Machine, rm: Rm, v: u8) {
     match rm {
         Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
         Rm::Mem(mr) => {
-            let a = addr_of(m, &mr);
+            let a = addr_of(m, &mr, 1, true);
             m.write8(a, v);
         }
     }
@@ -478,7 +480,7 @@ fn write_rm32(m: &mut Machine, rm: Rm, v: u32) {
     match rm {
         Rm::Reg(r) => m.cpu.regs[r as usize] = v,
         Rm::Mem(mr) => {
-            let a = addr_of(m, &mr);
+            let a = addr_of(m, &mr, 4, true);
             m.write32(a, v);
         }
     }
@@ -493,7 +495,7 @@ fn shift_exec(m: &mut Machine, kind: u8, rm: Rm, count: u8) {
             m.cpu.regs[r as usize] = v;
         }
         Rm::Mem(mr) => {
-            let addr = addr_of(m, &mr);
+            let addr = addr_of(m, &mr, 4, true);
             let a = m.read32(addr);
             let v = shift_rot(&mut m.cpu, kind, a, count, 32);
             m.write32(addr, v);

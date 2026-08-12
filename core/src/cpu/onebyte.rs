@@ -149,13 +149,21 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
         0x8E => {
             let (reg, rm) = modrm(m, d);
+            // mov cs, r/m は 386 では #UD。まだ何も書いていないので
+            // IPを命令頭へ戻して INT 6 を配送する (test386 が実挙動を要求する)
+            if reg == 1 {
+                m.cpu.set_ip(start_ip);
+                interrupt(m, 6);
+                return;
+            }
             if reg > 5 {
                 m.trap(format!("mov sreg, r/m16 with reg={reg} (reserved)"));
                 return;
             }
             let v = read_op16(m, &rm);
-            // 保護モードではGDTから隠しレジスタへ写す。リアルモードなら従来どおり
-            load_seg(m, reg, v);
+            // 保護モードではGDTから隠しレジスタへ写す。リアルモードなら従来どおり。
+            // 失敗 (#GP/#NP/#SS) はload_seg内で配送済み — この命令はここで終わり
+            let _ = load_seg(m, reg, v);
         }
         0xB0..=0xB7 => {
             let v = fetch8(m);
@@ -184,14 +192,14 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         0xA0 => {
             let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let v = m.read8(m.cpu.lin(seg, off));
+            let v = m.read8(m.data_addr(seg, off, 1, false));
             m.cpu.set_reg8(0, v);
         }
         0xA1 => {
             let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let a = m.cpu.lin(seg, off);
             let w = d.opsize32;
+            let a = m.data_addr(seg, off, if w { 4 } else { 2 }, false);
             let v = if w { m.read32(a) } else { m.read16(a) as u32 };
             m.cpu.set_reg_w(AX, v, w);
         }
@@ -199,13 +207,14 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
             let v = m.cpu.reg8(0);
-            m.write8(m.cpu.lin(seg, off), v);
+            let a = m.data_addr(seg, off, 1, true);
+            m.write8(a, v);
         }
         0xA3 => {
             let off = fetch_addr(m, d.addrsize32);
             let seg = d.seg_override.unwrap_or(DS);
-            let a = m.cpu.lin(seg, off);
             let w = d.opsize32;
+            let a = m.data_addr(seg, off, if w { 4 } else { 2 }, true);
             let v = m.cpu.reg_w(AX, w);
             if w {
                 m.write32(a, v)
@@ -250,8 +259,9 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // ここでは実装しない (Tier 3 で 0x0F を二バイト空間として使う)
         0x07 | 0x17 | 0x1F => {
             let v = pop_w(m, d.opsize32) as u16;
-            // 保護モードでは記述子を読み直して隠しレジスタも更新する
-            load_seg(m, (op >> 3) as usize & 3, v);
+            // 保護モードでは記述子を読み直して隠しレジスタも更新する。
+            // POPはもう起きた (SPは進んだ) 上でのセグメント検査 — 実CPUも同順
+            let _ = load_seg(m, (op >> 3) as usize & 3, v);
         }
 
         // --- PUSHA/POPA (186)。オペランドサイズ32ならPUSHAD/POPAD ---
@@ -278,6 +288,58 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             for r in [BX, DX, CX, AX] {
                 let v = pop_w(m, w);
                 m.cpu.set_reg_w(r, v, w);
+            }
+        }
+
+        // BOUND r, m (186): 添字が [下限, 上限] (メモリ上の対) の外なら
+        // #BR (INT 5)。境界はフォールト扱い — 積むIPは命令の頭
+        0x62 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Mem { off, seg, .. } = rm else {
+                // レジスタ形は未定義 — #UD
+                m.cpu.set_ip(start_ip);
+                interrupt(m, 6);
+                return;
+            };
+            let w = d.opsize32;
+            let (idx, lo, hi) = if w {
+                let a = m.data_addr(seg, off, 8, false);
+                (
+                    m.cpu.reg32(reg) as i32 as i64,
+                    m.read32(a) as i32 as i64,
+                    m.read32(a.wrapping_add(4)) as i32 as i64,
+                )
+            } else {
+                let a = m.data_addr(seg, off, 4, false);
+                (
+                    m.cpu.reg16(reg) as i16 as i64,
+                    m.read16(a) as i16 as i64,
+                    m.read16(a.wrapping_add(2)) as i16 as i64,
+                )
+            };
+            if idx < lo || idx > hi {
+                m.cpu.set_ip(start_ip);
+                interrupt(m, 5);
+            }
+        }
+
+        // ARPL r/m16, r16 (286〜、保護モード専用 — リアル/V86では#UD)。
+        // 「ユーザーから預かったセレクタのRPLを、呼び出し元の権限まで弱める」
+        // ためのOS向け命令: dstのRPLがsrcより強ければ弱めてZF=1
+        0x63 => {
+            if !m.cpu.pe() || m.cpu.vm86() {
+                m.cpu.set_ip(start_ip);
+                interrupt(m, 6);
+                return;
+            }
+            let (reg, rm) = modrm(m, d);
+            let dst = read_op16(m, &rm);
+            let src = m.cpu.reg16(reg);
+            if (dst & 3) < (src & 3) {
+                m.cpu.set_flag(ZF, true);
+                write_op16(m, &rm, (dst & !3) | (src & 3));
+            } else {
+                m.cpu.set_flag(ZF, false);
             }
         }
 
@@ -333,19 +395,26 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
 
         // --- ENTER/LEAVE (186): スタックフレームの作成と破棄 ---
         0xC8 => {
+            // 幅の軸が2本ある: **積む値の幅はオペランドサイズ、BP/SPを動かす幅は
+            // SSのBフラグ**。o32 enter を16bitスタックで打つと「4バイトずつ積むが
+            // ポインタは16bitで回り、EBPの上位16bitは温存」になる (test386 POST 1A)
             let w = d.opsize32;
+            let sw = m.cpu.seg_is32(SS);
             let step = if w { 4u32 } else { 2 };
             let size = fetch16(m) as u32;
             let level = fetch8(m) & 0x1F;
             let bp = m.cpu.reg_w(BP, w);
             push_w(m, bp, w);
-            let frame = sp_read(m);
+            // frame tempは**ESPレジスタの生の値**。16bitスタックではpushが
+            // SPしか動かさないので上位16bitが残り、o32で積むとその姿
+            // (例 0x0001FFFC) がそのまま見える (test386 POST 1Aが検査する)
+            let frame = m.cpu.regs[SP];
             if level > 0 {
                 // ネストした手続きの表示 (display) を積む。Pascal系言語のための機構で、
                 // Cしか使わない現代では level=0 しか出てこない
                 for _ in 1..level {
-                    let b = m.cpu.reg_w(BP, w).wrapping_sub(step);
-                    m.cpu.set_reg_w(BP, b, w);
+                    let b = m.cpu.reg_w(BP, sw).wrapping_sub(step);
+                    m.cpu.set_reg_w(BP, b, sw);
                     let v = if w {
                         m.read32(m.cpu.lin(SS, b))
                     } else {
@@ -355,18 +424,27 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
                 }
                 push_w(m, frame, w);
             }
-            m.cpu.set_reg_w(BP, frame, w);
+            m.cpu.set_reg_w(BP, frame, sw);
             // 最後のSP調整は「今のSP」から引く。Intel SDMの疑似コードは
             // `SP <- BP - Size` と書いているが、これが正しいのは level=0 のときだけで、
             // level>0 では display を積んだ分が抜け落ちる。
             // AMDのマニュアルとQEMUの実装は現在のSPから引いており、そちらが実挙動。
             // co-simがこの差を捕まえた
             let sp = sp_read(m).wrapping_sub(size);
+            // ENTERは**最終SPでの書き込み可否を検分**する — 実際には書かないのに、
+            // 書いたら起きるはずの #PF を起こす (実CPUの仕様。test386 POST 1Aは
+            // pushの当たらないページを監督者専用にしてこれだけを狙い撃つ)
+            let wrapped = if m.cpu.seg_is32(SS) { sp } else { sp & 0xFFFF };
+            if let Err(f) = m.translate_for(m.cpu.lin(SS, wrapped), true) {
+                m.note_fault(f);
+            }
             sp_write(m, sp);
         }
         0xC9 => {
-            // LEAVE: SP←BP、そしてBPをpop。SPへ写す幅はSSのBフラグ側
-            let bp = m.cpu.reg_w(BP, d.opsize32);
+            // LEAVE: SP←BP、そしてBPをpop。SP←BPの幅はSSのBフラグ側、
+            // popの幅はオペランドサイズ (ENTERと同じ2軸)
+            let sw = m.cpu.seg_is32(SS);
+            let bp = m.cpu.reg_w(BP, sw);
             sp_write(m, bp);
             let v = pop_w(m, d.opsize32);
             m.cpu.set_reg_w(BP, v, d.opsize32);
@@ -376,15 +454,22 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // far ポインタ (4バイト) を読み、下位2バイトを汎用レジスタへ、
         // 上位2バイトをセグメントレジスタへ入れる
         0xC4 | 0xC5 => {
+            // オフセットの幅はオペランドサイズ (o32ならoff32+seg16の6バイト)
             let (reg, rm) = modrm(m, d);
             let addr = match rm {
                 Operand::Mem { addr, .. } => addr,
                 Operand::Reg(_) => panic!("LES/LDS with register operand"),
             };
-            let off = m.read16(addr);
-            let seg = m.read16(addr.wrapping_add(2));
-            m.cpu.set_reg16(reg, off);
-            m.cpu.sregs[if op == 0xC4 { ES } else { DS }] = seg;
+            let off = if d.opsize32 {
+                m.read32(addr)
+            } else {
+                m.read16(addr) as u32
+            };
+            let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
+            // セグメントを先に検査してからレジスタを書く (失敗なら何も変えない)
+            if load_seg(m, if op == 0xC4 { ES } else { DS }, seg) {
+                m.cpu.set_reg_w(reg, off, d.opsize32);
+            }
         }
 
         // --- XLAT: AL = [BX + AL] ---
@@ -412,6 +497,20 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             };
             let wide = op & 1 != 0;
             let out = op & 2 != 0;
+            // I/O特権: CPL > IOPL (V86では常に) はTSSのI/O許可ビットマップが
+            // 最後の砦。不許可は #GP(0) — gp_faultが命令の頭へ巻き戻すので、
+            // 先にfetchしたimm8ポートも無かったことになる
+            let bytes = if !wide {
+                1
+            } else if d.opsize32 {
+                4
+            } else {
+                2
+            };
+            if !super::interrupt::io_permitted(m, port, bytes) {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
             // 幅つき (bit0=1) はオペランドサイズで 16/32 が割れる。
             // inl/outl はPCIコンフィグ (0xCF8/0xCFC) が32bitで叩いてくる
             match (out, wide) {
@@ -487,36 +586,28 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             let seg = fetch16(m);
             // 保護モードではこれが**遷移を完成させる**一撃になる。
             // PE=1にしただけではまだ16bitのまま走っていて、CSに記述子が
-            // 積まれて初めて32bitコードが始まる
-            load_seg(m, CS, seg);
-            m.cpu.set_ip(off);
+            // 積まれて初めて32bitコードが始まる (CS検査に落ちたらIPは据えない)
+            if load_seg(m, CS, seg) {
+                m.cpu.set_ip(off);
+            }
         }
+        // far call / far ret も**オフセットとpush/popの幅はオペランドサイズ**。
+        // 16bit固定にしていると `o32 call dword seg:off32` が off32 の上位16bitを
+        // セグメントとして食い、CS=0000 の空RAMへ飛ぶ (test386 POST 05 が暴いた)
         0x9A => {
-            let off = fetch16(m);
+            let off = fetch_w(m, d.opsize32);
             let seg = fetch16(m);
-            let cs = m.cpu.sregs[CS];
-            push16(m, cs);
-            let ret = m.cpu.ip as u16;
-            push16(m, ret);
-            m.cpu.sregs[CS] = seg;
-            m.cpu.set_ip(off as u32);
+            // 保護モードではコールゲート経由のリング遷移になり得る — 共通経路へ
+            segment::far_call(m, seg, off, d.opsize32);
         }
-        0xCB => {
-            let ip = pop16(m) as u32;
-            m.cpu.sregs[CS] = pop16(m);
-            m.cpu.set_ip(ip);
-        }
+        0xCB => segment::far_ret(m, d.opsize32, 0),
         0xCA => {
             let n = fetch16(m) as u32;
-            let ip = pop16(m) as u32;
-            m.cpu.sregs[CS] = pop16(m);
-            m.cpu.set_ip(ip);
-            let sp = sp_read(m).wrapping_add(n);
-            sp_write(m, sp);
+            segment::far_ret(m, d.opsize32, n);
         }
         // IRET: 割り込みハンドラからの復帰。CALLと違いFLAGSも戻す。
         // 割り込み中に変わったIF/DFを呼び出し前の値へ戻すのが要点。
-        0xCF => iret(m),
+        0xCF => iret(m, d.opsize32),
         0xE2 => {
             // LOOP。カウンタの幅は**アドレスサイズ** (32bitではECX)
             let rel = fetch8(m) as i8;
@@ -536,9 +627,15 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // ホスト関数へ横流しする今の方式ではOSが動かない。
         0xCD => {
             let n = fetch8(m);
-            software_int(m, n);
+            // V86のINT nはIOPL=3が入場券 (#GP(0))。INT3/INTOは対象外 —
+            // IOPL検査があるのは即値形だけ (実CPUの仕様)
+            if m.cpu.vm86() && m.cpu.iopl() < 3 {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
+            software_int(m, n, start_ip);
         }
-        0xCC => software_int(m, 3), // INT3 (デバッガのブレークポイント)
+        0xCC => software_int(m, 3, start_ip), // INT3 (デバッガのブレークポイント)
         0xCE => {
             // INTO: OFが立っているときだけ割り込み4。立っていなければ何もしない
             if m.cpu.flag(OF) {
@@ -547,15 +644,29 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
 
         // --- フラグ/制御 ---
-        0xF4 => m.halted = true,
+        // HLT — 特権命令 (CPL0限定、IOPLは関係ない)。ring3のhltは #GP(0)
+        0xF4 => {
+            if m.cpu.pe() && m.cpu.cpl() != 0 {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
+            m.halted = true;
+        }
         0xF5 => {
             let c = m.cpu.flag(CF);
             m.cpu.set_flag(CF, !c);
         } // CMC
         0xF8 => m.cpu.set_flag(CF, false), // CLC
         0xF9 => m.cpu.set_flag(CF, true),  // STC
-        0xFA => m.cpu.set_flag(IF, false), // CLI
-        0xFB => m.cpu.set_flag(IF, true),  // STI
+        // CLI/STI — IOPL特権命令。CPL > IOPL のリングが割り込みを握るのは
+        // #GP(0) (リング3が cli でカーネルを止められたら保護にならない)
+        0xFA | 0xFB => {
+            if m.cpu.pe() && m.cpu.cpl() > m.cpu.iopl() {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
+            m.cpu.set_flag(IF, op == 0xFB);
+        }
         0xFC => m.cpu.set_flag(DF, false), // CLD
         0xFD => m.cpu.set_flag(DF, true),  // STD
 
@@ -651,15 +762,32 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // 読み直して残っているか見る」というもので、そのためには
         // 32bit幅でフラグを出し入れできる必要がある
         0x9C => {
+            // V86のPUSHFもIOPL=3が入場券 (#GP(0)) — フラグの出し入れは
+            // 檻の監視者 (VMM) が割り込んで面倒を見る前提の設計
+            if m.cpu.vm86() && m.cpu.iopl() < 3 {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
             let f = m.cpu.eflags() | 0x0002;
             if d.opsize32 {
                 // 上位2bit (VM/RF) はPUSHFDでは常に0で出る
                 push_w(m, f & 0x00FC_FFFF, true);
+            } else if m.profile.has_fpu {
+                // 386以降のPUSHF(16bit形): bit15は0、IOPL/NTは実値のまま。
+                // (0xF000強制は8086だけ — test386のPOST 09が0xF603/0x0603の
+                //  差として暴いた)
+                push_w(m, (f as u16 & 0x7FFF | 0x0002) as u32, false);
             } else {
+                // 8086: 上位4bit (15-12) は常に1で出る。ソフトはこれで世代を知る
                 push_w(m, (f as u16 | 0xF002) as u32, false);
             }
         }
         0x9D => {
+            // V86のPOPFもIOPL=3が入場券 (#GP(0)、PUSHFと対)
+            if m.cpu.vm86() && m.cpu.iopl() < 3 {
+                gp_fault(m, start_ip, 0);
+                return;
+            }
             let f = pop_w(m, d.opsize32);
             // 書き換えられるビットだけ受け取る。**どこまで受けるかは世代**:
             //
@@ -671,15 +799,26 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             //
             // 32bit機 (i586相当) は逆に**受けるのが正しい** — Linuxは
             // IDが書き換わることでCPUIDの存在を知り、先の初期化へ進む
-            let mask: u32 = if m.profile.has_cpuid {
+            let mut mask: u32 = if m.profile.has_cpuid {
                 if d.opsize32 {
-                    0x0024_7FD5 // 標準 + IOPL/NT + AC + ID
+                    0x0024_7FD5 // 標準 + IOPL/NT + AC + ID (VMは対象外 — iretだけ)
                 } else {
                     0x7FD5
                 }
             } else {
                 0x0FD5
             };
+            // 特権で書けるビットが変わる (実CPUのPOPFは**黙って**落とす、#GPしない):
+            // IOPLを書けるのはリング0だけ。IFを書けるのは CPL <= IOPL のリングだけ
+            // (V86のIOPL=3もこの規則に呑まれる — IOPL不可・IF可)
+            if m.cpu.pe() {
+                if m.cpu.cpl() > 0 {
+                    mask &= !0x3000;
+                }
+                if m.cpu.cpl() > m.cpu.iopl() {
+                    mask &= !IF;
+                }
+            }
             let cur = m.cpu.eflags();
             m.cpu.set_eflags((cur & !mask) | (f & mask) | 0x0002);
         }
@@ -727,10 +866,15 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         0xD5 => decimal::aad(m),
 
         // --- ループ/条件ジャンプの残り ---
+        // カウンタの幅は**アドレスサイズ**が選ぶ (0x67付きは16bitコードでもECX)。
+        // E2 (LOOP) だけ直してこの2つがCX固定のままだった — test386のPOST 01
+        // (JECXZがECX=0x10000で飛んでしまう) が最初に暴いた
         0xE0 | 0xE1 => {
             let rel = fetch8(m) as i8;
-            let cx = m.cpu.reg16(CX).wrapping_sub(1);
-            m.cpu.set_reg16(CX, cx);
+            let a32 = d.addrsize32;
+            let cx = m.cpu.reg_w(CX, a32).wrapping_sub(1);
+            m.cpu.set_reg_w(CX, cx, a32);
+            let cx = if a32 { cx } else { cx & 0xFFFF };
             let zcond = if op == 0xE1 {
                 m.cpu.flag(ZF)
             } else {
@@ -743,7 +887,12 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         }
         0xE3 => {
             let rel = fetch8(m) as i8;
-            if m.cpu.reg16(CX) == 0 {
+            let cx = if d.addrsize32 {
+                m.cpu.regs[CX]
+            } else {
+                m.cpu.reg16(CX) as u32
+            };
+            if cx == 0 {
                 let ip = m.cpu.ip.wrapping_add(rel as i32 as u32);
                 m.cpu.set_ip(ip);
             }

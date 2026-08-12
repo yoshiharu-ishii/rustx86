@@ -218,13 +218,12 @@ pub(crate) fn grp5(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 (m.read16(addr) as u32, m.read16(addr.wrapping_add(2)))
             };
             if kind == 3 {
-                let cs = m.cpu.sregs[CS];
-                push_w(m, cs as u32, w);
-                let ret = m.cpu.ip;
-                push_w(m, ret, w);
+                // CALL far はコールゲート経由のリング遷移になり得る — 共通経路へ
+                super::segment::far_call(m, seg, off, w);
+            } else if super::load_seg(m, CS, seg) {
+                // JMP far。CS検査に落ちたらIPは据えない
+                m.cpu.set_ip(off);
             }
-            super::load_seg(m, CS, seg);
-            m.cpu.set_ip(off);
         }
         _ => {
             let _ = start_ip;

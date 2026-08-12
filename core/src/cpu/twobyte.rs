@@ -60,13 +60,33 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     super::operand::write_op16(m, &rm, v);
                 }
                 2 => {
+                    // LLDT: LDT記述子 (これ自体は必ずGDTに居る、type 0x2) を
+                    // 読んで、LDTの所在を隠しレジスタへ写す
                     let sel = read_op16(m, &rm);
-                    if sel & !0x7 != 0 {
-                        // 実LDTを積もうとした — 保持だけでは嘘になるので止める
-                        m.trap(format!("LLDT with non-null selector {sel:#06x}"));
+                    if sel & !0x3 == 0 {
+                        // ヌル: LDTを空にする (使った瞬間にlimit超過で咎まる)
+                        m.cpu.ldtr_sel = sel;
+                        m.cpu.ldtr_base = 0;
+                        m.cpu.ldtr_limit = 0;
                         return;
                     }
+                    let off = (sel & !0x7) as u32;
+                    let a = m.cpu.gdtr_base.wrapping_add(off);
+                    let prev_sys = m.sys_access.replace(true);
+                    let lo = m.read32(a);
+                    let hi = m.read32(a.wrapping_add(4));
+                    m.sys_access.set(prev_sys);
+                    let ty = ((hi >> 8) & 0x1F) as u8;
+                    if ty != 0x02 {
+                        panic!("LLDT: not an LDT descriptor (type {ty:#04x})");
+                    }
                     m.cpu.ldtr_sel = sel;
+                    m.cpu.ldtr_base = (lo >> 16) | ((hi & 0xFF) << 16) | (hi & 0xFF00_0000);
+                    let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
+                    if hi & 0x0080_0000 != 0 {
+                        limit = (limit << 12) | 0xFFF;
+                    }
+                    m.cpu.ldtr_limit = limit;
                 }
                 // LTR: TSSの場所をTRへ。記述子はGDTから読む
                 3 => {
@@ -90,23 +110,38 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 // 副作用の方が本体になった珍しい命令
                 4 | 5 => {
                     let sel = read_op16(m, &rm);
-                    let ok = if sel & !0x7 == 0 {
-                        false // ヌルセレクタは常に不成立
-                    } else {
+                    // 「ロードしたら通るか」をロードせずに答える命令なので、
+                    // 検査の順序と条件はセグメントロードの写し:
+                    // 表の範囲→present→コード/データ→特権 (適合は免除) →可否
+                    let ok = 'v: {
+                        if sel & !0x3 == 0 {
+                            break 'v false; // ヌルセレクタは常に不成立
+                        }
+                        let (tbase, tlimit) = super::segment::descriptor_table(m, sel);
                         let off = (sel & !0x7) as u32;
-                        let a = m.cpu.gdtr_base.wrapping_add(off);
+                        if off + 7 > tlimit {
+                            break 'v false; // 表の外
+                        }
+                        let a = tbase.wrapping_add(off);
                         let prev_sys = m.sys_access.replace(true);
                         let hi = m.read32(a.wrapping_add(4));
                         m.sys_access.set(prev_sys);
                         let access = ((hi >> 8) & 0xFF) as u8;
-                        let present = access & 0x80 != 0;
-                        let is_data = access & 0x18 == 0x10;
+                        if access & 0x80 == 0 || access & 0x10 == 0 {
+                            break 'v false; // 不在、またはシステム記述子
+                        }
+                        let code = access & 0x08 != 0;
+                        let conforming = code && access & 0x04 != 0;
+                        let dpl = (access >> 5) & 3;
+                        if !conforming && (dpl < m.cpu.cpl() || dpl < (sel & 3) as u8) {
+                            break 'v false; // 特権が届かない (適合コードだけ免除)
+                        }
                         if reg == 5 {
                             // VERW: 書けるのは data かつ writable
-                            present && is_data && access & 0x02 != 0
+                            !code && access & 0x02 != 0
                         } else {
                             // VERR: data は常に読める、code は readable ビット
-                            present && (is_data || (access & 0x18 == 0x18 && access & 0x02 != 0))
+                            !code || access & 0x02 != 0
                         }
                     };
                     m.cpu.set_flag(super::ZF, ok);
@@ -397,6 +432,33 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             m.cpu.set_flag(super::CF, ext);
             m.cpu.set_flag(super::OF, ext);
         }
+        // LSS/LFS/LGS (386〜): far pointer をレジスタとセグメントへ同時ロード。
+        // LES/LDS (C4/C5) の親戚で、オフセットの幅はオペランドサイズに従う
+        0xB2 | 0xB4 | 0xB5 => {
+            let (reg, rm) = modrm(m, d);
+            let addr = match rm {
+                Operand::Mem { addr, .. } => addr,
+                Operand::Reg(_) => {
+                    m.trap(format!("LSS/LFS/LGS with register operand (0f {op2:#04x})"));
+                    return;
+                }
+            };
+            let off = if d.opsize32 {
+                m.read32(addr)
+            } else {
+                m.read16(addr) as u32
+            };
+            let seg = m.read16(addr.wrapping_add(if d.opsize32 { 4 } else { 2 }));
+            let sr = match op2 {
+                0xB2 => super::SS,
+                0xB4 => super::FS,
+                _ => super::GS,
+            };
+            // セグメントを先に検査してからレジスタを書く (失敗なら何も変えない)
+            if load_seg(m, sr, seg) {
+                m.cpu.set_reg_w(reg, off, d.opsize32);
+            }
+        }
         // MOVZX/MOVSX (386〜): 小さい値をゼロ拡張/符号拡張して広いレジスタへ。
         // Cコンパイラが u8/i8/u16/i16 → int の変換で山ほど出す
         0xB6 | 0xB7 | 0xBE | 0xBF => {
@@ -430,7 +492,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
         0xA1 | 0xA9 => {
             let s = if op2 == 0xA1 { FS } else { GS };
             let v = super::operand::pop_w(m, d.opsize32) as u16;
-            super::load_seg(m, s, v);
+            let _ = super::load_seg(m, s, v);
         }
         // SHLD/SHRD (386〜): 倍精度シフト。隣のレジスタから溢れたビットを
         // 継ぎ足しながらずらす — 64bit値を32bitレジスタ2本でずらすための命令
@@ -447,23 +509,29 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             let bits: u32 = if d.opsize32 { 32 } else { 16 };
             let dst = read_op_w(m, &rm, d.opsize32);
             let src = m.cpu.reg_w(reg, d.opsize32);
-            let n = count as u32 % bits;
-            let (r, cf) = if op2 & 0x08 == 0 {
-                // SHLD: 左へ。srcの上位ビットが右から入る
-                if n == 0 {
-                    (dst, m.cpu.flag(super::CF))
+            let count = count as u32;
+            let (r, cf) = if bits == 16 {
+                // 16bit形の実386挙動 (test386のEE照合が要求): dst:src (SHLDは
+                // dstが上位、SHRDは逆) の**32bit連結**を count ぶんずらした続き。
+                // count>=16 でも count%16 に畳まず、srcのビットが流れ込み続ける
+                // (shld ax,dx,16 → ax=dx)
+                if op2 & 0x08 == 0 {
+                    let t = ((dst as u64) << 16) | src as u64;
+                    let r = ((t << count) >> 16) as u32 & 0xFFFF;
+                    (r, (t >> (32 - count)) & 1 != 0)
                 } else {
-                    let r = (dst << n) | (src >> (bits - n));
-                    (r, (dst >> (bits - n)) & 1 != 0)
+                    let t = ((src as u64) << 16) | dst as u64;
+                    let r = (t >> count) as u32 & 0xFFFF;
+                    (r, (t >> (count - 1)) & 1 != 0)
                 }
+            } else if op2 & 0x08 == 0 {
+                // SHLD: 左へ。srcの上位ビットが右から入る
+                let r = (dst << count) | (src >> (bits - count));
+                (r, (dst >> (bits - count)) & 1 != 0)
             } else {
                 // SHRD: 右へ。srcの下位ビットが左から入る
-                if n == 0 {
-                    (dst, m.cpu.flag(super::CF))
-                } else {
-                    let r = (dst >> n) | (src << (bits - n));
-                    (r, (dst >> (n - 1)) & 1 != 0)
-                }
+                let r = (dst >> count) | (src << (bits - count));
+                (r, (dst >> (count - 1)) & 1 != 0)
             };
             super::operand::write_op_w(m, &rm, r, d.opsize32);
             m.cpu.set_flag(super::CF, cf);

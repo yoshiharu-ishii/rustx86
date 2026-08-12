@@ -116,7 +116,9 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             0x3E => seg_override = Some(DS as u8),
             0x64 => seg_override = Some(super::super::FS as u8),
             0x65 => seg_override = Some(super::super::GS as u8),
-            0xF0 => {} // LOCK: シングルコアなので順序の意味を持たない (従来経路と同じ)
+            // LOCK: 実行の意味は持たない (シングルコア) が、付けてよい命令かの
+            // #UD検査があるので従来経路に任せる (稀なので速さの損は無い)
+            0xF0 => return None,
             0x66 | 0x67 | 0xF2 | 0xF3 => return None,
             _ => break x,
         }
