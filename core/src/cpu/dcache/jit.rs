@@ -692,6 +692,8 @@ pub struct JitLayout {
     /// テキストVRAM窓 [lo, hi] (書き込み高速路はこの範囲を避けてヘルパへ)
     pub vram_lo: u32,
     pub vram_hi: u32,
+    /// jit_budget (このブロック実行の最大命令数) の番地 — F1c-c4
+    pub jit_budget: usize,
     /// ページングが有効か見るためのCR0の番地 (bit31=PG。PG無効時は恒等変換 —
     /// 高速路はTLBを引かず la をそのまま物理に使ってよい…とはせず、
     /// **PG無効時もTLBは恒等で埋まらないので必ずヘルパへ**。生成コードは
@@ -720,8 +722,14 @@ pub struct JitHook {
     /// スロット番号を受け取り、そのJITブロックを実行して実行命令数を返す。
     /// **ブロックの全命令数より少ない返り値 = フォールト脱出** (F1b) —
     /// 返した数までは完全に実行済み、次の命令は状態を1つも変えていない。
-    /// core側はその1命令をインタプリタでやり直す (skip_jit)
+    /// core側はその1命令をインタプリタでやり直す (skip_jit)。
+    /// budget_awareなら「予算 (jit_budget) ちょうどでの途中退出」もあり得る —
+    /// こちらは完全実行済みの正規出口 (やり直し不要)
     pub enter: fn(slot: u32) -> u32,
+    /// 生成コードが jit_budget を毎命令照合するか (F1c-c4)。
+    /// true: coreは予算1以上で入場させ、enter前に jit_budget を書く。
+    /// false (wasm凍結世代): 従来どおり「ブロック全長 <= 予算」でだけ入場
+    pub budget_aware: bool,
 }
 
 /// ブロックのページ世代 (焼いた時点の値を控えて、実行前に照合する)。
@@ -755,6 +763,7 @@ pub fn layout(m: &Machine) -> JitLayout {
         hidden: m.cpu.hidden.as_ptr() as usize,
         vram_lo: crate::bus::VRAM_TEXT_BASE,
         vram_hi: crate::bus::VRAM_TEXT_END,
+        jit_budget: &m.jit_budget as *const u32 as usize,
         cr0: &m.cpu.cr0 as *const u32 as usize,
     }
 }
