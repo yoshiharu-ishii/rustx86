@@ -1,7 +1,8 @@
 # CI パイプライン (段構え2.1、2026-08-12):
 #   PR:        CI 結果 → CPU照合 結果 (core/cosimを触ったときだけ)
 #              (docsのみの変更はワークフローごとスキップ)
-#   main push: CI 結果 → CPU照合 結果 ∥ OS起動回帰 結果 (常に全部)
+#   main push: CI 結果 → CPU照合 結果 (OS起動回帰は regress.yml — PRのChecksに
+#              灰色のskipped行を出さないため、pushトリガだけの別ワークフロー)
 #
 # 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
@@ -195,90 +196,3 @@ jobs:
 
       - name: 合否判定
         run: test "${{ steps.cosim.outcome }}" = "success"
-
-  regress:
-    name: OS起動回帰 結果
-    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はCI結果+CPU照合、
-    # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
-    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
-    if: github.event_name != 'pull_request'
-    needs: ci
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-
-      # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
-      # 入手経路は tools/fetch-images.sh ただ一つ — CIだけの取り方を作ると
-      # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
-      - name: イメージのキャッシュ
-        id: img-cache
-        uses: actions/cache@v4
-        with:
-          path: images
-          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
-
-      - name: イメージの取得と組み立て
-        if: steps.img-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip
-          tools/fetch-images.sh elks
-          tools/fetch-images.sh freedos-boot
-          tools/fetch-images.sh linux
-          tools/extract-vmlinux.sh
-          tools/make-mini-initramfs.sh
-
-      - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
-        id: regress
-        continue-on-error: true
-        # MIPS下限は「壊滅の検出」用の粗い値。共有ランナーは±10〜30%揺れるので、
-        # きつくするとランナーの運で赤くなる。日々の推移はレポートの数字を見る
-        env:
-          REGRESS_MIN_MIPS: 10
-        run: cargo run --release --example regress | tee regress.md
-
-      # JITの決定性ゲート (F1a、ADR-0008)。生成コードとインタプリタが
-      # 「シェル到達までの命令数」も「シリアル出力全文」もビット同一かを見張る。
-      # 命令数決定性 (docs/perf.md の柱) をJITが崩したら即赤くする
-      - name: Node の用意
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: wasm-pack の用意
-        run: |
-          rustup target add wasm32-unknown-unknown
-          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      - name: wasm を焼く
-        run: bash tools/build-web.sh
-      - name: JIT決定性ゲート (interp と jit がビット同一)
-        id: jitcheck
-        continue-on-error: true
-        run: node tools/webtest/jit-check.mjs | tee jitcheck.md
-
-      # ブートログを証跡として残す。ゲストの時計は決定的なので、
-      # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
-      # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
-      - name: ブートログを証跡に残す
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: boot-logs
-          path: regress-out/
-          if-no-files-found: warn
-
-      - name: レポート発行
-        if: always()
-        run: |
-          {
-            cat regress.md 2>/dev/null
-            echo ''
-            echo '## JIT決定性 (interp と jit がビット同一か)'
-            cat jitcheck.md 2>/dev/null
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 合否判定
-        run: |
-          test "${{ steps.regress.outcome }}" = "success" \
-            && test "${{ steps.jitcheck.outcome }}" = "success"

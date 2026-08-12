@@ -1,0 +1,111 @@
+# OS起動回帰 — mainに載る瞬間の門番 (PRでは回さない。ユーザー決定 2026-08-12)。
+#
+# ci.yml から分離した理由: 同じワークフローにいると、PRのChecksタブに
+# 「OS起動回帰 結果 (skipped)」の灰色行が必ず載る (GitHubの仕様で消せない)。
+# pushトリガだけの別ワークフローにすれば、PRのChecksは CI 結果 + CPU照合 結果
+# の2行だけになる。将来の4OSバイナリ互換スイート (docs/reference/ci.md の
+# 互換ピラミッド L2/L3) もここに積む。
+#
+# 分離の代償: mainへのpushでは CI 結果 と並行に走る (段構えの「安い検査が
+# 通ってから」はPR側で担保済みなので、mainでの並行は問題ない)
+name: OS起動回帰
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regress-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  regress:
+    name: OS起動回帰 結果
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
+      # 入手経路は tools/fetch-images.sh ただ一つ — CIだけの取り方を作ると
+      # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/fetch-images.sh elks
+          tools/fetch-images.sh freedos-boot
+          tools/fetch-images.sh linux
+          tools/extract-vmlinux.sh
+          tools/make-mini-initramfs.sh
+
+      - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
+        id: regress
+        continue-on-error: true
+        # MIPS下限は「壊滅の検出」用の粗い値。共有ランナーは±10〜30%揺れるので、
+        # きつくするとランナーの運で赤くなる。日々の推移はレポートの数字を見る
+        env:
+          REGRESS_MIN_MIPS: 10
+        run: cargo run --release --example regress | tee regress.md
+
+      # JITの決定性ゲート (F1a、ADR-0008)。生成コードとインタプリタが
+      # 「シェル到達までの命令数」も「シリアル出力全文」もビット同一かを見張る。
+      # 命令数決定性 (docs/perf.md の柱) をJITが崩したら即赤くする
+      - name: Node の用意
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: wasm-pack の用意
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: wasm を焼く
+        run: bash tools/build-web.sh
+      - name: JIT決定性ゲート (interp と jit がビット同一)
+        id: jitcheck
+        continue-on-error: true
+        run: node tools/webtest/jit-check.mjs | tee jitcheck.md
+
+      # ブートログを証跡として残す。ゲストの時計は決定的なので、
+      # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
+      # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
+      - name: ブートログを証跡に残す
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-logs
+          path: regress-out/
+          if-no-files-found: warn
+
+      - name: レポート発行
+        if: always()
+        run: |
+          {
+            cat regress.md 2>/dev/null
+            echo ''
+            echo '## JIT決定性 (interp と jit がビット同一か)'
+            cat jitcheck.md 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 合否判定
+        run: |
+          test "${{ steps.regress.outcome }}" = "success" \
+            && test "${{ steps.jitcheck.outcome }}" = "success"
