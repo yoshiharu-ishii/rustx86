@@ -36,7 +36,7 @@ use cranelift_module::{Linkage, Module};
 use rustx86_core::jit::{JitBlock, JitLayout, JitMem, JitOp};
 use rustx86_core::{cpu, jit, Machine};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 // ---- ヘルパ (生成コードから呼ばれる) ----
@@ -1116,10 +1116,13 @@ fn baker_thread(rx: Receiver<BakeJob>, tx: Sender<Baked>) {
 pub struct JitRt {
     tx: Sender<BakeJob>,
     rx: Receiver<Baked>,
-    /// 一度焼きに出したブロック頭 (二度焼かない)。据え付け本体はEntry側
-    compiled: HashSet<u32>,
+    /// 焼きに出したブロック頭 → collect時のページ世代。世代が進んだ頭は
+    /// 再び熱くなったとき焼き直す (据え付け本体はEntry側)
+    compiled: HashMap<u32, u32>,
     pub installed: usize,
     pub dropped_stale: usize,
+    /// 世代落ちで焼き直した頭の数 (診断用)
+    pub rebaked: usize,
     _thread: std::thread::JoinHandle<()>,
 }
 
@@ -1134,9 +1137,10 @@ impl JitRt {
         JitRt {
             tx,
             rx,
-            compiled: HashSet::new(),
+            compiled: HashMap::new(),
             installed: 0,
             dropped_stale: 0,
+            rebaked: 0,
             _thread: th,
         }
     }
@@ -1155,10 +1159,12 @@ impl JitRt {
                     if blk.ops.len() < 2 {
                         continue; // 1命令ブロックはディスパッチ税で負ける
                     }
-                    if !self.compiled.insert(blk.head_pa) {
-                        continue;
-                    }
                     let gen = jit::page_gen(m, blk.head_pa);
+                    match self.compiled.insert(blk.head_pa, gen) {
+                        Some(g) if g == gen => continue, // 現世代を焼き済み
+                        Some(_) => self.rebaked += 1,    // 世代落ち → 焼き直し
+                        None => {}
+                    }
                     blocks.push((blk, gen));
                 }
             }
