@@ -1,6 +1,7 @@
 # CI パイプライン (段構え2.0、2026-08-12):
-#   PR:        コードチェック → CPU照合 → OK          (docsのみの変更はスキップ)
-#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK
+#   PR:        コードチェック → CPU照合(core/cosimを触ったときだけ) → OK
+#              (docsのみの変更はワークフローごとスキップ)
+#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK (常に全部)
 #
 # 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
 #
@@ -33,6 +34,11 @@ permissions:
   contents: read
   checks: write
 
+# 同一ブランチへの連続pushは古いRunをキャンセル (無駄な並走を消す)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: never # レポートにANSIカラーコードが混ざるのを防ぐ
 
@@ -40,8 +46,22 @@ jobs:
   check:
     name: コードチェック
     runs-on: ubuntu-latest
+    outputs:
+      cpu: ${{ steps.filter.outputs.cpu }}
     steps:
       - uses: actions/checkout@v4
+      # CPUの意味論に触れた変更か (L0 CPU照合を回すかの判定)。
+      # core/cosim以外 (web/tools等) だけのPRでは重いUnicornビルドを省く
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            cpu:
+              - 'core/**'
+              - 'cosim/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
       - uses: Swatinem/rust-cache@v2
       - run: |
           rustup target add wasm32-unknown-unknown
@@ -154,7 +174,9 @@ jobs:
   # ---- 段2: 重い検査。コードチェックが通ったときだけ、並行して走る ----
 
   cosim:
+    # PRではCPUの意味論に触れたときだけ (L0)。mainへのpushでは常に回す
     name: CPU照合
+    if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
     needs: check
     runs-on: ubuntu-latest
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
@@ -291,6 +313,7 @@ jobs:
         # regress はPRではskippedになる (mainへのpush時のみ必須)
         run: |
           test "${{ needs.check.result }}" = "success" \
-            && test "${{ needs.cosim.result }}" = "success" \
+            && { test "${{ needs.cosim.result }}" = "success" \
+                 || test "${{ needs.cosim.result }}" = "skipped"; } \
             && { test "${{ needs.regress.result }}" = "success" \
                  || test "${{ needs.regress.result }}" = "skipped"; }
