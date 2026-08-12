@@ -426,6 +426,28 @@ impl Tr<'_, '_> {
         self.fb.seal_block(cont);
     }
 
+    /// 途中のjcc (F1c-c): 成立なら ip = ip + (jcc末尾までのオフセット + rel) を
+    /// 書いて k+1 (このjcc込みの完全実行数) で退出。不成立なら素通り。
+    /// 脱出 (escape_if) と同じ形だが、こちらは**やり直し不要の正規の出口**
+    fn emit_jcc_mid(&mut self, cc: u8, rel: u32, len: u32) {
+        let m = self.m_ptr();
+        let c = self.c32(cc as u32);
+        let cond = self.helper1(self.sigs.cond, h_cond as usize, &[m, c]);
+        let taken = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.ins().brif(cond, taken, &[], cont, &[]);
+        self.fb.switch_to_block(taken);
+        self.fb.seal_block(taken);
+        let ip = self.ld32_at(self.lay.ip);
+        let d = self.c32(self.cur_ip_off.wrapping_add(len).wrapping_add(rel));
+        let nip = self.fb.ins().iadd(ip, d);
+        self.st32_at(self.lay.ip, nip);
+        let k = self.c32(self.cur_k + 1);
+        self.fb.ins().return_(&[k]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+    }
+
     /// i64返しヘルパ (ld32/pop32) の裁き: 上位32bitが立っていたら脱出。
     /// 成功時は下位32bitの値を返す
     fn check_v64(&mut self, v64: Value) -> Value {
@@ -930,12 +952,17 @@ fn translate(
     }
     let mut term = None;
     let mut total_len: u32 = 0;
+    let n_ops = blk.ops.len();
     for (i, &(len, ref op)) in blk.ops.iter().enumerate() {
         tr.cur_k = i as u32;
         tr.cur_ip_off = total_len;
         total_len += len as u32;
         match *op {
-            JitOp::Jcc { cc, rel } => term = Some(Term::Jcc { cc, rel }),
+            // F1c-c: 末尾のjccは従来の出口 (select)、**途中のjccは条件つき退出** —
+            // 成立なら ip=成立先 を書いて k+1 で戻る (完全実行済みの退出)、
+            // 不成立なら次のopへそのまま流れる (両側焼き)
+            JitOp::Jcc { cc, rel } if i + 1 == n_ops => term = Some(Term::Jcc { cc, rel }),
+            JitOp::Jcc { cc, rel } => tr.emit_jcc_mid(cc, rel, len as u32),
             JitOp::Jmp { rel } => term = Some(Term::Jmp { rel }),
             JitOp::CallRel { rel } => term = Some(Term::Call { rel }),
             JitOp::Ret => term = Some(Term::Ret),
@@ -1100,7 +1127,7 @@ impl JitRt {
             let maddr = m as *const Machine as usize;
             let mut blocks = Vec::new();
             for pa in hot {
-                for blk in jit::collect_run_caps(m, pa, 32, 8, jit::CAP_VOCAB2) {
+                for blk in jit::collect_run_caps(m, pa, 32, 8, jit::CAP_VOCAB2 | jit::CAP_CHAIN) {
                     if blk.ops.len() < 2 {
                         continue; // 1命令ブロックはディスパッチ税で負ける
                     }
