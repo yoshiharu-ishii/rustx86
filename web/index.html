@@ -46,6 +46,10 @@
   #welcomePane .oscards .os { font-weight: 600; font-size: .95rem; color: #e8eaec; }
   #welcomePane .oscards .d { font-size: .8rem; color: #9aa1a8; line-height: 1.55; }
   #welcomePane .fine { margin: 1.6rem 0 0; font-size: .8rem; color: #757c83; }
+  #welcomePane .oscards button.mediaslot {
+    border-style: dashed; background: transparent;
+  }
+  #welcomePane .oscards button.mediaslot:hover { background: #14181c; }
 
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
@@ -169,14 +173,15 @@
     </div>
     <!-- オープニング。いきなりOSが立ち上がるのではなく、まず選んでもらう -->
     <div id="welcomePane">
-      <h2>rustx86</h2>
-      <p class="lead">Rustで書いたx86エミュレータです。8086から386まで、
-        実物のOSに手を加えずそのままブラウザで実行します。
-        下のカード、または左のメニューからOSを選ぶと起動します。</p>
+      <h2>rustx86 — ブラウザの中の1台のPC</h2>
+      <p class="lead">Rustで書いたx86エミュレータです。実物のOSに手を加えず
+        そのまま実行します。実機のPCがそうであるように、
+        <strong>1980年代のフロッピーOSも現代のLinuxも、同じ1台で起動します</strong>。
+        OSライブラリから選ぶか、手元のイメージを入れてください。</p>
       <div class="oscards">
         <button data-boot="elks">
           <span class="os">ELKS 0.9.1</span>
-          <span class="d">16bit UNIX。ハードウェアを直接叩くタイプのOS。tetrisなどのゲーム入り</span>
+          <span class="d">フロッピー1枚のUNIX。ハードウェアを直接叩くタイプ。tetrisなどのゲーム入り</span>
         </button>
         <button data-boot="freedos">
           <span class="os">FreeDOS 1.4</span>
@@ -184,10 +189,14 @@
         </button>
         <button data-boot="linux">
           <span class="os">Linux 6.18</span>
-          <span class="d">32bitプロテクトモード+ページング。数秒でシェルが使える</span>
+          <span class="d">カーネルを直接ロード。数秒でシェルが使える</span>
+        </button>
+        <button data-open class="mediaslot">
+          <span class="os">手元のイメージ</span>
+          <span class="d">フロッピー/ディスクイメージ (.img) をここへドロップ、
+            またはクリックしてファイルを選ぶ</span>
         </button>
       </div>
-      <p class="fine">手元のディスクイメージは、この枠にドロップしても起動できます。</p>
     </div>
     <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
@@ -204,9 +213,9 @@
   <summary>使い方</summary>
   <dl class="help">
     <dt>はじめかた</dt>
-    <dd>左のメニューからマシンを選ぶ。ディスクイメージは<strong>同梱していない</strong>
+    <dd>OSライブラリから選ぶ。ディスクイメージは<strong>同梱していない</strong>
         (配布物のため) ので、左に出る取得先から落として、このページと同じ場所に置くか、
-        画面に<strong>ドラッグ&amp;ドロップ</strong>する</dd>
+        「イメージを開く…」か<strong>ドラッグ&amp;ドロップ</strong>で入れる</dd>
     <dt>キー入力</dt>
     <dd>画面をクリックしてから打つ。<strong>物理キーの位置</strong>が8042へ届くので
         <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印もそのまま使える</dd>
@@ -221,6 +230,7 @@
   </dl>
   </details>
 
+  <input type="file" id="imageFile" accept=".img,.ima,.bin,.json" hidden>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

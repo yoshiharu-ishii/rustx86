@@ -31,10 +31,10 @@ export const MACHINES = [
     kind: 'welcome',
   },
   {
-    group: 'OS選択',
+    group: 'OSライブラリ',
     id: 'elks',
     label: 'ELKS 0.9.1',
-    sub: '16bit UNIX',
+    sub: 'フロッピー1枚のUNIX',
     image: './fd1440.img',
     status: 'ok',
     note:
@@ -45,10 +45,10 @@ export const MACHINES = [
     file: 'fd1440.img',
   },
   {
-    group: 'OS選択',
+    group: 'OSライブラリ',
     id: 'freedos',
     label: 'FreeDOS 1.4',
-    sub: '8086ビルド',
+    sub: 'DOS',
     image: './fd14boot.img',
     status: 'ok',
     note:
@@ -74,7 +74,7 @@ export const MACHINES = [
     file: 'fd14boot.img (配布zipの 144m/x86BOOT.img)',
   },
   {
-    group: 'OS選択',
+    group: 'OSライブラリ',
     id: 'linux',
     label: 'Linux 6.18',
     sub: 'bzImage + initramfs',
@@ -90,6 +90,16 @@ export const MACHINES = [
       'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す
+  },
+  {
+    group: 'メディア',
+    id: 'open',
+    label: 'イメージを開く…',
+    kind: 'open',
+    note:
+      'フロッピー/ディスクイメージ (.img、先頭512バイトがブートセクタのもの) を' +
+      '手元から選んで起動する。画面へのドラッグ&ドロップでも同じ。' +
+      '保存した状態 (JSON) もここから読み戻せる。',
   },
 ];
 
