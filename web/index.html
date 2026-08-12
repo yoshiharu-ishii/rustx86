@@ -46,6 +46,10 @@
   #welcomePane .oscards .os { font-weight: 600; font-size: .95rem; color: #e8eaec; }
   #welcomePane .oscards .d { font-size: .8rem; color: #9aa1a8; line-height: 1.55; }
   #welcomePane .fine { margin: 1.6rem 0 0; font-size: .8rem; color: #757c83; }
+  #welcomePane .oscards button.mediaslot {
+    border-style: dashed; background: transparent;
+  }
+  #welcomePane .oscards button.mediaslot:hover { background: #14181c; }
 
   /* 端末は**常に画面に収まる**ようにする。
      幅いっぱいに広げるが、縦がはみ出すなら幅の方を諦める。
@@ -132,12 +136,6 @@
   .dot.todo { background: #9ca3af; }
   #machineNote { font-size: .8rem; opacity: .75; margin: .6rem 0 0; }
 
-  .helpbox { margin-top: 1rem; font-size: .875rem; }
-  .helpbox summary { cursor: pointer; opacity: .75; }
-  .help { display: grid; grid-template-columns: auto 1fr; gap: .35rem 1rem;
-          margin: .6rem 0 0; font-size: .875rem; }
-  .help dt { font-weight: 600; white-space: nowrap; }
-  .help dd { margin: 0; opacity: .8; }
   .note { font-size: .85rem; opacity: .7; margin-top: 1.25rem; }
   code, kbd { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
   kbd { border: 1px solid var(--line); border-radius: .25rem; padding: 0 .3em; }
@@ -169,25 +167,18 @@
     </div>
     <!-- オープニング。いきなりOSが立ち上がるのではなく、まず選んでもらう -->
     <div id="welcomePane">
-      <h2>rustx86</h2>
-      <p class="lead">Rustで書いたx86エミュレータです。8086から386まで、
-        実物のOSに手を加えずそのままブラウザで実行します。
-        下のカード、または左のメニューからOSを選ぶと起動します。</p>
+      <h2>rustx86 — ブラウザの中の1台のPC</h2>
+      <p class="lead">Rustで書いたx86エミュレータです。実物のOSに手を加えず
+        そのまま実行します。フロッピーのOSも現代のLinuxも、同じ1台で起動します。</p>
       <div class="oscards">
-        <button data-boot="elks">
-          <span class="os">ELKS 0.9.1</span>
-          <span class="d">16bit UNIX。ハードウェアを直接叩くタイプのOS。tetrisなどのゲーム入り</span>
-        </button>
-        <button data-boot="freedos">
-          <span class="os">FreeDOS 1.4</span>
-          <span class="d">BIOS経由で動くDOS。プロンプトまで自動で進む</span>
-        </button>
-        <button data-boot="linux">
-          <span class="os">Linux 6.18</span>
-          <span class="d">32bitプロテクトモード+ページング。数秒でシェルが使える</span>
+        <button data-open class="mediaslot">
+          <span class="os">イメージを開く…</span>
+          <span class="d">フロッピー/ディスクイメージ (.img) を選ぶ。
+            この枠へのドロップでも起動します</span>
         </button>
       </div>
-      <p class="fine">手元のディスクイメージは、この枠にドロップしても起動できます。</p>
+      <p class="fine">OSイメージをこのページと同じ場所に置くと、
+        左のOSライブラリから起動できます (取得先は各OSを選ぶと出ます)。</p>
     </div>
     <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
@@ -200,27 +191,8 @@
   </div>
   </div>
 
-  <details class="helpbox">
-  <summary>使い方</summary>
-  <dl class="help">
-    <dt>はじめかた</dt>
-    <dd>左のメニューからマシンを選ぶ。ディスクイメージは<strong>同梱していない</strong>
-        (配布物のため) ので、左に出る取得先から落として、このページと同じ場所に置くか、
-        画面に<strong>ドラッグ&amp;ドロップ</strong>する</dd>
-    <dt>キー入力</dt>
-    <dd>画面をクリックしてから打つ。<strong>物理キーの位置</strong>が8042へ届くので
-        <kbd>Ctrl</kbd> <kbd>Esc</kbd> <kbd>Tab</kbd> 矢印もそのまま使える</dd>
-    <dt>過去を見る</dt>
-    <dd>ホイール、または右端のスクロールバー (直近1000行)。キーを打つと最新へ戻る</dd>
-    <dt>コピー / 貼り付け</dt>
-    <dd>ドラッグで選択して <kbd>⌘C</kbd>。<kbd>⌘V</kbd> で貼り付け</dd>
-    <dt>状態の保存</dt>
-    <dd>CPU・装置・メモリ・ディスクを丸ごと控える。<strong>割り込みの直前で止めて保存し、
-        何度でもそこから始められる</strong>。この端末に残す (保存/復元) ほか、
-        JSONで書き出して<strong>ドロップで読み戻せる</strong></dd>
-  </dl>
-  </details>
 
+  <input type="file" id="imageFile" accept=".img,.ima,.bin,.json" hidden>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

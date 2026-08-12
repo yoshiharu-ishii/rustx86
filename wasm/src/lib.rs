@@ -68,10 +68,15 @@ impl Emulator {
 
 #[wasm_bindgen]
 impl Emulator {
-    /// ブートセクタ (512バイト、末尾 0x55AA) を読み込んで CS:IP=0000:7C00 から開始
+    /// ブートセクタ (512バイト、末尾 0x55AA) を読み込んで CS:IP=0000:7C00 から開始。
+    ///
+    /// **ブラウザの機械は1台のPC (386相当) に統一する** — 実機の386がDOSも
+    /// Linuxも同じ箱で起動するのと同じ姿。16bit OSを8086プロファイルで
+    /// 起動し分ける必要は無い (test386互換が実モードの意味論を保証している。
+    /// 8086の顔つき (PUSHF等) の検証はネイティブ側のテストが持ち続ける)
     #[wasm_bindgen(constructor)]
     pub fn new(sector: &[u8]) -> Result<Emulator, JsError> {
-        let mut m = Machine::new();
+        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(16));
         m.load_boot_sector(sector).map_err(|e| JsError::new(&e))?;
         Ok(Emulator::wrap(m))
     }
@@ -119,9 +124,9 @@ pub fn cp437_table() -> String {
 
 #[wasm_bindgen]
 impl Emulator {
-    /// ディスクイメージ (フロッピー) から起動する
+    /// ディスクイメージ (フロッピー) から起動する (機械は1台のPC — `new` と同じ判断)
     pub fn from_disk(image: &[u8]) -> Result<Emulator, JsError> {
-        let mut m = Machine::new();
+        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(16));
         m.boot_from_disk(image.to_vec())
             .map_err(|e| JsError::new(&e))?;
         Ok(Emulator::wrap(m))
