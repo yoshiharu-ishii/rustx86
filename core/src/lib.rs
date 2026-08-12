@@ -200,6 +200,10 @@ pub struct Machine {
     /// JIT入場診断 (観測用、F1c-c3): ブロック頭に来たがJITに入らなかった理由別。
     /// [0]=焼けたブロックが無い [1]=予算 (tick窓の残り) 不足 [2]=IRQ保留 [3]=tick直後
     pub jit_denied: [u64; 4],
+    /// このブロック実行で走ってよい最大命令数 (F1c-c4)。budget_awareなランナーの
+    /// 生成コードが毎命令の手前で照合し、達したら「完全実行済みの途中退出」をする —
+    /// tickの位置が動かないので決定性は保たれる。enterの直前にcoreが書く
+    pub jit_budget: u32,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -333,6 +337,7 @@ impl Machine {
             jit_instrs: 0,
             jit_entries: 0,
             jit_denied: [0; 4],
+            jit_budget: 0,
             op_counts: vec![0; 512],
             #[cfg(feature = "opstats")]
             jit_vocab_counts: (0, std::collections::HashMap::new()),

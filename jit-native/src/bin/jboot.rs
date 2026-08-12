@@ -27,7 +27,10 @@ fn main() {
 
     let mut rt = None;
     if jit_on {
-        m.jit = Some(JitHook { enter });
+        m.jit = Some(JitHook {
+            enter,
+            budget_aware: true, // 生成コードがjit_budgetを毎命令照合する (F1c-c4)
+        });
         rt = Some(JitRt::start());
     }
 
