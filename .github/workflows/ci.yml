@@ -134,6 +134,22 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
+      # ActionsのSummaryページにも同じレポートを掲示する (Checksタブとは別画面。
+      # Checks=PRレビュー時の掲示板、Actions Summary=実行を深掘りするときの一覧)
+      - name: Summaryへ掲示
+        if: always()
+        run: |
+          {
+            echo '| 関門 | 結果 |'
+            echo '|---|---|'
+            echo "| テスト | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| wasmビルド | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
+            echo ''
+            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ---- 合否掲示板への発行。1関門=1行、本文は右ペイン ----
       - name: 掲示板トークン
         id: app
@@ -211,6 +227,11 @@ jobs:
             echo '```'
             exit ${RC:-0}
           } > cosim-report.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat cosim-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
@@ -297,12 +318,25 @@ jobs:
       # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
       # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)
       - name: ブートログを証跡に残す
+        id: logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: boot-logs
           path: regress-out/
           if-no-files-found: warn
+
+      - name: Summaryへ掲示
+        if: always()
+        run: |
+          {
+            cat regress.md 2>/dev/null || true
+            echo ''
+            echo '## JIT決定性 (interp と jit がビット同一か)'
+            cat jitcheck.md 2>/dev/null || true
+            echo ''
+            echo "証跡: [boot-logs (シリアル全文ログ)](${{ steps.logs.outputs.artifact-url }})"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 掲示板トークン
         id: app

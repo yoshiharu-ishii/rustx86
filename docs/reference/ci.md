@@ -62,6 +62,10 @@ CI Actions (ワークフローの束 — ∨で畳める。中身はログへの
   「lint通った?」に0クリックで答えるための細粒度 (1関門=1行)
 - 各ステージは `continue-on-error` で最後まで走らせてから発行する
   (テストが落ちてもビルドの結果は見たい)
+- **同じレポートはActionsのSummaryページにも掲示する** (`$GITHUB_STEP_SUMMARY`)。
+  Checksタブ=PRレビュー時の掲示板、Actions Summary=実行を深掘りするときの一覧、
+  という2面。OS起動回帰のSummaryには証跡 (boot-logsアーティファクト) への直リンクも付く
+  (`upload-artifact@v4` の `artifact-url` 出力)
 
 ## ステージと、それぞれが止める事故
 
