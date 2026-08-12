@@ -554,13 +554,24 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         // ブロック頭で、Entryに焼けたブロックがあれば任せる。hashmapは引かない —
         // 判定材料 (slot/n/現世代) は上のEntry読みで全部そろっている。
         // 入らない条件: tick直後 (skip_jit)、IRQ保留中 (インタプリタは1命令で戻る)
+        if jit_hook.is_some() && at_head && jit_here.is_none() {
+            m.jit_denied[0] += 1; // 頭に焼けたブロックが無い (未加熱/未据付/1命令)
+        }
         if let (Some(h), Some((jslot, jn))) = (jit_hook, jit_here) {
+            if at_head && skip_jit {
+                m.jit_denied[3] += 1;
+            }
             if at_head && !skip_jit {
                 // 予算 = この命令込みで走ってよい数。extra+1はチェーンの残り、
                 // tick_countdownは「ブロック内でtickが起きない」ことの保証
                 let budget = extra.saturating_add(1).min(m.tick_countdown as u64);
                 let irq_waiting =
                     m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
+                if jn as u64 > budget {
+                    m.jit_denied[1] += 1;
+                } else if irq_waiting {
+                    m.jit_denied[2] += 1;
+                }
                 if jn as u64 <= budget && !irq_waiting {
                     let n = (h.enter)(jslot);
                     let n64 = n as u64;
