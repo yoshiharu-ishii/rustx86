@@ -1,20 +1,24 @@
-# CI パイプライン (段構え2.0、2026-08-12):
+# CI パイプライン (合否掲示板、2026-08-12):
 #   PR:        コードチェック → CPU照合(core/cosimを触ったときだけ) → OK
 #              (docsのみの変更はワークフローごとスキップ)
 #   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK (常に全部)
 #
-# 設計の理由・全体図・展望は docs/ci.md にまとめてある。ここは実装だけ。
+# 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
 # 要点:
 # - **段構え**: 安いコードチェックが先に走り、通ったときだけ重い検査
 #   (CPU照合と起動回帰) が**並行して**走る。壊れたコードに数分の検査を
 #   払わない。最後の OK は全段の合流点
-# - レポートは**何をしたかと結果だけ**。説明の文章は docs/ci.md に書く
+# - **Checksタブは2つの束** (ユーザー決定 2026-08-12):
+#   「CI Actions」= 素のジョブ (この名のワークフローグループに自動で束なる)、
+#   「合否掲示板」= 関門ごとの結果Check (テスト/整形/lint/wasm/CPU照合/…)。
+#   掲示板は**自前GitHub Appのトークン**で発行すると独立した束になる。
+#   Secrets (CI_APP_ID / CI_APP_PRIVATE_KEY) 未設定ならGITHUB_TOKENに退避
+#   (Checkは出るがActionsの束に同居する)
+# - レポートは**何をしたかと結果だけ**。説明の文章は docs/reference/ci.md に書く
 # - 各ステージは continue-on-error で最後まで走らせてから束ねる
 #   (テストが落ちてもビルドの結果は見たい)
-# - CPU照合は以前 paths で「CPUを触ったPRだけ」に絞っていたが、段構えに
-#   したので常に回す — 回る時間は起動回帰と並行で隠れ、条件が単純になる
-name: CI
+name: CI Actions
 
 on:
   pull_request:
@@ -46,6 +50,8 @@ jobs:
   check:
     name: コードチェック
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
     steps:
@@ -128,41 +134,46 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
-      # 全ステージを1つのレポートに束ねる。表は「何をしたか」と「結果」だけ
-      - name: レポート発行
-        if: always()
-        id: report
-        run: |
-          ok=0
-          {
-            echo '| 何をしたか | 結果 |'
-            echo '|---|---|'
-            for row in \
-              "test:cargo test" \
-              "wasm:cargo build --target wasm32-unknown-unknown" \
-              "fmt:cargo fmt --check" \
-              "lint:cargo clippy -- -D warnings"; do
-              id=${row%%:*}; cmd=${row#*:}
-              case $id in
-                test) outcome='${{ steps.test.outcome }}' ;;
-                wasm) outcome='${{ steps.wasm.outcome }}' ;;
-                fmt)  outcome='${{ steps.fmt.outcome }}' ;;
-                lint) outcome='${{ steps.lint.outcome }}' ;;
-              esac
-              [ "$outcome" = success ] && { mark='✅'; ok=$((ok+1)); } || mark='❌'
-              echo "| \`$cmd\` | $mark |"
-            done
-            echo ''
-            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
-          } > report.md
-          echo "title=$ok/4 合格" >> "$GITHUB_OUTPUT"
+      # ---- 合否掲示板への発行。1関門=1行、本文は右ペイン ----
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: CI 結果
-          title: ${{ steps.report.outputs.title }}
-          outcome: ${{ steps.test.outcome == 'success' && steps.wasm.outcome == 'success' && steps.fmt.outcome == 'success' && steps.lint.outcome == 'success' && 'success' || 'failure' }}
-          report-file: report.md
+          name: テスト
+          title: ${{ steps.test.outcome == 'success' && 'cargo test 合格' || 'cargo test 失敗' }}
+          outcome: ${{ steps.test.outcome }}
+          report-file: report-test.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: wasmビルド
+          title: ${{ steps.wasm.outcome == 'success' && 'wasm32ビルド成功' || 'wasm32ビルド失敗' }}
+          outcome: ${{ steps.wasm.outcome }}
+          report-file: report-wasm.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 整形
+          title: ${{ steps.fmt.outcome == 'success' && 'cargo fmt 整形済み' || '未整形 (cargo fmt --all で直る)' }}
+          outcome: ${{ steps.fmt.outcome }}
+          report-file: report-fmt.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: lint
+          title: ${{ steps.lint.outcome == 'success' && 'clippy 指摘なし' || 'clippy 指摘あり' }}
+          outcome: ${{ steps.lint.outcome }}
+          report-file: report-lint.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: |
@@ -179,6 +190,8 @@ jobs:
     if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
     needs: check
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
     timeout-minutes: 30
     steps:
@@ -198,12 +211,21 @@ jobs:
             echo '```'
             exit ${RC:-0}
           } > cosim-report.md
-      - uses: ./.github/actions/publish-check
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
         with:
-          name: CPU照合 結果
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: CPU照合
           title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
           outcome: ${{ steps.cosim.outcome }}
           report-file: cosim-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: test "${{ steps.cosim.outcome }}" = "success"
@@ -216,6 +238,8 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: check
     runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -280,21 +304,30 @@ jobs:
           path: regress-out/
           if-no-files-found: warn
 
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: OS起動回帰 結果
+          name: OS起動回帰
           title: ${{ steps.regress.outcome == 'success' && 'ELKS / FreeDOS / Linux 合格' || '失敗あり' }}
           outcome: ${{ steps.regress.outcome }}
           report-file: regress.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: JIT決定性 結果
+          name: JIT決定性
           title: ${{ steps.jitcheck.outcome == 'success' && 'interp と jit がビット同一' || '食い違い or JIT不発' }}
           outcome: ${{ steps.jitcheck.outcome }}
           report-file: jitcheck.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: |

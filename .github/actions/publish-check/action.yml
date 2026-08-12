@@ -4,8 +4,11 @@
 # ログページへのリンクにしかならない。Checks API の output にMarkdownを載せた
 # Check run を別途発行すると、PRの「Checks」タブの右ペインに本文が表示される。
 #
-# (fuurai-dungeon で確立した型。ジョブは1本に統合し、リンクだけの項目で
-#  左リストを埋めない)
+# token に**自前GitHub Appのトークン**を渡すと、Check runはそのAppの束として
+# サイドバーに独立表示される (合否掲示板、docs/reference/ci.md)。
+# GITHUB_TOKENのままだと Actions のワークフローの束に同居する (フォールバック)。
+#
+# (fuurai-dungeon で確立した型。掲示板化は 2026-08-12)
 name: publish-check
 description: レポート本文をChecksタブの右ペインに表示する
 
@@ -22,6 +25,10 @@ inputs:
   report-file:
     description: 右ペインに表示するMarkdownファイル
     required: true
+  token:
+    description: Check発行に使うトークン (App tokenなら独立した束になる)
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -33,6 +40,7 @@ runs:
         CHECK_OUTCOME: ${{ inputs.outcome }}
         REPORT_FILE: ${{ inputs.report-file }}
       with:
+        github-token: ${{ inputs.token }}
         script: |
           const fs = require('fs');
           const file = process.env.REPORT_FILE;

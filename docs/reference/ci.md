@@ -7,7 +7,7 @@
 Checkのレポートには**何をしたかと結果だけ**を書く。設計の理由 (この文書) を
 毎回のCheckに繰り返し載せても、読む人は同じ文章を何十回も見ることになる。
 
-## 全体図 (2026-08-10 パイプライン化)
+## 全体図 (2026-08-12 合否掲示板)
 
 1本のワークフロー (ci.yml) を**段構え**にしてある。安いコードチェックが
 先に走り、通ったときだけ重い検査が並行して走る — 壊れたコードに
@@ -18,42 +18,50 @@ flowchart LR
     PR[PR / mainへマージ] --> CHECKJ
 
     subgraph CHECKJ["段1: コードチェック (~30秒)"]
-        T[テスト] & W[wasmビルド] & F[整形] & L[lint] --> R[レポート発行]
+        T[テスト] & W[wasmビルド] & F[整形] & L[lint]
     end
 
     CHECKJ --> COS & REG
 
     subgraph COS["段2a: CPU照合 (~3分)"]
-        C[Unicornと毎命令比較]
+        C[Unicornと毎命令比較<br>PRではcore/cosimを触ったときだけ]
     end
-    subgraph REG["段2b: OS起動回帰 (~3分)"]
-        G[ELKS / FreeDOS / Linux を<br>プロンプトまで起動 + スクショ + ブートログ]
+    subgraph REG["段2b: OS起動回帰 (~3分、mainのみ)"]
+        G[ELKS / FreeDOS / Linux を<br>プロンプトまで起動 + JIT決定性]
     end
 
     COS & REG --> OK[OK — 全段の合流点]
 ```
 
-CPU照合は以前 paths で「CPUを触ったPRだけ」に絞っていたが、段構えに
-したので常に回す。回る時間は起動回帰と並行で隠れ、判定条件が単純になる。
+## Checksタブ = 合否掲示板 (2026-08-12)
 
-## Checksタブに出すものは絞る
+確認の導線を「PRを開く→Checksタブ」の1回にする。サイドバーは**2つの束**:
 
-GitHub Actions のジョブは自動で Check として表示されるが、**選んでも
-ログページへのリンクにしかならない**。ステージごとに項目を作ると、
-左リストがリンク集と見分けのつかない列になる (実際になった)。
+```
+CI Actions (ワークフローの束 — ∨で畳める。中身はログへのリンク)
+  コードチェック / CPU照合 / OS起動回帰 / OK
+合否掲示板 (自前GitHub Appの束 — 1関門=1行、クリックで右ペインに本文)
+  ✓ テスト   ✓ 整形   ✓ lint   ✓ wasmビルド
+  ✓ CPU照合   (main: ✓ OS起動回帰   ✓ JIT決定性)
+  (将来: ✓ CPU互換 = test386)
+```
 
-そこで [Checks API](https://docs.github.com/rest/checks) で**本文つきの
-Check run** を自前で発行する ([.github/actions/publish-check](../../.github/actions/publish-check/action.yml))。
-出すのは次の2つだけ:
+仕組みと制約 (GitHubの仕様に沿った設計):
 
-| 項目 | 中身 |
-|---|---|
-| **CI 結果** | 見出しが「4/4 合格」。開くと先頭に合否表、下に各ステージのログ |
-| **CPU照合 結果** | 見出しが「Unicornと一致」 |
-| **OS起動回帰 結果** | 3OSのプロンプト到達と画面のスクショ。ブートログはアーティファクト |
-
-各ステージは `continue-on-error` で最後まで走らせてから束ねる。
-テストが落ちてもビルドの結果は見たいからである。
+- **Actionsのジョブは必ずChecksに1行載る** (隠せない)。束の単位は
+  「アプリ×ワークフロー」で、グループ内の小分け見出しは作れない
+- 右ペインに本文を出せるのは **Checks APIで発行したCheck run だけ**
+  (ジョブのStep Summaryは右ペインに出ない)。発行は
+  [.github/actions/publish-check](../../.github/actions/publish-check/action.yml)
+- **GITHUB_TOKENで発行するとActionsの束に同居してしまう**ので、
+  **自前GitHub Appのトークン**で発行して独立した束にする
+  (Check run作成はAppにしか許されない、という制約の逆利用)。
+  Appの`APP_ID`/秘密鍵はSecrets `CI_APP_ID` / `CI_APP_PRIVATE_KEY`。
+  未設定でも壊れない — GITHUB_TOKENに退避してActionsの束に出る
+- 掲示板の行は**ジョブではない**ので、粒度を上げてもActionsのコストはゼロ。
+  「lint通った?」に0クリックで答えるための細粒度 (1関門=1行)
+- 各ステージは `continue-on-error` で最後まで走らせてから発行する
+  (テストが落ちてもビルドの結果は見たい)
 
 ## ステージと、それぞれが止める事故
 
@@ -88,8 +96,9 @@ wasmビルドのレポートには **`.wasm` のサイズ**も出る (初回 196
 
 - **警告のみのステージを置かない** — 「緑だが指摘あり」は読めない。
   整形 (3568行) と lint (32件) は**先に全部掃除してから**ゲートにした
-- ~~CPU照合を毎PRで回さない~~ — 以前は `paths:` で CPU を触ったPRに絞っていたが、
-  段構え化 (上の全体図) で常に回すことにした。回る時間は起動回帰と並行で隠れる
+- **CPU照合はPRでは core/cosim を触ったときだけ** — web/toolsだけのPRに
+  重いUnicornビルドを払わない (触っていなければCPUは壊しようがない)。
+  mainへのpushでは常に回す
 - ~~OS起動テストはCIでは空撃ち~~ — かつての既知の穴。`cargo test` のOS起動系は
   イメージが無いと今もスキップして緑になるが、**段2bのOS起動回帰が
   実物のイメージ (Actionsキャッシュ) で3OSをプロンプトまで起動する**ので、
