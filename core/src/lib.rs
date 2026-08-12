@@ -197,6 +197,9 @@ pub struct Machine {
     /// JITブロックに入った回数 (観測用)。jit_instrs / jit_entries = 平均ブロック長 —
     /// カバレッジ不足の原因が「ブロックが短い」のか「入る頻度が低い」のかを切り分ける
     pub jit_entries: u64,
+    /// JIT入場診断 (観測用、F1c-c3): ブロック頭に来たがJITに入らなかった理由別。
+    /// [0]=焼けたブロックが無い [1]=予算 (tick窓の残り) 不足 [2]=IRQ保留 [3]=tick直後
+    pub jit_denied: [u64; 4],
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -329,6 +332,7 @@ impl Machine {
             jit: None,
             jit_instrs: 0,
             jit_entries: 0,
+            jit_denied: [0; 4],
             op_counts: vec![0; 512],
             #[cfg(feature = "opstats")]
             jit_vocab_counts: (0, std::collections::HashMap::new()),
