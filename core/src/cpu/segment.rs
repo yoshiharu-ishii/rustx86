@@ -9,8 +9,8 @@ use super::*;
 use crate::Machine;
 
 /// セグメントの隠しレジスタ1本分。
-/// **repr(C)はJITとの契約** (F1c-b): 生成コードが base をオフセット0で
-/// 直接読む (ストライドは jit::layout が渡す)
+/// repr(C)は歴代の外部ビュー (cosim/スナップショット) との契約 —
+/// フィールドの並びを安定させておく
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegHidden {
