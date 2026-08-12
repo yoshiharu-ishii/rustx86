@@ -34,8 +34,6 @@ use crate::Machine;
 // B3 (ペア融合) や B4 (ブロック連結) が来てもここに部屋を足すだけで済む
 mod decode;
 mod exec;
-// JITビュー (F1a): 焼き候補を外の生成器へ渡す口。Uopはここから漏らさない
-pub mod jit;
 
 /// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
 /// ホストのキャッシュに収まる小ささの折り合い (768KB)。要調整なら実測で
@@ -270,26 +268,8 @@ struct Entry {
     /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
     gen: u32,
     len: u8,
-    /// ブロック頭としての熱 (F1a)。**分岐の着地点だけ**が数えられる —
-    /// 毎命令カウントはB5/C5の教訓 (ホットループへの追加は逆効果) に反するので、
-    /// 分岐が取られた次の1回だけ +1 する。閾値でJITフックへ通知して飽和
-    heat: u16,
-    /// このブロック頭に**焼けたJITブロック**があれば、その命令数 (0=無し) と
-    /// 関数テーブルのスロット。Entryのgen一致が「現世代のブロック」を保証する
-    /// ので、JIT入口は毎ブロック頭のhashmap照合を払わずここを読むだけで済む。
-    /// ページが書かれると gen が動き Entry が再デコードで上書きされる (jit_n=0)
-    /// ので、古いJITブロックが誤って呼ばれることはない
-    jit_n: u16,
-    jit_slot: u32,
     uop: Uop,
 }
-
-/// この熱に達したブロック頭を「焼き候補」としてフックに通知する。
-/// 分岐着地でしか数えないので、実行回数ではおよそ×(ブロック長)倍に相当
-// 閾値は8/64/256を実測して64のまま (F1c-c2、2026-08-12、perf-log参照):
-// 8はカバレッジ悪化 (早すぎる焼きがタイルの育ちを止める — JITブロック内を
-// 走ると内側の頭に熱が乗らない)、256は64と同等でただ立ち上がりが遅い
-const JIT_HOT_THRESHOLD: u16 = 64;
 
 pub struct DecodeCache {
     /// 直接マップ。**最初の32bitデコードまで確保しない** —
@@ -304,18 +284,6 @@ pub struct DecodeCache {
     pub hits: u64,
     pub fills: u64,
     pub fallbacks: u64,
-    /// 焼き候補 (F1a): 熱が閾値に達したブロック頭の物理アドレス。
-    /// JIT側 (wasmシェル/ネイティブランナー) がdrainして焼く。
-    /// coreは積むだけ — 生成器を知らない (無依存の維持)
-    hot: Vec<u32>,
-    /// 据え付け済みブロックの永続台帳: pa → (スロット, 命令数, 焼いた時のページ世代)。
-    ///
-    /// Entryは直接マップなので、衝突するとfillで上書きされ jit_n が消える —
-    /// ブート実測でfill 15M回/32Kスロット (1スロット~460回転) の環境では、
-    /// 据え付けた入口が数十万命令で剥がれ、カバレッジが8%で頭打ちになった。
-    /// この台帳から **fillのついでに** 埋め直す (照合はfill時だけ = 全命令の~2.6%。
-    /// ホットパスに辞書は持ち込まない)。genの一致で自己書き換え後の誤回収を防ぐ
-    jit_map: std::collections::HashMap<u32, (u32, u16, u32)>,
 }
 
 impl DecodeCache {
@@ -328,42 +296,6 @@ impl DecodeCache {
             hits: 0,
             fills: 0,
             fallbacks: 0,
-            hot: Vec::new(),
-            jit_map: std::collections::HashMap::new(),
-        }
-    }
-
-    /// 焼き候補を引き取る (F1a)。呼んだ側が生成器へ渡す
-    pub fn drain_hot(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.hot)
-    }
-
-    /// 焼き候補の累計観測 (drain前の残数)
-    pub fn hot_pending(&self) -> usize {
-        self.hot.len()
-    }
-
-    /// 物理アドレスのページ世代 (JITビューが照合に使う)
-    pub(crate) fn page_gen_of(&self, pa: u32) -> u32 {
-        self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
-    }
-
-    /// 焼けたJITブロックを Entry に据える (F1a、増分5)。
-    /// ブロック頭 `pa` の Entry が現存しかつ同一物理番地なら、スロットと命令数を
-    /// 書き込む。以後そのブロック頭の訪問は Entry 読みだけでJIT入口を判定できる
-    /// (hashmap不要)。Entry が既に別番地なら黙って捨てる — JITブロックは
-    /// テーブルに残るが誰も指さない (再訪で jit_n=0 のまま=インタプリタ)
-    pub fn set_jit(&mut self, pa: u32, slot: u32, n: u16) {
-        // 永続台帳へ (Entryが衝突で剥がれてもfillで埋め直せる)
-        let gen = self.page_gen_of(pa);
-        self.jit_map.insert(pa, (slot, n, gen));
-        if self.entries.is_empty() {
-            return;
-        }
-        let e = &mut self.entries[(pa as usize) & (SLOTS - 1)];
-        if e.tag == pa {
-            e.jit_slot = slot;
-            e.jit_n = n;
         }
     }
 
@@ -502,147 +434,24 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
-    // ブロック頭か (F1aの熱計上とJIT入口)。外から入った今この瞬間と、
-    // 分岐の着地だけ真。**毎命令は数えない** — B5/C5の実測で逆効果と出ている
-    let mut at_head = true;
-    // タイル張り (F1b-3): JITブロックが分岐以外 (語彙外の手前・cap) で終わったとき、
-    // 間の1命令をインタプリタで挟んで**その次を新しいブロック頭**として育てる。
-    // これが無いとブロック頭は分岐の着地点しか育たず、語彙内81%に対して
-    // カバレッジ2.3%しか出なかった (熱い直線の頭数命令だけ焼けて、残りが
-    // 全部インタプリタに落ちる)。頭は増えるが、熱計上は相変わらず頭だけ —
-    // 毎命令カウントの逆効果 (B5/C5) は踏まない
-    let mut head_pending = false;
-    // tick直後の1命令はインタプリタで実行する印。割り込みの受付は
-    // 「tickの次の1命令を実行した後」— この位置をJITでずらさないための約束
-    // JITフックはループの外で1回だけ見る (Copy)。**None なら退路は完全に
-    // 従来のホットループ** — 下の入口ブロックは jit_hook.is_some() で丸ごと
-    // 死ぬので、JIT無効時のコストはゼロ (退路の無コストは譲れない)
-    let jit_hook = m.jit;
-    let mut skip_jit = false;
-
     loop {
-        // 前の命令 (またはJITブロック) のページウォークが立てた A/D を表へ反映。
+        // 前の命令のページウォークが立てた A/D を表へ反映。
         // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
         m.flush_ad();
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
-        // Entry照合を先に済ませる (JIT入口もこの結果を使う)。gen一致は
-        // 「このブロック頭は現世代」の保証 — JITブロックの世代照合も兼ねる
+        // Entry照合 (gen一致 = 「この命令は現世代」の保証)
         let mut cached = None;
-        let mut jit_here = None; // (slot, n) — このブロック頭に焼けたJIT
         if !m.dcache.entries.is_empty() {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            let e = &mut m.dcache.entries[slot];
+            let e = &m.dcache.entries[slot];
             if e.tag == pa && e.gen == gen_now {
                 cached = Some((e.len, e.uop));
-                if e.jit_n != 0 {
-                    jit_here = Some((e.jit_slot, e.jit_n));
-                }
                 m.dcache.hits += 1;
-                if at_head && e.heat < JIT_HOT_THRESHOLD {
-                    e.heat += 1;
-                    if e.heat == JIT_HOT_THRESHOLD {
-                        // 閾値の瞬間に1回だけ積む (以後は飽和して静か)
-                        m.dcache.hot.push(pa);
-                    }
-                }
             }
         }
 
-        // ---- JIT入口 (F1a増分5) ----
-        // ブロック頭で、Entryに焼けたブロックがあれば任せる。hashmapは引かない —
-        // 判定材料 (slot/n/現世代) は上のEntry読みで全部そろっている。
-        // 入らない条件: tick直後 (skip_jit)、IRQ保留中 (インタプリタは1命令で戻る)
-        if jit_hook.is_some() && at_head && jit_here.is_none() {
-            m.jit_denied[0] += 1; // 頭に焼けたブロックが無い (未加熱/未据付/1命令)
-        }
-        if let (Some(h), Some((jslot, jn))) = (jit_hook, jit_here) {
-            if at_head && skip_jit {
-                m.jit_denied[3] += 1;
-            }
-            if at_head && !skip_jit {
-                // 予算 = この命令込みで走ってよい数。extra+1はチェーンの残り、
-                // tick_countdownは「ブロック内でtickが起きない」ことの保証
-                let budget = extra.saturating_add(1).min(m.tick_countdown as u64);
-                let irq_waiting =
-                    m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
-                // budget_aware (F1c-c4): 予算1以上なら入場し、上限を渡して
-                // 境界ちょうどで途中退出させる。非対応 (wasm凍結) は従来どおり
-                let admit = if h.budget_aware {
-                    budget >= 1
-                } else {
-                    jn as u64 <= budget
-                };
-                if !admit {
-                    m.jit_denied[1] += 1;
-                } else if irq_waiting {
-                    m.jit_denied[2] += 1;
-                }
-                if admit && !irq_waiting {
-                    m.jit_budget = (jn as u64).min(budget) as u32;
-                    let n = (h.enter)(jslot);
-                    let n64 = n as u64;
-                    m.jit_instrs = m.jit_instrs.wrapping_add(n64);
-                    m.jit_entries += 1;
-                    // フォールト脱出 (F1b): ブロックが途中で戻った = 次の命令の
-                    // メモリアクセスがフォールトしそう。その1命令はインタプリタで
-                    // やり直す (guard込み・#PF配送も従来経路)。JITに再入すると
-                    // 同じ脱出を繰り返して無限ループになるので必ず落とす。
-                    // **予算ちょうどの途中退出 (n == jit_budget) は正規の出口** —
-                    // フォールトではないので落とさない (次はtick後に普通に入る)
-                    if (n as u16) < jn && n < m.jit_budget {
-                        skip_jit = true;
-                    }
-                    // n=0 (先頭命令の手前で脱出): 何も実行していない。
-                    // 先頭命令の前払いはそのまま生きているので、時計もextraも
-                    // 動かさずインタプリタにやり直させる
-                    if n == 0 {
-                        continue;
-                    }
-                    // 清算 — インタプリタの帳簿と同じ意味順序で払う。
-                    // 先頭命令は外側 (または前の連結) が前払い済みなので、
-                    // ブロック内の残り I2..In のぶん = n-1 をまず払う。
-                    // tickはブロック内で起きない (budgetの保証で countdown > n-1)
-                    m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
-                    m.tick_countdown -= n - 1;
-                    extra -= n64 - 1;
-                    if extra == 0 {
-                        return; // チェーンの出し切り: 次の時計は外側が払う
-                    }
-                    // ブロック終端 (分岐) の着地へ。ページを跨いだら外へ —
-                    // **着地の時計はここでは払わない** (インタプリタの連結判定と
-                    // 同じ順序)。跨ぎで払ってからreturnすると外側と二重払いになり、
-                    // tscが実行列より先行する (F1aから潜んでいた過払い。ブロックが
-                    // 増えたF1bでrdtsc由来のprintk時刻が µs 単位でずれて発覚)
-                    let new_lin = m.cpu.lin(CS, m.cpu.ip);
-                    if new_lin >> 12 != lin >> 12 {
-                        return;
-                    }
-                    pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-                    lin = new_lin;
-                    // 続けて実行する: 次の1命令ぶんを前払い (インタプリタと同じ)
-                    extra -= 1;
-                    m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
-                    m.tick_countdown -= 1;
-                    if m.tick_countdown == 0 {
-                        m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
-                        m.tick_devices(1);
-                        // tickが割り込みを挙げたかもしれない。インタプリタは
-                        // 「次の1命令を実行してから」受け付ける — 同じ位置に
-                        // するため、次の1命令はJITに入らず下の本体で実行する
-                        skip_jit = true;
-                    }
-                    // タイル張り: この着地に焼けたブロックが無くインタプリタで
-                    // 1命令実行することになったら、その次を新しい頭にする
-                    head_pending = true;
-                    continue; // at_headは真のまま — ブロックを連続でJITできる
-                }
-            }
-        }
-        skip_jit = false;
-        // at_head はここでは触らない — 連結判定の末尾が毎周必ず決め直す
-        // (直線なら head_pending の引き取り、分岐なら true)
         let (len, uop) = match cached {
             Some(x) => x,
             None => match decode::decode_at(m, pa) {
@@ -653,32 +462,16 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                                 tag: TAG_INVALID,
                                 gen: 0,
                                 len: 0,
-                                heat: 0,
-                                jit_n: 0,
-                                jit_slot: 0,
                                 uop: Uop::Ret,
                             };
                             SLOTS
                         ];
                     }
                     let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-                    // 焼けたブロックの回収 (F1b-3): 衝突で剥がれた入口を
-                    // fillのついでに台帳から埋め直す (JIT有効時のみ)
-                    let (jit_slot, jit_n) = if jit_hook.is_some() {
-                        match m.dcache.jit_map.get(&pa) {
-                            Some(&(s, n, g)) if g == gen => (s, n),
-                            _ => (0, 0),
-                        }
-                    } else {
-                        (0, 0)
-                    };
                     m.dcache.entries[slot] = Entry {
                         tag: pa,
                         gen,
                         len,
-                        heat: 0,
-                        jit_n,
-                        jit_slot,
                         uop,
                     };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
@@ -697,18 +490,6 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 }
             },
         };
-
-        // 計測 (opstats時のみ): dcacheヒット側の動的uop分布。
-        // JIT語彙の内外と、外なら何のuopかを数える — 語彙拡大の優先度は
-        // 推測でなくこの実測で決める
-        #[cfg(feature = "opstats")]
-        {
-            if jit::in_vocab(&uop) {
-                m.jit_vocab_counts.0 += 1;
-            } else {
-                *m.jit_vocab_counts.1.entry(uop_name(&uop)).or_insert(0) += 1;
-            }
-        }
 
         // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
         // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
@@ -734,13 +515,8 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         }
         // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
         let new_lin = if m.cpu.ip == ip_linear {
-            // タイル張り: 直前がJITブロックだったなら、挟んだこの1命令の
-            // 次を新しい頭に (分岐の着地でなくても熱計上とJIT入口の対象)
-            at_head = std::mem::take(&mut head_pending);
             lin.wrapping_add(len as u32)
         } else {
-            at_head = true; // 分岐の着地 = ブロック頭 (F1aの熱計上の対象)
-            head_pending = false;
             m.cpu.lin(CS, m.cpu.ip)
         };
         if new_lin >> 12 != lin >> 12 {
