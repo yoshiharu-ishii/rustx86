@@ -32,7 +32,7 @@ fn main() {
             panic!("trap: {:?}", m.trap);
         }
         samples.push(m.cpu.ip);
-        if samples.len() % 8192 == 0 {
+        if samples.len().is_multiple_of(8192) {
             let s = String::from_utf8_lossy(&m.devices.uart.tx);
             if s.contains("busybox shell") {
                 break;
