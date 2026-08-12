@@ -1,7 +1,7 @@
 # CI パイプライン (合否掲示板、2026-08-12):
-#   PR:        コードチェック → CPU照合(core/cosimを触ったときだけ) → OK
+#   PR:        コードチェック → CPU照合 ∥ CPU互換 (core/cosimを触ったときだけ) → OK
 #              (docsのみの変更はワークフローごとスキップ)
-#   main push: コードチェック → CPU照合 ∥ OS起動回帰 → OK (常に全部)
+#   main push: コードチェック → CPU照合 ∥ CPU互換 ∥ OS起動回帰 → OK (常に全部)
 #
 # 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
@@ -251,6 +251,75 @@ jobs:
       - name: 合否判定
         run: test "${{ steps.cosim.outcome }}" = "success"
 
+  compat386:
+    # 互換ピラミッドL1 (test386.asm): POST 00〜FF完走 + EE出力44926行の
+    # 期待値一致 (386SX実機で採った値)。未定義フラグまで含めた総合互換の門番。
+    # 発火条件はCPU照合と同じ — CPUの意味論に触れたときだけ
+    name: CPU互換
+    if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
+    needs: check
+    runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # ROMはリポジトリに置かず毎回ビルドする (入手経路はfetch-images.sh一つ、
+      # OSイメージと同じ理由)。nasmが要るのはROMを焼き直すときだけ
+      - name: test386 ROMのキャッシュ
+        id: rom-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            images/test386.bin
+            images/test386-EE-reference.txt
+          key: test386-rom-v1-${{ hashFiles('tools/fetch-images.sh') }}
+
+      - name: test386 ROMのビルド (nasm)
+        if: steps.rom-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nasm
+          tools/fetch-images.sh test386
+
+      - name: test386 実行 (POST完走 + EE照合)
+        id: t386
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## CPU互換 — test386.asm (POST FF完走 + EE出力の期待値一致)'
+            echo '```'
+            cargo run --release --example test386 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > t386-report.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat t386-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: CPU互換
+          title: ${{ steps.t386.outcome == 'success' && 'test386 全緑 (POST FF + EE一致)' || 'test386 不合格' }}
+          outcome: ${{ steps.t386.outcome }}
+          report-file: t386-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: test "${{ steps.t386.outcome }}" = "success"
+
   regress:
     name: OS起動回帰
     # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
@@ -373,14 +442,17 @@ jobs:
   ok:
     name: OK
     if: always()
-    needs: [check, cosim, regress]
+    needs: [check, cosim, compat386, regress]
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
-        # regress はPRではskippedになる (mainへのpush時のみ必須)
+        # regress はPRではskippedになる (mainへのpush時のみ必須)。
+        # cosim/compat386 もCPUに触れないPRではskipped
         run: |
           test "${{ needs.check.result }}" = "success" \
             && { test "${{ needs.cosim.result }}" = "success" \
                  || test "${{ needs.cosim.result }}" = "skipped"; } \
+            && { test "${{ needs.compat386.result }}" = "success" \
+                 || test "${{ needs.compat386.result }}" = "skipped"; } \
             && { test "${{ needs.regress.result }}" = "success" \
                  || test "${{ needs.regress.result }}" = "skipped"; }

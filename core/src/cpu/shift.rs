@@ -86,8 +86,11 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
         }
     }
     c.set_flag(CF, cf != 0);
-    // OFはカウント1のときのみ定義される
-    if count == 1 {
+    // OFは紙の上ではカウント1のときのみ定義。ただし実386は**左回転
+    // (ROL/RCL) では全カウントで同じ式のまま更新する** — test386のEE照合
+    // (386SX実機で採った期待値) が暴いた。右回転とシフトはカウント1のみ
+    // (これも実測どおり: ROR/RCR/シフトの多カウントは実機も触らない)
+    if count == 1 || kind == 0 || kind == 2 {
         let msb = (r >> (w - 1)) & 1;
         let of = match kind {
             0 | 2 | 4 | 6 => msb ^ cf,           // 左回転・左シフト

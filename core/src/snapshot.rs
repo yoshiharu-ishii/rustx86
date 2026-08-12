@@ -26,7 +26,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v5: TR (タスクレジスタ) を追加
 /// v6: CR2/CR3 (ページング) を追加
 /// v7: x87の制御語 (fpu_cw) を追加
-pub const VERSION: u16 = 7;
+/// v8: LDTRの隠しレジスタ (base/limit) を追加
+pub const VERSION: u16 = 8;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -224,6 +225,8 @@ impl Machine {
         w.u32(self.cpu.cr3);
         w.u32(self.cpu.cr4); // v7
         w.u16(self.cpu.ldtr_sel); // v7
+        w.u32(self.cpu.ldtr_base); // v8
+        w.u32(self.cpu.ldtr_limit); // v8
         for d in self.cpu.dr {
             w.u32(d);
         }
@@ -299,6 +302,8 @@ impl Machine {
         m.cpu.cr3 = r.u32()?;
         m.cpu.cr4 = r.u32()?; // v7
         m.cpu.ldtr_sel = r.u16()?; // v7
+        m.cpu.ldtr_base = r.u32()?; // v8
+        m.cpu.ldtr_limit = r.u32()?; // v8
         for i in 0..8 {
             m.cpu.dr[i] = r.u32()?;
         }
