@@ -165,7 +165,14 @@ impl Machine {
         // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る。
         // pde_addr は A ビットの宛先 (フィル時だけ要る)
         let (base, writable, user_ok, leaf, dirty, fresh_pde) = if e.tag == vpn {
-            (e.base, e.writable, e.user_ok, e.leaf, e.dirty, None)
+            (
+                e.base_flags & !0xFFF,
+                e.base_flags & 1 != 0,
+                e.base_flags & 2 != 0,
+                e.leaf,
+                e.base_flags & 4 != 0,
+                None,
+            )
         } else {
             // 不在フォールトのW/Rビットは**このアクセスの向き** — walkは向きを
             // 知らないので、エラーコードの材料はここで書き足す
@@ -208,11 +215,11 @@ impl Machine {
         if fresh_pde.is_some() || set_dirty {
             self.tlb[slot].set(TlbEntry {
                 tag: vpn,
-                base,
-                writable,
-                user_ok,
+                base_flags: base
+                    | writable as u32
+                    | ((user_ok as u32) << 1)
+                    | (((dirty || write) as u32) << 2),
                 leaf,
-                dirty: dirty || write,
             });
         }
         if let Some(pde) = fresh_pde {
