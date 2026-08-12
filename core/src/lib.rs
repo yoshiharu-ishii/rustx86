@@ -249,17 +249,15 @@ pub struct Machine {
 struct TlbEntry {
     /// 仮想ページ番号 (la >> 12)。`INVALID` は空きスロット
     tag: u32,
-    /// 物理ページの4K境界の先頭
-    base: u32,
-    /// このページは書けるか (PDEとPTEのR/Wが両方立っている)
-    writable: bool,
-    /// ユーザー (リング3) が触れるか (PDEとPTEのU/Sが両方立っている)
-    user_ok: bool,
+    /// 物理ページの4K境界の先頭。**下位12bitは空くので旗を詰める** (S3 —
+    /// boolで持つと4096スロットの器が12→16バイトに肥え、L1を余計に食う):
+    ///   bit0 = writable (PDEとPTEのR/Wが両方立っている)
+    ///   bit1 = user_ok (PDEとPTEのU/Sが両方立っている)
+    ///   bit2 = dirty (Dビットを立てた後か — falseのうちに書き込みが来たら
+    ///          葉へDを書く。実CPUのTLBも「Dを立てたか」を控えて二度書きしない)
+    base_flags: u32,
     /// 葉エントリ (PTE、4MBページならPDE) の物理番地。Dビットを立てる宛先
     leaf: u32,
-    /// Dビットを立てた後か。false のうちに書き込みが来たら葉へ D を書く
-    /// (実CPUのTLBも「Dを立てたか」を控えて、二度書きしない)
-    dirty: bool,
 }
 
 /// フォールト巻き戻しの控えの種類。
@@ -351,11 +349,8 @@ impl Machine {
                 .map(|_| {
                     std::cell::Cell::new(TlbEntry {
                         tag: TLB_INVALID,
-                        base: 0,
-                        writable: false,
-                        user_ok: false,
+                        base_flags: 0,
                         leaf: 0,
-                        dirty: false,
                     })
                 })
                 .collect(),
@@ -372,11 +367,17 @@ impl Machine {
     /// 先**)。違反は #PF と同じく控えて命令境界で配送し、ここでは**毒番地**
     /// (RAM外) を返してアクセスを空振りさせる — 巻き戻しがどのみち全部捨てる。
     /// リアルモードとV86は無検査 (64Kの折り返しはオフセットの幅が既に守っている)
+    #[inline]
     pub(crate) fn data_addr(&self, seg: usize, off: u32, size: u32, write: bool) -> u32 {
         if !self.cpu.pe() || self.cpu.vm86() {
             return self.cpu.lin(seg, off);
         }
         let h = self.cpu.hidden[seg];
+        // S1: 平坦セグメント (Linuxの常態) は検査が恒真で base加算も恒等 —
+        // 1分岐で素通し。ここが毎命令の互換税+10%の大半だった (perf-log 2026-08-12)
+        if h.flat_rw() {
+            return off;
+        }
         let vector = if seg == cpu::SS { 12 } else { 13 };
         // ヌル (または不在) セグメントは使った瞬間に咎める
         let ok = if h.access & 0x80 == 0 {
@@ -412,12 +413,20 @@ impl Machine {
     }
 
     /// 持ち越した A/D ビットを物理メモリの表へ反映する。命令境界で呼ぶ。
+    /// **毎命令の支払いは真偽値1つ** — 空チェックをインラインに残し、
+    /// 実仕事 (稀) だけ関数呼び出しにする (S2。呼び出しごと払うと
+    /// ホットループに call が1本増える)
+    #[inline]
+    pub(crate) fn flush_ad(&mut self) {
+        if self.ad_pending.get() {
+            self.flush_ad_slow();
+        }
+    }
+
     /// ORなので二重反映は無害。表がRAM外を指していたら黙って捨てる
     /// (壊れた表で歩いた結果 — フォールト側が別途裁いている)
-    pub(crate) fn flush_ad(&mut self) {
-        if !self.ad_pending.get() {
-            return;
-        }
+    #[cold]
+    fn flush_ad_slow(&mut self) {
         self.ad_pending.set(false);
         let mut q = self.ad_queue.borrow_mut();
         for &(pa, mask) in q.iter() {
