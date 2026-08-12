@@ -90,14 +90,8 @@ ELKSと違って**画面もキーもディスクも全部BIOS経由**なので�
 `docs/images/` に落ちる ([`web/serve.py`](web/serve.py))。
 ## ロードマップ
 
-**長期目標は「KVMを使わないFirecracker」** — 依存ゼロ・決定的・どこでも動く
-microVMを、ハードウェア仮想化と別の谷で掘る。計画は2軸 (深さTier 1〜9 ×
-広さ 箱B1〜B5) で、**全文は [docs/roadmap.md](docs/roadmap.md) が原本**。
-
-現在地 (2026-08-12): Tier 4 (32bit Linux起動) 到達済み、**CPU互換は
-test386完全合格でCI常設**。着手順は **F1c (Cranelift JIT) 前倒し →
-グラフィック (Tier 6) → ネットワーク (Tier 5)**
-([ADR-0011](docs/adr/0011-tier-redraw-after-compat.md))。
+[docs/roadmap.md](docs/roadmap.md) で管理する。READMEには書かない —
+現在地は頻繁に動くので、原本を1つにする。
 
 ## 実行
 

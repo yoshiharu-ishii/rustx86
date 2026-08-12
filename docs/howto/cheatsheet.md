@@ -48,7 +48,9 @@ tools/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
 |---|---|---|
 | **L0** 命令単位 | `cargo test -p rustx86-cosim` | Unicornと毎命令照合 (初回はUnicornビルドで数分) |
 | **L1** CPU総合 | `cargo run --release --example test386` | test386.asm完走 + EE出力照合。落ちた所は下記TRACEで |
-| **L3** OS起動 | `cargo run --release --example regress` | 3OSがプロンプト到達 + MIPS + スクショ |
+| **L2** カーネル実走 | `cargo run -p rustx86-cosim --release --example kernel_lockstep` | 実カーネルをUnicornと1命令ずつ突き合わせ |
+| **L3** OS起動 | `REGRESS_MIN_MIPS=10 cargo run --release --example regress` | 3OSがプロンプト到達 + MIPS下限 + スクショ |
+| wasm経由の到達 | `node tools/webtest/headless.mjs` | ブラウザ実体 (wasm) でシェル到達 + snake盤面。exit 0が合格 |
 | JIT決定性 | `node tools/webtest/jit-check.mjs` | interp と jit がビット同一か |
 | JIT決定性の二分探索 | `node tools/webtest/jit-lockstep.mjs` | 食い違い箇所をスナップショット並列で挟み撃ち |
 
@@ -79,6 +81,7 @@ CIはこれらを段構えで回す ([ci.md](../reference/ci.md))。PRのChecks�
 ```bash
 bash tools/build-web.sh          # wasmを焼いて web/ へ (wasm-pack + wasm-opt)
 python3 web/serve.py             # 手元配信 (Cache-Control: no-store 付き)
+python3 web/serve.py 8001        # 検証用は別ポートで (ユーザーの8000と衝突させない)
 ```
 
 ## デバッガの中でよく打つ (example dbg)
