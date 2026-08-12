@@ -382,7 +382,30 @@ pub struct JitLayout {
     pub cc_r: usize,
     pub tsc: usize,
     pub tick_countdown: usize,
+    // ---- F1c-b: TLB・変換の畳み込み用 (repr(C)が契約) ----
+    /// TLBの先頭 (TlbEntry {tag:u32, base_flags:u32, leaf:u32} = 12バイト刻み)
+    pub tlb: usize,
+    /// TLBスロット数 (2の冪。slot = (la>>12) & (slots-1))
+    pub tlb_slots: u32,
+    /// ゲストRAMの先頭 (ホスト実番地) と長さ
+    pub mem: usize,
+    pub mem_len: usize,
+    /// 隠しレジスタ配列の先頭 (SegHidden 12バイト刻み、baseはオフセット0)
+    pub hidden: usize,
+    /// テキストVRAM窓 [lo, hi] (書き込み高速路はこの範囲を避けてヘルパへ)
+    pub vram_lo: u32,
+    pub vram_hi: u32,
+    /// ページングが有効か見るためのCR0の番地 (bit31=PG。PG無効時は恒等変換 —
+    /// 高速路はTLBを引かず la をそのまま物理に使ってよい…とはせず、
+    /// **PG無効時もTLBは恒等で埋まらないので必ずヘルパへ**。生成コードは
+    /// タグ不一致で自然に遅い道へ落ちる。この欄は将来用の写し
+    pub cr0: usize,
 }
+
+/// TLBエントリ base_flags の下位ビット割当 (S3 — lib.rsのTlbEntryと同じ)
+pub const TLB_W: u32 = 1;
+pub const TLB_U: u32 = 2;
+pub const TLB_D: u32 = 4;
 
 /// 焼けたブロックの実行フック (F1a)。
 ///
@@ -428,5 +451,13 @@ pub fn layout(m: &Machine) -> JitLayout {
         cc_r: &m.cpu.cc_r as *const u32 as usize,
         tsc: &m.cpu.tsc as *const u64 as usize,
         tick_countdown: &m.tick_countdown as *const u32 as usize,
+        tlb: m.tlb_base_addr(),
+        tlb_slots: crate::TLB_SLOTS as u32,
+        mem: m.mem.as_ptr() as usize,
+        mem_len: m.mem.len(),
+        hidden: m.cpu.hidden.as_ptr() as usize,
+        vram_lo: crate::bus::VRAM_TEXT_BASE,
+        vram_hi: crate::bus::VRAM_TEXT_END,
+        cr0: &m.cpu.cr0 as *const u32 as usize,
     }
 }
