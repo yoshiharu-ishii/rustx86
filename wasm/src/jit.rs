@@ -575,6 +575,9 @@ impl Gen<'_> {
             JitOp::Jcc { .. } | JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret => {
                 unreachable!("終端はcompile_blockの出口で扱う")
             }
+            // 語彙v2 (F1c-b2〜) はネイティブ専用 — wasmは凍結時点のF1B語彙で
+            // collectする (CAP_F1B) ので、ここへは来ない
+            _ => unreachable!("語彙v2はwasm生成器 (凍結) に渡らない (collectのcaps)"),
         }
     }
 }

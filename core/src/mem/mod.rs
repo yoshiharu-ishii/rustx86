@@ -407,6 +407,28 @@ impl Machine {
         }
     }
 
+    /// JIT用の8bit読み (語彙v2)。1バイトはページを跨げないので跨ぎ検査なし
+    pub fn jit_try_read8(&self, addr: u32) -> Option<u8> {
+        match self.translate_for(addr, false) {
+            Ok(pa) => Some(self.read_phys8(pa)),
+            Err(_) => None,
+        }
+    }
+
+    /// JIT用の16bit読み (語彙v2)。跨ぎは脱出 (インタプリタに任せる)
+    pub fn jit_try_read16(&self, addr: u32) -> Option<u16> {
+        if addr & 0xFFF > 0xFFE {
+            return None;
+        }
+        match self.translate_for(addr, false) {
+            Ok(pa) => Some(u16::from_le_bytes([
+                self.read_phys8(pa),
+                self.read_phys8(pa.wrapping_add(1)),
+            ])),
+            Err(_) => None,
+        }
+    }
+
     /// JIT用の**記録しない**32bit書き込み (F1b-2)。
     ///
     /// 返り値: true = 完了 / false = 脱出 (フォールトしそう。**何も書いていない**)。
