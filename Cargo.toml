@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "cosim", "wasm", "disasm", "jit-native"]
+members = ["core", "cosim", "wasm", "disasm"]
 default-members = ["core"]
 resolver = "2"
 
