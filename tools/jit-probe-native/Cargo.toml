@@ -1,0 +1,20 @@
+# F1c関門プローブ — Craneliftの固定費 (焼き・呼び出し) を実測する使い切りの道具。
+# ワークスペースには入れない (coreの無依存を守る。Craneliftを背負うのは
+# F1c本実装のランナー層であって、coreではない)
+[package]
+name = "jit-probe-native"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-frontend = "0.116"
+cranelift-codegen = "0.116"
+cranelift-native = "0.116"
+target-lexicon = "0.13"
+
+[profile.release]
+debug = false
