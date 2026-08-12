@@ -175,28 +175,18 @@
     <div id="welcomePane">
       <h2>rustx86 — ブラウザの中の1台のPC</h2>
       <p class="lead">Rustで書いたx86エミュレータです。実物のOSに手を加えず
-        そのまま実行します。実機のPCがそうであるように、
-        <strong>1980年代のフロッピーOSも現代のLinuxも、同じ1台で起動します</strong>。
-        OSライブラリから選ぶか、手元のイメージを入れてください。</p>
+        そのまま実行します。フロッピーのOSも現代のLinuxも、同じ1台で起動します。</p>
       <div class="oscards">
-        <button data-boot="elks">
-          <span class="os">ELKS 0.9.1</span>
-          <span class="d">フロッピー1枚のUNIX。ハードウェアを直接叩くタイプ。tetrisなどのゲーム入り</span>
-        </button>
-        <button data-boot="freedos">
-          <span class="os">FreeDOS 1.4</span>
-          <span class="d">BIOS経由で動くDOS。プロンプトまで自動で進む</span>
-        </button>
-        <button data-boot="linux">
-          <span class="os">Linux 6.18</span>
-          <span class="d">カーネルを直接ロード。数秒でシェルが使える</span>
-        </button>
         <button data-open class="mediaslot">
-          <span class="os">手元のイメージ</span>
-          <span class="d">フロッピー/ディスクイメージ (.img) をここへドロップ、
-            またはクリックしてファイルを選ぶ</span>
+          <span class="os">イメージを開く…</span>
+          <span class="d">フロッピー/ディスクイメージ (.img) を選ぶ。
+            この枠へのドロップでも起動します</span>
         </button>
       </div>
+      <p class="fine">OSイメージをこのページと同じ場所に置くと、
+        左のOSライブラリから起動できます (取得先は各OSを選ぶと出ます。
+        詳しくは <a href="https://github.com/yoshiharu-ishii/rustx86" target="_blank"
+        rel="noreferrer">リポジトリのREADME</a>)。</p>
     </div>
     <canvas id="screen" tabindex="0" hidden></canvas>
     <!-- Linux のシリアル端末。VGAテキスト (#screen) とは描画の作法が丸ごと
