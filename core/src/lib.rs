@@ -228,6 +228,19 @@ pub struct Machine {
     /// 決定的なので写しても結果は同じ — 無効化は mov cr3 / invlpg / cr0 で行う。
     /// `Cell` なのは読み経路 (&self) からも埋めるため
     tlb: Vec<std::cell::Cell<TlbEntry>>,
+
+    /// ページウォークが立てるべき A/D ビットの持ち越し (葉/PDEの物理番地, ORする値)。
+    /// 歩く経路は読みと同じ `&self` なので mem に直接書けない —
+    /// **次の命令境界 (&mut) で反映する**。ゲストが「触った直後の同一命令内」で
+    /// 表を読み返す手段は無いので、この1命令の遅延は観測できない
+    ad_queue: std::cell::RefCell<Vec<(u32, u8)>>,
+    /// ad_queue が空でない印。毎命令見るのはこの真偽値1つ
+    ad_pending: std::cell::Cell<bool>,
+
+    /// データアクセスのセグメント検査 (limit/書込可否) が見つけた違反。
+    /// 検査は読み経路 (&self) からも走るので #PF と同じ「控えて命令境界で配送」。
+    /// 値は例外ベクタ (13=#GP / 12=#SS)。エラーコードは常に0
+    pending_seg_fault: std::cell::Cell<Option<u8>>,
 }
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
@@ -242,6 +255,11 @@ struct TlbEntry {
     writable: bool,
     /// ユーザー (リング3) が触れるか (PDEとPTEのU/Sが両方立っている)
     user_ok: bool,
+    /// 葉エントリ (PTE、4MBページならPDE) の物理番地。Dビットを立てる宛先
+    leaf: u32,
+    /// Dビットを立てた後か。false のうちに書き込みが来たら葉へ D を書く
+    /// (実CPUのTLBも「Dを立てたか」を控えて、二度書きしない)
+    dirty: bool,
 }
 
 /// フォールト巻き戻しの控えの種類。
@@ -336,10 +354,78 @@ impl Machine {
                         base: 0,
                         writable: false,
                         user_ok: false,
+                        leaf: 0,
+                        dirty: false,
                     })
                 })
                 .collect(),
+            ad_queue: std::cell::RefCell::new(Vec::new()),
+            ad_pending: std::cell::Cell::new(false),
+            pending_seg_fault: std::cell::Cell::new(None),
         }
+    }
+
+    /// データアクセスの実効番地 (**セグメント検査つき**)。
+    ///
+    /// 保護モードの約束: limitの外・読み取り専用への書き込み・ヌルセグメントの
+    /// 使用は、番地に化ける前に例外になる (**セグメンテーションはページングより
+    /// 先**)。違反は #PF と同じく控えて命令境界で配送し、ここでは**毒番地**
+    /// (RAM外) を返してアクセスを空振りさせる — 巻き戻しがどのみち全部捨てる。
+    /// リアルモードとV86は無検査 (64Kの折り返しはオフセットの幅が既に守っている)
+    pub(crate) fn data_addr(&self, seg: usize, off: u32, size: u32, write: bool) -> u32 {
+        if !self.cpu.pe() || self.cpu.vm86() {
+            return self.cpu.lin(seg, off);
+        }
+        let h = self.cpu.hidden[seg];
+        let vector = if seg == cpu::SS { 12 } else { 13 };
+        // ヌル (または不在) セグメントは使った瞬間に咎める
+        let ok = if h.access & 0x80 == 0 {
+            false
+        } else if write && (h.access & 0x08 != 0 || h.access & 0x02 == 0) {
+            // コードセグメントには書けない。データは W ビットが要る
+            false
+        } else if !write && h.access & 0x08 != 0 && h.access & 0x02 == 0 {
+            // 実行専用コードは読めもしない
+            false
+        } else if h.access & 0x1C == 0x14 {
+            // 伸長方向が逆 (expand-down データ、スタック用):
+            // 有効なのは limit より**上** から器の天井まで
+            let top: u64 = if h.big { 0xFFFF_FFFF } else { 0xFFFF };
+            off > h.limit && (off as u64 + size as u64 - 1) <= top
+        } else {
+            (off as u64 + size as u64 - 1) <= h.limit as u64
+        };
+        if ok {
+            self.cpu.lin(seg, off)
+        } else {
+            if self.pending_seg_fault.get().is_none() {
+                self.pending_seg_fault.set(Some(vector));
+            }
+            0xFFFF_FFFF
+        }
+    }
+
+    /// ページウォークからの A/D ビット持ち越し (&self経路用)。反映は [`Self::flush_ad`]
+    pub(crate) fn queue_ad(&self, pa: u32, mask: u8) {
+        self.ad_queue.borrow_mut().push((pa, mask));
+        self.ad_pending.set(true);
+    }
+
+    /// 持ち越した A/D ビットを物理メモリの表へ反映する。命令境界で呼ぶ。
+    /// ORなので二重反映は無害。表がRAM外を指していたら黙って捨てる
+    /// (壊れた表で歩いた結果 — フォールト側が別途裁いている)
+    pub(crate) fn flush_ad(&mut self) {
+        if !self.ad_pending.get() {
+            return;
+        }
+        self.ad_pending.set(false);
+        let mut q = self.ad_queue.borrow_mut();
+        for &(pa, mask) in q.iter() {
+            if let Some(b) = self.mem.get_mut(pa as usize) {
+                *b |= mask;
+            }
+        }
+        q.clear();
     }
 
     /// 装置を進め、挙手があればPICへ渡す。**一周はこうなっている**:
@@ -375,12 +461,12 @@ impl Machine {
     }
 
     /// フォールトに備えてCPUを控える (要るときだけ呼ばれる)。
-    /// 控えの使い道は #PF 巻き戻し (ページング有効時のみ) と CPL=3 の #UD
-    /// 巻き戻しの2つなので、その条件以外では何もしない。
+    /// 控えの使い道は #PF・セグメント例外 (#GP/#SS) の巻き戻しと CPL=3 の
+    /// #UD 巻き戻し — どれも保護モードでしか起きないので、条件は PE ひとつ。
     /// Boxの器は使い回して確保を避ける
     #[inline]
     pub(crate) fn guard_save(&mut self) {
-        if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+        if self.cpu.pe() {
             self.fault_save = self.cpu.clone();
             self.fault_save_kind = FaultSaveKind::Full;
         }
@@ -391,7 +477,7 @@ impl Machine {
     /// Cpu丸ごと (~400B) の複写はプロファイルの memmove 11%だった
     #[inline]
     pub(crate) fn guard_save_slim(&mut self) {
-        if self.cpu.cr0 & 0x8000_0000 != 0 || self.cpu.cpl() == 3 {
+        if self.cpu.pe() {
             self.cpu.save_slim(&mut self.fault_slim);
             self.fault_save_kind = FaultSaveKind::Slim;
         }
@@ -585,6 +671,9 @@ impl Machine {
         if self.trap.is_some() {
             return;
         }
+        // 前の命令のページウォークが立てた A/D ビットを表へ反映
+        // (歩く経路は &self なので、ここ (&mut) まで持ち越されている)
+        self.flush_ad();
         // 0. デバッガ。切っていれば真偽値1つで抜ける。
         //    命令数は**この呼び出しの回数**で数えるので、`boot` の例が出す
         //    命令数と同じ座標になる (決定的なので巻き戻しの目盛りになる)
@@ -730,6 +819,18 @@ impl Machine {
                 cpu::interrupt(self, 6);
                 return;
             }
+        }
+
+        // セグメント検査 (limit/書込可否) の違反はページングより先に裁く —
+        // 実CPUでもセグメンテーションが番地を作ってからページングが訳す順。
+        // 毒番地アクセスが偽の #PF/トラップを起こしていても、本当の事件は
+        // こちらなので捨てる
+        if let Some(vec) = self.pending_seg_fault.take() {
+            self.pending_fault.set(None);
+            self.trap = None;
+            assert!(self.guard_restore(), "セグメント例外なのに控えが無い");
+            cpu::seg_fault_err(self, vec, self.cpu.ip, 0);
+            return;
         }
 
         if let Some(f) = self.pending_fault.take() {

@@ -7,6 +7,18 @@ pub mod bus;
 
 use crate::{cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
 
+/// ページウォーク1回の結果。物理先頭・権限に加えて、
+/// A/Dビットの書き戻し先 (表の側の物理番地) も運ぶ
+struct Walk {
+    base: u32,
+    writable: bool,
+    user_ok: bool,
+    /// PDEの物理番地 (Aビットの宛先)
+    pde_addr: u32,
+    /// 葉 (PTE、4MBページならPDE) の物理番地 (A/Dビットの宛先)
+    leaf_addr: u32,
+}
+
 impl Machine {
     /// TLBを全部空にする。mov cr3 (アドレス空間の切り替え) や CR0 の変更、
     /// スナップショット復元の後に呼ぶ。**表を書き換えたのに写しが古いと
@@ -126,7 +138,14 @@ impl Machine {
     /// 返し、読めば 0xFF になる。CPUの実行経路は [`translate_for`] を使い、
     /// 失敗を #PF として配送する
     pub fn translate(&self, la: u32) -> u32 {
-        self.translate_for(la, false).unwrap_or(0xFFFF_FFFF)
+        if self.cpu.cr0 & 0x8000_0000 == 0 {
+            return la;
+        }
+        // 覗き見はゲストを変えない: TLBにも控えず、A/Dビットも立てない。
+        // 権限も見ない (デバッガはU/Sに縛られず覗けるほうが正しい)
+        self.walk_page(la)
+            .map(|w| w.base | (la & 0xFFF))
+            .unwrap_or(0xFFFF_FFFF)
     }
 
     /// CPUのアクセス経路の変換。**ページ保護もここで裁く**:
@@ -142,19 +161,26 @@ impl Machine {
         let vpn = la >> 12;
         let slot = (vpn as usize) & (TLB_SLOTS - 1);
         let e = self.tlb[slot].get();
-        let (base, writable, user_ok) = if e.tag == vpn {
-            (e.base, e.writable, e.user_ok)
+        // ミス時: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
+        // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る。
+        // pde_addr は A ビットの宛先 (フィル時だけ要る)
+        let (base, writable, user_ok, leaf, dirty, fresh_pde) = if e.tag == vpn {
+            (e.base, e.writable, e.user_ok, e.leaf, e.dirty, None)
         } else {
-            // ミス: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
-            // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る
-            let (base, writable, user_ok) = self.walk_page(la)?;
-            self.tlb[slot].set(TlbEntry {
-                tag: vpn,
-                base,
-                writable,
-                user_ok,
-            });
-            (base, writable, user_ok)
+            // 不在フォールトのW/Rビットは**このアクセスの向き** — walkは向きを
+            // 知らないので、エラーコードの材料はここで書き足す
+            let w = self.walk_page(la).map_err(|mut f| {
+                f.write = write;
+                f
+            })?;
+            (
+                w.base,
+                w.writable,
+                w.user_ok,
+                w.leaf_addr,
+                false,
+                Some(w.pde_addr),
+            )
         };
         // --- 権限チェック。CPLとWPは引くたびに新しく (sys_accessも) ---
         let user = self.cpu.cpl() == 3 && !self.sys_access.get();
@@ -173,42 +199,79 @@ impl Machine {
                 present: true,
             });
         }
+        // --- 検査を通った変換だけが控えと帳簿を書く ---
+        // A/D は実CPUがページ表へ書き戻す2ビット (Linuxはこれで「最近触った/
+        // 汚れた」を知り、test386のPOST 11はこれを検査する)。
+        // 歩く経路は &self なので直接は書けず、queue_ad → 命令境界のflush_ad。
+        // dirty=「Dを立てた後か」の控え — 立てた後は書き込みでも表に触らない
+        let set_dirty = write && !dirty;
+        if fresh_pde.is_some() || set_dirty {
+            self.tlb[slot].set(TlbEntry {
+                tag: vpn,
+                base,
+                writable,
+                user_ok,
+                leaf,
+                dirty: dirty || write,
+            });
+        }
+        if let Some(pde) = fresh_pde {
+            self.queue_ad(pde, 0x20);
+            if leaf != pde {
+                self.queue_ad(leaf, 0x20);
+            }
+        }
+        if set_dirty {
+            self.queue_ad(leaf, 0x40);
+        }
         Ok(base | (la & 0xFFF))
     }
 
-    /// 2段の表を歩いて、ページの物理先頭と権限ビットを返す (TLBミス時のみ)。
-    /// 返すのは (4K境界の物理先頭, 書けるか, ユーザーで触れるか)。
+    /// 2段の表を歩いて、ページの物理先頭と権限ビット、そして**表の側の番地**
+    /// (Aビットを立てるPDE、Dビットを立てる葉) を返す (TLBミス時のみ)。
     /// **不在は Err(present:false)** — これは TLB に載せない (次回また歩く)
-    fn walk_page(&self, la: u32) -> Result<(u32, bool, bool), PageFault> {
+    fn walk_page(&self, la: u32) -> Result<Walk, PageFault> {
         let notp = || PageFault {
             la,
             write: false,
             present: false,
         };
         let dir = (la >> 22) & 0x3FF;
-        let pde = self.read_phys32((self.cpu.cr3 & !0xFFF) + dir * 4);
+        let pde_addr = (self.cpu.cr3 & !0xFFF) + dir * 4;
+        let pde = self.read_phys32(pde_addr);
         if pde & 1 == 0 {
             return Err(notp());
         }
         if pde & 0x80 != 0 {
             // 4MBページ (PSE): テーブルを引かず、ディレクトリで直に物理が決まる。
-            // TLBは4K単位なので、この4Kぶんの物理先頭を作る
+            // TLBは4K単位なので、この4Kぶんの物理先頭を作る。A/DともPDEに立つ
             let base = (pde & 0xFFC0_0000) | (la & 0x003F_F000);
-            return Ok((base, pde & 2 != 0, pde & 4 != 0));
+            return Ok(Walk {
+                base,
+                writable: pde & 2 != 0,
+                user_ok: pde & 4 != 0,
+                pde_addr,
+                leaf_addr: pde_addr,
+            });
         }
         let tbl = (la >> 12) & 0x3FF;
-        let pte = self.read_phys32((pde & !0xFFF) + tbl * 4);
+        let pte_addr = (pde & !0xFFF) + tbl * 4;
+        let pte = self.read_phys32(pte_addr);
         if pte & 1 == 0 {
             return Err(notp());
         }
         // R/W・U/S は2段の**厳しい方**が効く (両方立って初めて許す)
-        let writable = pde & 2 != 0 && pte & 2 != 0;
-        let user_ok = pde & 4 != 0 && pte & 4 != 0;
-        Ok((pte & !0xFFF, writable, user_ok))
+        Ok(Walk {
+            base: pte & !0xFFF,
+            writable: pde & 2 != 0 && pte & 2 != 0,
+            user_ok: pde & 4 != 0 && pte & 4 != 0,
+            pde_addr,
+            leaf_addr: pte_addr,
+        })
     }
 
     /// 変換失敗を記録する (最初の1件だけ)。命令の終わりで #PF になる
-    fn note_fault(&self, f: PageFault) {
+    pub(crate) fn note_fault(&self, f: PageFault) {
         if self.pending_fault.get().is_none() {
             self.pending_fault.set(Some(f));
         }

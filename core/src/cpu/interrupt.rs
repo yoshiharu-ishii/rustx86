@@ -130,6 +130,7 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
 
     // 受け手のコードセグメントのDPLが、いまより深ければ**リングが変わる**
     let old_cpl = m.cpu.cpl();
+    let from_v86 = m.cpu.vm86();
     let (target_dpl, target_conforming) = {
         let (_, hi) = super::segment::read_descriptor(m, sel);
         (((hi >> 13) & 3) as u8, hi & 0x0400 != 0)
@@ -138,8 +139,15 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
     // (数字が大きい) なら配送そのものが #GP(そのセレクタ)。カーネル実行中に
     // ユーザーセグメント向きのゲートを踏んでも、ユーザーコードに特権では
     // 降りない (test386のPOST 20が要求する検査)。まだ何も積んでいないので
-    // 巻き戻しは trap_ip だけでよい
-    if target_dpl > old_cpl {
+    // 巻き戻しは trap_ip だけでよい。
+    // V86からはさらに狭い: **非適合かつDPL0のみ** — 檻から出る割り込みは
+    // 必ずCPL0の監視者に落ちる。適合 (CPL3のまま走る) も浅いリングもダメ
+    if from_v86 {
+        if target_conforming || target_dpl != 0 {
+            gp_fault(m, m.trap_ip, (sel & 0xFFFC) as u32);
+            return;
+        }
+    } else if target_dpl > old_cpl {
         gp_fault(m, m.trap_ip, (sel & 0xFFFC) as u32);
         return;
     }
@@ -152,6 +160,14 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
     } else {
         target_dpl
     };
+
+    // 検査は全部通った — ここから状態を書く。スタックに積む旧EFLAGSは
+    // **VM=1のままの姿**を先に確保し、live側のVMはこの場で落とす
+    // (以後のセグメントロードが保護モードの作法 (記述子表) で行われるように)
+    let old_flags = m.cpu.eflags();
+    if from_v86 {
+        m.cpu.set_flag(VM, false);
+    }
 
     if new_cpl < old_cpl {
         // ---- リング遷移 (3→0など): スタックを差し替えてから積む ----
@@ -168,12 +184,20 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
         let ss_n = m.read16(t.wrapping_add(4));
         load_seg_raw(m, SS, ss_n);
         m.cpu.regs[SP] = esp_n;
+        if from_v86 {
+            // 檻の中のデータセグメント4本もカーネルスタックへ退避 (GSが最奥)。
+            // iretdがVM=1のフレームを見た時に逆順で戻す
+            push_w(m, m.cpu.sregs[GS] as u32, gate32);
+            push_w(m, m.cpu.sregs[FS] as u32, gate32);
+            push_w(m, m.cpu.sregs[DS] as u32, gate32);
+            push_w(m, m.cpu.sregs[ES] as u32, gate32);
+        }
         push_w(m, old_ss, gate32);
         push_w(m, old_esp, gate32);
     }
 
-    // EFLAGS, CS, EIP をゲートの幅で積む
-    push_w(m, m.cpu.eflags(), gate32);
+    // EFLAGS, CS, EIP をゲートの幅で積む (EFLAGSは檻の中の姿 = VM=1のまま)
+    push_w(m, old_flags, gate32);
     push_w(m, m.cpu.sregs[CS] as u32, gate32);
     push_w(m, m.cpu.ip, gate32);
     if let Some(e) = err {
@@ -184,6 +208,13 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
         m.cpu.set_flag(IF, false);
     }
     m.cpu.set_flag(TF, false);
+    if from_v86 {
+        // 檻のデータセグメントはカーネルに持ち込まない — 全部ヌルに落とす
+        // (実CPUの仕様。値はさっきスタックへ退避済みで、iretdが戻す)
+        for r in [ES, DS, FS, GS] {
+            load_seg_raw(m, r, 0);
+        }
+    }
     load_seg_raw(m, CS, (sel & !0x3) | new_cpl as u16);
     m.cpu.set_ip(dest);
 }
@@ -192,10 +223,46 @@ fn interrupt_protected_inner(m: &mut Machine, n: u8, err: Option<u32>) {
 /// `wide` はオペランドサイズ — **入ったゲートの幅と対でなければスタックが腐る**
 /// (16bitゲートのハンドラは o16 iret で戻る)
 pub fn iret(m: &mut Machine, wide: bool) {
+    if m.cpu.vm86() {
+        // ---- 檻の中のiret: IOPL=3が入場券 (#GP(0))。作法はリアルモード ----
+        if m.cpu.iopl() < 3 {
+            gp_fault(m, m.trap_ip, 0);
+            return;
+        }
+        let ip = pop_w(m, wide);
+        let sel = pop_w(m, wide) as u16;
+        let f = pop_w(m, wide);
+        load_seg_raw(m, CS, sel); // vm86なのでリアル風の写し
+        m.cpu.set_ip(ip);
+        // IOPLとVMは檻の中から書き換え不可 (書けたら檻でない)。IFは書ける
+        let mask: u32 = if wide { 0x0024_4FD5 } else { 0x4FD5 };
+        let cur = m.cpu.eflags();
+        m.cpu.set_eflags((cur & !mask) | (f & mask) | 0x0002);
+        return;
+    }
     if m.cpu.pe() {
         let ip = pop_w(m, wide);
         let sel = pop_w(m, wide) as u16;
         let f = pop_w(m, wide);
+        // iretdで**VM=1のフレーム**を見たら仮想8086モードへの降下 (CPL0限定)。
+        // フレームの残りは ESP SS ES DS FS GS — 配送時に積んだ拡張分を戻す
+        if wide && f & VM != 0 && m.cpu.cpl() == 0 {
+            let esp = pop_w(m, true);
+            let ss = pop_w(m, true) as u16;
+            let es = pop_w(m, true) as u16;
+            let ds = pop_w(m, true) as u16;
+            let fs = pop_w(m, true) as u16;
+            let gs = pop_w(m, true) as u16;
+            // 先にフラグ (VM含む) を据える — 以後のセグメントロードが
+            // リアル風 (sel×16) の写しになる
+            m.cpu.set_eflags((f & (0x0024_7FD5 | VM)) | 0x0002);
+            for (r, v) in [(CS, sel), (SS, ss), (ES, es), (DS, ds), (FS, fs), (GS, gs)] {
+                load_seg_raw(m, r, v);
+            }
+            m.cpu.set_ip(ip & 0xFFFF);
+            m.cpu.regs[SP] = esp;
+            return;
+        }
         // 戻り先のRPLがいまのCPLより浅い (数字が大きい) なら**外側リングへの
         // 復帰**で、ESPとSSもスタックから取り出す。積む側 (リング遷移) と対。
         // 「行ったことのない場所へ戻る」— リング3への降下もこの経路を使う
@@ -235,22 +302,67 @@ pub fn iret(m: &mut Machine, wide: bool) {
     m.cpu.set_eflags((f as u32 & 0x0FD5) | 0x0002);
 }
 
-/// 一般保護例外 (#GP, vector 13) の配送。
+/// I/Oポートへのアクセス可否。
+///
+/// CPL <= IOPL なら素通し。それ以外 (リング3やV86の檻) は**TSSの
+/// I/O許可ビットマップ**が最後の砦になる — TSS先頭+0x66の16bitが
+/// ビットマップの開始オフセット、ポート番号=ビット位置、0=許可。
+/// アクセスが跨る全ビットが0のときだけ通る。ビットマップがTSSの
+/// limitからはみ出ている分は全部不許可 (0x68を書いて「表なし」に
+/// するのが定番の全面禁止)
+pub(crate) fn io_permitted(m: &mut Machine, port: u16, bytes: u32) -> bool {
+    if !m.cpu.pe() {
+        return true;
+    }
+    if !m.cpu.vm86() && m.cpu.cpl() <= m.cpu.iopl() {
+        return true;
+    }
+    // TSSの読みは暗黙のスーパーバイザアクセス (記述子表と同じ扱い)
+    let prev_sys = m.sys_access.replace(true);
+    let base = m.cpu.tr_base;
+    let limit = m.cpu.tr_limit;
+    let ok = if limit < 0x67 {
+        false // iomapベースすら持たない小さいTSS
+    } else {
+        let iomap = m.read16(base.wrapping_add(0x66)) as u32;
+        let first = iomap + port as u32 / 8;
+        let last = iomap + (port as u32 + bytes - 1) / 8;
+        if last > limit {
+            false
+        } else {
+            let mut bits = 0u32;
+            for (i, a) in (first..=last).enumerate() {
+                bits |= (m.read8(base.wrapping_add(a)) as u32) << (8 * i);
+            }
+            (bits >> (port as u32 % 8)) & ((1u32 << bytes) - 1) == 0
+        }
+    };
+    m.sys_access.set(prev_sys);
+    ok
+}
+
+/// エラーコード付きフォールトの配送 (#GP/#SS等、ベクタ汎用)。
 ///
 /// **フォールトなので命令の先頭IPで配る** — ハンドラから見える現場は
-/// 「その命令を実行する直前」。IOPL違反 (CLI/IN等) やセグメント違反が上げる
-pub(crate) fn gp_fault(m: &mut Machine, start_ip: u32, err: u32) {
+/// 「その命令を実行する直前」
+pub(crate) fn seg_fault_err(m: &mut Machine, vector: u8, start_ip: u32, err: u32) {
     m.cpu.set_ip(start_ip);
     let (cs, ip) = (m.cpu.sregs[CS], m.cpu.ip);
     if m.first_fault.is_none() {
-        m.first_fault = Some((13, cs, ip));
+        m.first_fault = Some((vector, cs, ip));
     }
-    m.int_counts[13] += 1;
+    m.int_counts[vector as usize] += 1;
     if m.int_recent.len() == 32 {
         m.int_recent.pop_front();
     }
-    m.int_recent.push_back((13, cs, ip));
-    interrupt_protected_err(m, 13, Some(err));
+    m.int_recent.push_back((vector, cs, ip));
+    interrupt_protected_err(m, vector, Some(err));
+}
+
+/// 一般保護例外 (#GP, vector 13) の配送。
+/// IOPL違反 (CLI/IN等) やセグメント違反が上げる
+pub(crate) fn gp_fault(m: &mut Machine, start_ip: u32, err: u32) {
+    seg_fault_err(m, 13, start_ip, err);
 }
 
 /// ページフォールト (#PF, vector 14) の配送。

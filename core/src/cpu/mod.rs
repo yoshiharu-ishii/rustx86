@@ -50,7 +50,7 @@ use crate::Machine;
 // `cpu::interrupt` / `cpu::iret` をそのまま保つため再エクスポートする
 pub use interrupt::{interrupt, iret, page_fault};
 // セグメンテーションは segment.rs へ。step() と interrupt.rs が使う
-pub(crate) use interrupt::{divide_error, gp_fault, software_int};
+pub(crate) use interrupt::{divide_error, gp_fault, seg_fault_err, software_int};
 pub(crate) use segment::{load_seg, load_seg_raw, SegHidden};
 
 /// lib.rs (bzImageロード) から GDT 経由でセグメントを積むための公開口
@@ -109,6 +109,10 @@ pub const OF: u32 = 1 << 11;
 /// トラップフラグ。立っていると1命令ごとに INT 1 が起きる。
 /// デバッガのシングルステップはこれで実現されている
 pub const TF: u32 = 1 << 8;
+/// 仮想8086モード (EFLAGS bit 17)。**モードがフラグに入っている**唯一の例 —
+/// 保護モードのまま「リアルモードのふりをした檻」を作る。立てられるのは
+/// iret/タスクスイッチだけで、POPFでは書き換わらない
+pub const VM: u32 = 1 << 17;
 
 /// ALUが書く6フラグ (CF PF AF ZF SF OF) — 遅延評価の対象。
 /// IF/DF/TF等の**制御フラグは対象外** (ALUは触らないので flags フィールドが常に真実)
@@ -250,11 +254,20 @@ impl Cpu {
         self.cr0 & 1 != 0
     }
 
+    /// 仮想8086モードか (PE=1 かつ EFLAGS.VM)。
+    /// VMは遅延6フラグの外なので flags を直に読める (IOPLと同じ)
+    pub fn vm86(&self) -> bool {
+        self.pe() && self.flags & VM != 0
+    }
+
     /// CPL (現在特権レベル)。独立したレジスタではない —
     /// **いま走っているCSセレクタの下位2bit**がそのまま現在特権である。
-    /// リアルモードは常に0 (全能)
+    /// リアルモードは常に0 (全能)。V86はCSがリアル風の値 (下位2bitは無意味)
+    /// なので**常に3** — 檻の中は最弱権限で走る
     pub fn cpl(&self) -> u8 {
-        if self.pe() {
+        if self.vm86() {
+            3
+        } else if self.pe() {
             (self.sregs[CS] & 3) as u8
         } else {
             0
@@ -593,6 +606,9 @@ pub struct Decoder {
     pub opsize32: bool,
     /// `0x67` が付いていた。実効アドレスの計算が16bit形式と32bit形式で入れ替わる
     pub addrsize32: bool,
+    /// `0xF0` (LOCK) が付いていた。バス占有はシングルコアでは意味を持たないが、
+    /// **付けてよい命令かの検査**には要る (読んで書く命令以外は #UD)
+    pub lock: bool,
 }
 
 /// moffs のオフセットを読む。アドレスサイズが幅を決める (符号なし)
@@ -613,6 +629,28 @@ fn fetch_rel_w(m: &mut Machine, wide: bool) -> u32 {
     }
 }
 
+/// LOCKプレフィクスを許す1バイトオペコード (読んで書くALU/ビット系)。
+/// r/m,r形式のADD/OR/ADC/SBB/AND/SUB/XOR/CMPなし、GRP1、XCHG、GRP3-5、0F空間
+fn lockable(op: u8) -> bool {
+    matches!(
+        op,
+        0x00 | 0x01
+            | 0x08
+            | 0x09
+            | 0x10
+            | 0x11
+            | 0x18
+            | 0x19
+            | 0x20
+            | 0x21
+            | 0x28
+            | 0x29
+            | 0x30
+            | 0x31
+            | 0x80..=0x83 | 0x86 | 0x87 | 0xF6 | 0xF7 | 0xFE | 0xFF | 0x0F
+    )
+}
+
 pub fn step(m: &mut Machine) {
     let start_ip = m.cpu.ip;
     // 既定の幅は**いま走っているコードセグメントのDビット**が決める。
@@ -623,6 +661,7 @@ pub fn step(m: &mut Machine) {
         rep: None,
         opsize32: cs32,
         addrsize32: cs32,
+        lock: false,
     };
 
     // プレフィクスループ
@@ -637,7 +676,7 @@ pub fn step(m: &mut Machine) {
             // FS/GS上書き (386〜)。Linuxはper-CPUデータを %fs で引く
             0x64 => d.seg_override = Some(FS),
             0x65 => d.seg_override = Some(GS),
-            0xF0 => {} // LOCK: シングルコアなので無視
+            0xF0 => d.lock = true, // LOCK: 実行は無視、可否の検査だけ受ける
             0x66 => {
                 // オペランドサイズの**反転** (386〜)
                 d.opsize32 = !cs32;
@@ -648,6 +687,15 @@ pub fn step(m: &mut Machine) {
             _ => break b,
         }
     };
+
+    // LOCKは「読んで書く」命令にしか付けられない — それ以外は #UD (test386
+    // POST 12)。判定はオペコード段の白リスト (0F空間とグループ細分は緩め —
+    // 誤って#UDにしない側に倒す。実CPUより通しすぎる分は台帳の未了)
+    if d.lock && !lockable(op) {
+        m.cpu.set_ip(start_ip);
+        interrupt(m, 6);
+        return;
+    }
 
     // 0x66 が**実際に付いた**命令を控える (幅対応を忘れた命令は静かに壊れるため)。
     //
