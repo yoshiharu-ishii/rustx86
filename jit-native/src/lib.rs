@@ -224,6 +224,8 @@ struct Tr<'a, 'b> {
     cur_k: u32,
     /// ブロック頭から今の命令までのバイトオフセット (脱出時のip合わせ)
     cur_ip_off: u32,
+    /// エントリで読んだ jit_budget (このブロック実行の最大命令数) — F1c-c4
+    budget: Option<Value>,
 }
 
 const F: MemFlags = MemFlags::trusted();
@@ -424,6 +426,19 @@ impl Tr<'_, '_> {
         self.fb.ins().return_(&[k]);
         self.fb.switch_to_block(cont);
         self.fb.seal_block(cont);
+    }
+
+    /// 予算ガード (F1c-c4): op i の手前で i >= jit_budget なら途中退出。
+    /// 退出はescapeと同じ機構 (ip=頭+off、返り値=i) だが、こちらは
+    /// **完全実行済みの正規出口** — tickがちょうどここで刻まれる
+    fn budget_guard(&mut self, i: u32) {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let Some(b) = self.budget else { return };
+        let hit = self
+            .fb
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThanOrEqual, b, i as i64);
+        self.escape_if(hit);
     }
 
     /// 途中のjcc (F1c-c): 成立なら ip = ip + (jcc末尾までのオフセット + rel) を
@@ -941,7 +956,11 @@ fn translate(
         maddr,
         cur_k: 0,
         cur_ip_off: 0,
+        budget: None,
     };
+    // 予算 (jit_budget) はエントリで1回読む — coreがenter直前に書いている
+    let b = tr.ld32_at(lay.jit_budget);
+    tr.budget = Some(b);
 
     // 本体 (wasm側 compile_block と同じ流れ)。終端は出口で
     enum Term {
@@ -957,6 +976,11 @@ fn translate(
         tr.cur_k = i as u32;
         tr.cur_ip_off = total_len;
         total_len += len as u32;
+        if i > 0 {
+            // 予算ガード (F1c-c4): coreは予算1以上で入場させる — op 0は無条件、
+            // 以後はopごとに「ここまでで予算切れなら途中退出」
+            tr.budget_guard(i as u32);
+        }
         match *op {
             // F1c-c: 末尾のjccは従来の出口 (select)、**途中のjccは条件つき退出** —
             // 成立なら ip=成立先 を書いて k+1 で戻る (完全実行済みの退出)、
