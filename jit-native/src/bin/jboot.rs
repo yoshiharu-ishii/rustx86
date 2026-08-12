@@ -76,13 +76,12 @@ fn main() {
     if jit_on {
         let rt = rt.as_ref().unwrap();
         println!(
-            "jit: 実行 {}M命令 / 入回数 {}M (平均ブロック長 {:.1}) 据付 {} 世代落ち {} 再焼き {}",
+            "jit: 実行 {}M命令 / 入回数 {}M (平均ブロック長 {:.1}) 据付 {} 世代落ち {}",
             m.jit_instrs / 1_000_000,
             m.jit_entries / 1_000_000,
             m.jit_instrs as f64 / m.jit_entries.max(1) as f64,
             rt.installed,
             rt.dropped_stale,
-            rt.rebaked,
         );
         println!("カバレッジ: {:.1}%", 100.0 * m.jit_instrs as f64 / n as f64);
         println!(
