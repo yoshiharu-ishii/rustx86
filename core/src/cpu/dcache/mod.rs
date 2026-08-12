@@ -567,12 +567,20 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 let budget = extra.saturating_add(1).min(m.tick_countdown as u64);
                 let irq_waiting =
                     m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service);
-                if jn as u64 > budget {
+                // budget_aware (F1c-c4): 予算1以上なら入場し、上限を渡して
+                // 境界ちょうどで途中退出させる。非対応 (wasm凍結) は従来どおり
+                let admit = if h.budget_aware {
+                    budget >= 1
+                } else {
+                    jn as u64 <= budget
+                };
+                if !admit {
                     m.jit_denied[1] += 1;
                 } else if irq_waiting {
                     m.jit_denied[2] += 1;
                 }
-                if jn as u64 <= budget && !irq_waiting {
+                if admit && !irq_waiting {
+                    m.jit_budget = (jn as u64).min(budget) as u32;
                     let n = (h.enter)(jslot);
                     let n64 = n as u64;
                     m.jit_instrs = m.jit_instrs.wrapping_add(n64);
@@ -580,8 +588,10 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                     // フォールト脱出 (F1b): ブロックが途中で戻った = 次の命令の
                     // メモリアクセスがフォールトしそう。その1命令はインタプリタで
                     // やり直す (guard込み・#PF配送も従来経路)。JITに再入すると
-                    // 同じ脱出を繰り返して無限ループになるので必ず落とす
-                    if (n as u16) < jn {
+                    // 同じ脱出を繰り返して無限ループになるので必ず落とす。
+                    // **予算ちょうどの途中退出 (n == jit_budget) は正規の出口** —
+                    // フォールトではないので落とさない (次はtick後に普通に入る)
+                    if (n as u16) < jn && n < m.jit_budget {
                         skip_jit = true;
                     }
                     // n=0 (先頭命令の手前で脱出): 何も実行していない。

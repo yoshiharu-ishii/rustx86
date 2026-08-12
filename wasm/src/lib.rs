@@ -220,7 +220,11 @@ impl Emulator {
     /// JITを有効化する。coreにフックを挿し、以後ブロック頭で焼けたコードに
     /// 任せる (無ければインタプリタ)。実行の判定材料は core の Entry が持つ
     pub fn jit_enable(&mut self) {
-        self.m.jit = Some(rustx86_core::jit::JitHook { enter: jit::enter });
+        self.m.jit = Some(rustx86_core::jit::JitHook {
+            enter: jit::enter,
+            // wasm生成器は凍結世代 — 予算照合を焼いていないので従来の入場規則
+            budget_aware: false,
+        });
     }
 
     /// 焼き上がってinstantiate待ちのジョブを1件取り出す (バイト列)。
