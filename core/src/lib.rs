@@ -12,8 +12,6 @@ pub mod snapshot;
 // テスト・wasm・cosim の参照はこれで壊れない
 pub use boot::{bzimage, elf};
 pub use mem::bus;
-// JITビュー (F1a、ADR-0008): 生成器 (wasmシェル/ネイティブランナー) の入口
-pub use cpu::dcache::jit;
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
@@ -185,33 +183,6 @@ pub struct Machine {
     pub post_trail: Vec<u8>,
     /// デコード済み命令キャッシュ (ADR-0007 P1a)。中身は cpu::dcache
     pub dcache: cpu::dcache::DecodeCache,
-    /// JIT実行フック (F1a、ADR-0008)。ランタイム (wasmシェル等) が挿す。
-    /// **機械の状態ではない** — スナップショットに入れない。
-    /// Noneなら従来どおり全部インタプリタ (常に動く退路)
-    pub jit: Option<cpu::dcache::jit::JitHook>,
-    /// JITブロックの中で実行された命令数の累計 (観測用)。
-    /// ブロック実行ごとに清算のnを1回足すだけ — 毎命令の帳簿には触れない。
-    /// tsc に対する割合が「JITのカバレッジ」— 次の梃子が語彙 (カバレッジ) か
-    /// 単価 (インライン化) かを、この数字で決める
-    pub jit_instrs: u64,
-    /// JITブロックに入った回数 (観測用)。jit_instrs / jit_entries = 平均ブロック長 —
-    /// カバレッジ不足の原因が「ブロックが短い」のか「入る頻度が低い」のかを切り分ける
-    pub jit_entries: u64,
-    /// JIT入場診断 (観測用、F1c-c3): ブロック頭に来たがJITに入らなかった理由別。
-    /// [0]=焼けたブロックが無い [1]=予算 (tick窓の残り) 不足 [2]=IRQ保留 [3]=tick直後
-    pub jit_denied: [u64; 4],
-    /// このブロック実行で走ってよい最大命令数 (F1c-c4)。budget_awareなランナーの
-    /// 生成コードが毎命令の手前で照合し、達したら「完全実行済みの途中退出」をする —
-    /// tickの位置が動かないので決定性は保たれる。enterの直前にcoreが書く
-    pub jit_budget: u32,
-    /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
-    /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
-    /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
-    pub op_counts: Vec<u64>,
-    /// dcacheヒット側の動的uop分布 (opstats時のみ)。(JIT語彙内の数, 語彙外のuop名→数)。
-    /// **JITの語彙をどこへ広げるかはこの実測で決める** — op_countsのuop版
-    #[cfg(feature = "opstats")]
-    pub jit_vocab_counts: (u64, std::collections::HashMap<&'static str, u64>),
     /// フォールト巻き戻し用の命令前CPU控え (常設の器 + この命令で控えたかの印)。
     /// **実行する側が「要るときだけ」控える**: フォールバック経路は従来どおり毎回、
     /// キャッシュ済みuopは「メモリに触るものだけ」— レジスタ間演算・jcc・lea等は
@@ -227,6 +198,10 @@ pub struct Machine {
     /// 読み取って、「飛ばした時間ぶんだけ実時間で待つ」ことでゲストの時計を
     /// 実時間に繋ぎ止める。忙しい実行は自由に速く、暇は実時間どおりに流れる
     pub idle_skipped: u64,
+    /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
+    /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
+    /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
+    pub op_counts: Vec<u64>,
     /// TLB — 線形→物理の変換の写し。**ページングの最大のボトルネックを消す。**
     ///
     /// ページング有効時、変換1回は2段の表 (PDE→PTE) を読む = 物理メモリ2回。
@@ -252,9 +227,8 @@ pub struct Machine {
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
 /// 権限 (書ける/ユーザーで触れる) はここに持ち、CPLとWPは引くたびに新しく見る
-/// **repr(C)はJITとの契約** (F1c-b): 生成コードが tag/base_flags を
-/// 直接オフセット参照する (jit::layout が番地とストライドを渡す)。
-/// フィールドの並び・ビット割当を変えるときは jit-native の生成器も一緒に
+/// repr(C)でフィールドの並びを安定させておく (外部ビューとの契約の名残 —
+/// 並び替えはレイアウト差の測定ノイズにもなるので触らない)
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TlbEntry {
@@ -333,14 +307,7 @@ impl Machine {
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
-            jit: None,
-            jit_instrs: 0,
-            jit_entries: 0,
-            jit_denied: [0; 4],
-            jit_budget: 0,
             op_counts: vec![0; 512],
-            #[cfg(feature = "opstats")]
-            jit_vocab_counts: (0, std::collections::HashMap::new()),
             console: Vec::new(),
             disk: None,
             first_fault: None,
@@ -417,12 +384,6 @@ impl Machine {
             }
             0xFFFF_FFFF
         }
-    }
-
-    /// TLB配列の先頭番地 (JITのレイアウト表用 — F1c-b)。
-    /// `Cell<TlbEntry>` は repr(transparent) なので TlbEntry の連続配列として読める
-    pub(crate) fn tlb_base_addr(&self) -> usize {
-        self.tlb.as_ptr() as usize
     }
 
     /// ページウォークからの A/D ビット持ち越し (&self経路用)。反映は [`Self::flush_ad`]

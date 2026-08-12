@@ -13,9 +13,6 @@
 use rustx86_core::Machine;
 use wasm_bindgen::prelude::*;
 
-// F1a: テンプレートJITの生成器 (JitOp→wasmバイト列) とヘルパ
-pub mod jit;
-
 #[wasm_bindgen]
 extern "C" {
     /// パニックの内容をJS側へ渡す口。ページが `globalThis.__rustx86_panic` を
@@ -49,20 +46,12 @@ pub fn install_panic_hook() {
 #[wasm_bindgen]
 pub struct Emulator {
     m: Machine,
-    /// JITランタイムの台帳 (F1a)。Boxなのはhookのctxとして住所を固定するため
-    jit_rt: Box<jit::JitRt>,
-    /// drain_job で取り出し中のジョブの (pa, gen, n)。install_blockで消費
-    pending_job: Option<(u32, u32)>,
 }
 
 impl Emulator {
-    /// 全コンストラクタの共通出口。JITの台帳を持たせる
+    /// 全コンストラクタの共通出口
     fn wrap(m: Machine) -> Emulator {
-        Emulator {
-            m,
-            jit_rt: Box::new(jit::JitRt::new()),
-            pending_job: None,
-        }
+        Emulator { m }
     }
 }
 
@@ -208,75 +197,10 @@ impl Emulator {
                 break;
             }
         }
-        // スライスの終わりに、熱くなったブロックを焼いてジョブへ積む (F1a)。
-        // instantiateはJS側がやる — drain_jobs で取り出して据え付け直す
-        if self.m.jit.is_some() {
-            self.jit_rt.compile_pending(&mut self.m);
-        }
     }
 
-    // ---------- JIT (F1a、ADR-0008) ----------
-
-    /// JITを有効化する。coreにフックを挿し、以後ブロック頭で焼けたコードに
-    /// 任せる (無ければインタプリタ)。実行の判定材料は core の Entry が持つ
-    pub fn jit_enable(&mut self) {
-        self.m.jit = Some(rustx86_core::jit::JitHook {
-            enter: jit::enter,
-            // wasm生成器は凍結世代 — 予算照合を焼いていないので従来の入場規則
-            budget_aware: false,
-        });
-    }
-
-    /// 焼き上がってinstantiate待ちのジョブを1件取り出す (バイト列)。
-    /// JS側が WebAssembly.Instance を作り、関数テーブルへ table.set し、
-    /// そのスロット番号で install_block を呼ぶ
-    pub fn drain_job(&mut self) -> Option<js_sys::Uint8Array> {
-        let job = self.jit_rt.take_job()?;
-        let bytes = js_sys::Uint8Array::from(job.bytes.as_slice());
-        self.pending_job = Some((job.pa, job.n));
-        Some(bytes)
-    }
-
-    /// JS が table.set したスロット番号を受け取り、**core の Entry** へ据える。
-    /// 以後そのブロック頭の訪問は Entry 読みだけでJIT入口を判定できる (hashmap不要)
-    pub fn install_block(&mut self, slot: u32) {
-        if let Some((pa, n)) = self.pending_job.take() {
-            self.m.dcache.set_jit(pa, slot, n as u16);
-            self.jit_rt.note_installed();
-        }
-    }
-
-    /// instantiate に失敗したジョブを捨てる (据え付けない)。
-    /// coreはインタプリタで走り続ける — 退路は常にある
-    pub fn discard_job(&mut self) {
-        self.pending_job = None;
-    }
-
-    /// 据え付け済みブロック数 (観測用)
-    pub fn jit_installed(&self) -> usize {
-        self.jit_rt.installed()
-    }
-
-    /// JITブロック内で実行された命令数の累計 (観測用)。
-    /// tsc() に対する割合が「JITのカバレッジ」
-    pub fn jit_instrs(&self) -> f64 {
-        self.m.jit_instrs as f64
-    }
-
-    /// JITブロックに入った回数 (観測用)。jit_instrs/jit_entries = 平均ブロック長
-    pub fn jit_entries(&self) -> f64 {
-        self.m.jit_entries as f64
-    }
-
-    /// core が call_indirect で叩く関数テーブル (`__indirect_function_table`)。
-    /// JS はここへ生成ブロックの export "b" を table.set し、その添字を
-    /// install_block へ渡す — JS境界を介さずブロックが呼ばれる (F1a call_indirect)
-    pub fn jit_function_table(&self) -> JsValue {
-        wasm_bindgen::function_table()
-    }
-
-    /// TSC (実行した仮想命令数の累計)。決定性ゲートの精密な物差し —
-    /// JIT on/off で完全一致すべき値。f64は2^53まで無損失で今回の桁は収まる
+    /// TSC (実行した仮想命令数の累計)。決定性の精密な物差し。
+    /// f64は2^53まで無損失で今回の桁は収まる
     pub fn tsc(&self) -> f64 {
         self.m.cpu.tsc as f64
     }
