@@ -91,6 +91,66 @@ unsafe extern "C" fn h_leave(m: *mut Machine) -> i32 {
     (*m).jit_try_leave() as i32
 }
 
+// ---- 語彙v2 (F1c-b2) のヘルパ ----
+
+/// shift/rot r32。フラグはshift_rot (意味論の原本) の中で完結。#PF不能
+unsafe extern "C" fn h_shift_r(m: *mut Machine, kind: i32, reg: i32, count: i32) {
+    let m = &mut *m;
+    let a = m.cpu.regs[reg as usize];
+    let v = cpu::shift::shift_rot(&mut m.cpu, kind as u8, a, count as u8, 32);
+    m.cpu.regs[reg as usize] = v;
+}
+
+/// 8bit読み。成功 = 値 / 脱出 = 1<<32
+unsafe extern "C" fn h_ld8(m: *const Machine, seg: i32, off: i32) -> i64 {
+    let m = &*m;
+    let la = m.cpu.lin(seg as usize, off as u32);
+    match m.jit_try_read8(la) {
+        Some(v) => v as i64,
+        None => 1i64 << 32,
+    }
+}
+
+/// 16bit読み。成功 = 値 / 脱出 = 1<<32 (跨ぎ含む)
+unsafe extern "C" fn h_ld16(m: *const Machine, seg: i32, off: i32) -> i64 {
+    let m = &*m;
+    let la = m.cpu.lin(seg as usize, off as u32);
+    match m.jit_try_read16(la) {
+        Some(v) => v as i64,
+        None => 1i64 << 32,
+    }
+}
+
+/// F6 kind0-3 (test imm/not/neg) のレジスタ形。NEGのCF上書きが遅延材料に
+/// 畳めないので、インタプリタ (dcache exec の Grp3b) をそのまま写す。#PF不能
+unsafe extern "C" fn h_grp3b8_r(m: *mut Machine, kind: i32, reg: i32, imm: i32) {
+    let m = &mut *m;
+    let r = reg as usize;
+    let a = if r < 4 {
+        m.cpu.regs[r] as u8
+    } else {
+        (m.cpu.regs[r - 4] >> 8) as u8
+    };
+    let set8 = |m: &mut Machine, v: u8| {
+        if r < 4 {
+            m.cpu.regs[r] = (m.cpu.regs[r] & !0xFF) | v as u32;
+        } else {
+            m.cpu.regs[r - 4] = (m.cpu.regs[r - 4] & !0xFF00) | (v as u32) << 8;
+        }
+    };
+    match kind {
+        0 | 1 => {
+            cpu::alu::alu8(&mut m.cpu, 4, a, imm as u8);
+        }
+        2 => set8(m, !a),
+        _ => {
+            let v = cpu::alu::alu8(&mut m.cpu, 5, 0, a);
+            m.cpu.set_flag(cpu::CF, a != 0);
+            set8(m, v);
+        }
+    }
+}
+
 /// ブロック関数の形: 引数なし → 実行した命令数 (全数未満 = フォールト脱出)
 pub type BlockFn = unsafe extern "C" fn() -> u32;
 
@@ -131,6 +191,9 @@ struct Sigs {
     push32: cranelift_codegen::ir::SigRef,
     pop32: cranelift_codegen::ir::SigRef,
     leave: cranelift_codegen::ir::SigRef,
+    /// (m, i32, i32, i32) -> なし相当 — Craneliftは戻り値必須ではないが
+    /// 統一のためi32を返させず、戻り無しシグネチャで呼ぶ
+    quad_void: cranelift_codegen::ir::SigRef,
 }
 
 fn sig(call_conv: CallConv, params: &[types::Type], ret: types::Type) -> Signature {
@@ -139,6 +202,14 @@ fn sig(call_conv: CallConv, params: &[types::Type], ret: types::Type) -> Signatu
         s.params.push(AbiParam::new(p));
     }
     s.returns.push(AbiParam::new(ret));
+    s
+}
+
+fn sig_void(call_conv: CallConv, params: &[types::Type]) -> Signature {
+    let mut s = Signature::new(call_conv);
+    for &p in params {
+        s.params.push(AbiParam::new(p));
+    }
     s
 }
 
@@ -190,6 +261,132 @@ impl Tr<'_, '_> {
         let callee = self.fb.ins().iconst(types::I64, f as i64);
         let call = self.fb.ins().call_indirect(sr, callee, args);
         self.fb.inst_results(call)[0]
+    }
+    fn helper0(&mut self, sr: cranelift_codegen::ir::SigRef, f: usize, args: &[Value]) {
+        let callee = self.fb.ins().iconst(types::I64, f as i64);
+        self.fb.ins().call_indirect(sr, callee, args);
+    }
+
+    // ---- 8bitレジスタ (AH形: 4..7は regs[r-4] のバイト1) ----
+    fn reg8v(&mut self, r: u8) -> Value {
+        if r < 4 {
+            let v = self.reg(r);
+            self.fb.ins().band_imm(v, 0xFF)
+        } else {
+            let v = self.reg(r - 4);
+            let s = self.fb.ins().ushr_imm(v, 8);
+            self.fb.ins().band_imm(s, 0xFF)
+        }
+    }
+    fn set_reg8v(&mut self, r: u8, v: Value) {
+        if r < 4 {
+            let cur = self.reg(r);
+            let hi = self.fb.ins().band_imm(cur, !0xFFi64);
+            let n = self.fb.ins().bor(hi, v);
+            self.set_reg(r, n);
+        } else {
+            let cur = self.reg(r - 4);
+            let keep = self.fb.ins().band_imm(cur, !0xFF00i64);
+            let sh = self.fb.ins().ishl_imm(v, 8);
+            let n = self.fb.ins().bor(keep, sh);
+            self.set_reg(r - 4, n);
+        }
+    }
+
+    /// 8bit ALU共通部 (alu_lazyのw=0を写す): 演算 (0xFFマスク) + cc材料 (cc_w=0)。
+    /// 返り値 = r。dstへの書き戻しは呼ぶ側 (kind7は書かない約束も呼ぶ側)
+    fn alu8_core(&mut self, kind: u8, a: Value, b: Value) -> Value {
+        let cin = if kind == 2 || kind == 3 {
+            self.call_cf()
+        } else {
+            self.c32(0)
+        };
+        let r0 = match kind {
+            0 | 2 => {
+                let s = self.fb.ins().iadd(a, b);
+                self.fb.ins().iadd(s, cin)
+            }
+            1 => self.fb.ins().bor(a, b),
+            3 | 5 | 7 => {
+                let s = self.fb.ins().isub(a, b);
+                self.fb.ins().isub(s, cin)
+            }
+            4 => self.fb.ins().band(a, b),
+            _ => self.fb.ins().bxor(a, b),
+        };
+        let r = self.fb.ins().band_imm(r0, 0xFF);
+        self.st8_at(self.lay.cc_op, kind);
+        self.st8_at(self.lay.cc_w, 0);
+        self.st32_at(self.lay.cc_a, a);
+        self.st32_at(self.lay.cc_b, b);
+        self.st32_at(self.lay.cc_cin, cin);
+        self.st32_at(self.lay.cc_r, r);
+        r
+    }
+
+    /// 8bitロード: TLBヒットならインライン (跨ぎ検査不要 — 1バイト)、外れたらヘルパ
+    fn emit_ld8(&mut self, mem: &JitMem) -> Value {
+        let (off, la) = self.lin_val(mem);
+        let (pa, slow) = self.tlb_probe8(la);
+        let slow_b = self.fb.create_block();
+        let fast_b = self.fb.create_block();
+        let cont = self.fb.create_block();
+        self.fb.append_block_param(cont, types::I32);
+        self.fb.ins().brif(slow, slow_b, &[], fast_b, &[]);
+        self.fb.switch_to_block(fast_b);
+        self.fb.seal_block(fast_b);
+        let pa64 = self.fb.ins().uextend(types::I64, pa);
+        let membase = self.addr(self.lay.mem);
+        let p = self.fb.ins().iadd(membase, pa64);
+        let v = self.fb.ins().uload8(types::I32, F, p, 0);
+        self.fb.ins().jump(cont, &[v]);
+        self.fb.switch_to_block(slow_b);
+        self.fb.seal_block(slow_b);
+        let m = self.m_ptr();
+        let seg = self.c32(mem.seg as u32);
+        let v64 = self.helper1(self.sigs.ld32, h_ld8 as usize, &[m, seg, off]);
+        let sv = self.check_v64(v64);
+        self.fb.ins().jump(cont, &[sv]);
+        self.fb.switch_to_block(cont);
+        self.fb.seal_block(cont);
+        self.fb.block_params(cont)[0]
+    }
+
+    /// 8bit用のTLB判定 (跨ぎ検査なし、RAM境界は+0)
+    fn tlb_probe8(&mut self, la: Value) -> (Value, Value) {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        let lo = self.fb.ins().band_imm(la, 0xFFF);
+        let vpn = self.fb.ins().ushr_imm(la, 12);
+        let slot = self.fb.ins().band_imm(vpn, (self.lay.tlb_slots - 1) as i64);
+        let slot64 = self.fb.ins().uextend(types::I64, slot);
+        let stride = self.fb.ins().imul_imm(slot64, 12);
+        let tlb = self.addr(self.lay.tlb);
+        let e = self.fb.ins().iadd(tlb, stride);
+        let tag = self.fb.ins().load(types::I32, F, e, 0);
+        let miss = self.fb.ins().icmp(IntCC::NotEqual, tag, vpn);
+        let bf = self.fb.ins().load(types::I32, F, e, 4);
+        let got = self.fb.ins().band_imm(bf, rustx86_core::jit::TLB_U as i64);
+        let noperm = self.fb.ins().icmp_imm(IntCC::Equal, got, 0);
+        let mask = self.c32(0xFFFF_F000);
+        let base = self.fb.ins().band(bf, mask);
+        let pa = self.fb.ins().bor(base, lo);
+        let oob = self.fb.ins().icmp_imm(
+            IntCC::UnsignedGreaterThanOrEqual,
+            pa,
+            self.lay.mem_len as i64,
+        );
+        let s1 = self.fb.ins().bor(miss, noperm);
+        let slow = self.fb.ins().bor(s1, oob);
+        (pa, slow)
+    }
+
+    /// 16bitロード: ヘルパのみ (頻度2M — インライン化は分布が要求してから)
+    fn emit_ld16(&mut self, mem: &JitMem) -> Value {
+        let (off, _la) = self.lin_val(mem);
+        let m = self.m_ptr();
+        let seg = self.c32(mem.seg as u32);
+        let v64 = self.helper1(self.sigs.ld32, h_ld16 as usize, &[m, seg, off]);
+        self.check_v64(v64)
     }
     fn call_cf(&mut self) -> Value {
         let m = self.m_ptr();
@@ -263,12 +460,12 @@ impl Tr<'_, '_> {
     fn tlb_probe(&mut self, la: Value, need: u32) -> (Value, Value) {
         use cranelift_codegen::ir::condcodes::IntCC;
         let lo = self.fb.ins().band_imm(la, 0xFFF);
-        let cross = self.fb.ins().icmp_imm(IntCC::UnsignedGreaterThan, lo, 0xFFC);
-        let vpn = self.fb.ins().ushr_imm(la, 12);
-        let slot = self
+        let cross = self
             .fb
             .ins()
-            .band_imm(vpn, (self.lay.tlb_slots - 1) as i64);
+            .icmp_imm(IntCC::UnsignedGreaterThan, lo, 0xFFC);
+        let vpn = self.fb.ins().ushr_imm(la, 12);
+        let slot = self.fb.ins().band_imm(vpn, (self.lay.tlb_slots - 1) as i64);
         let slot64 = self.fb.ins().uextend(types::I64, slot);
         let stride = self.fb.ins().imul_imm(slot64, 12);
         let tlb = self.addr(self.lay.tlb);
@@ -296,10 +493,11 @@ impl Tr<'_, '_> {
     fn vram_hit(&mut self, pa: Value) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
         let hi3 = self.fb.ins().iadd_imm(pa, 3);
-        let a = self
-            .fb
-            .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, hi3, self.lay.vram_lo as i64);
+        let a = self.fb.ins().icmp_imm(
+            IntCC::UnsignedGreaterThanOrEqual,
+            hi3,
+            self.lay.vram_lo as i64,
+        );
         let b = self
             .fb
             .ins()
@@ -574,6 +772,98 @@ impl Tr<'_, '_> {
                 self.set_reg(0, r);
                 self.set_reg(reg, a);
             }
+            // ---- 語彙v2 (F1c-b2) ----
+            JitOp::ShiftRI { kind, reg, count } => {
+                let m = self.m_ptr();
+                let k = self.c32(kind as u32);
+                let r = self.c32(reg as u32);
+                let c = self.c32(count as u32);
+                self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
+            }
+            JitOp::ShiftRC { kind, reg } => {
+                // countはCL (ECXの下位8bit) を実行時に読む
+                let m = self.m_ptr();
+                let k = self.c32(kind as u32);
+                let r = self.c32(reg as u32);
+                let c = self.reg8v(1);
+                self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
+            }
+            JitOp::MovzxBR { dst, src8 } => {
+                let v = self.reg8v(src8);
+                self.set_reg(dst, v);
+            }
+            JitOp::MovzxBM { dst, mem } => {
+                let v = self.emit_ld8(&mem);
+                self.set_reg(dst, v);
+            }
+            JitOp::MovzxWR { dst, src } => {
+                let v = self.reg(src);
+                let v = self.fb.ins().band_imm(v, 0xFFFF);
+                self.set_reg(dst, v);
+            }
+            JitOp::MovzxWM { dst, mem } => {
+                let v = self.emit_ld16(&mem);
+                self.set_reg(dst, v);
+            }
+            JitOp::Alu8RR { kind, dst8, src8 } => {
+                let a = self.reg8v(dst8);
+                let b = self.reg8v(src8);
+                let r = self.alu8_core(kind, a, b);
+                if kind != 7 {
+                    self.set_reg8v(dst8, r);
+                }
+            }
+            JitOp::Alu8RI { kind, dst8, imm } => {
+                let a = self.reg8v(dst8);
+                let b = self.c32(imm as u32);
+                let r = self.alu8_core(kind, a, b);
+                if kind != 7 {
+                    self.set_reg8v(dst8, r);
+                }
+            }
+            JitOp::Alu8RM { kind, dst8, mem } => {
+                let a = self.reg8v(dst8);
+                let b = self.emit_ld8(&mem);
+                let r = self.alu8_core(kind, a, b);
+                if kind != 7 {
+                    self.set_reg8v(dst8, r);
+                }
+            }
+            JitOp::Cmp8MR { mem, reg8 } => {
+                let a = self.emit_ld8(&mem);
+                let b = self.reg8v(reg8);
+                self.alu8_core(7, a, b);
+            }
+            JitOp::Cmp8MI { mem, imm } => {
+                let a = self.emit_ld8(&mem);
+                let b = self.c32(imm as u32);
+                self.alu8_core(7, a, b);
+            }
+            JitOp::Test8RR { a8, b8 } => {
+                let a = self.reg8v(a8);
+                let b = self.reg8v(b8);
+                self.alu8_core(4, a, b);
+            }
+            JitOp::Test8MR { mem, reg8 } => {
+                let a = self.emit_ld8(&mem);
+                let b = self.reg8v(reg8);
+                self.alu8_core(4, a, b);
+            }
+            JitOp::Grp3b8R { kind, reg8, imm } => {
+                let m = self.m_ptr();
+                let k = self.c32(kind as u32);
+                let r = self.c32(reg8 as u32);
+                let i = self.c32(imm as u32);
+                self.helper0(self.sigs.quad_void, h_grp3b8_r as usize, &[m, k, r, i]);
+            }
+            JitOp::Mov8RR { dst8, src8 } => {
+                let v = self.reg8v(src8);
+                self.set_reg8v(dst8, v);
+            }
+            JitOp::Mov8RM { dst8, mem } => {
+                let v = self.emit_ld8(&mem);
+                self.set_reg8v(dst8, v);
+            }
             JitOp::Jcc { .. } | JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret => {
                 unreachable!("終端はtranslateの出口で扱う")
             }
@@ -616,6 +906,10 @@ fn translate(
         push32: fb.import_signature(sig(cc, &[types::I64, types::I32], types::I32)),
         pop32: fb.import_signature(sig(cc, &[types::I64], types::I64)),
         leave: fb.import_signature(sig(cc, &[types::I64], types::I32)),
+        quad_void: fb.import_signature(sig_void(
+            cc,
+            &[types::I64, types::I32, types::I32, types::I32],
+        )),
     };
 
     let mut tr = Tr {
@@ -806,7 +1100,7 @@ impl JitRt {
             let maddr = m as *const Machine as usize;
             let mut blocks = Vec::new();
             for pa in hot {
-                for blk in jit::collect_run(m, pa, 32, 8) {
+                for blk in jit::collect_run_caps(m, pa, 32, 8, jit::CAP_VOCAB2) {
                     if blk.ops.len() < 2 {
                         continue; // 1命令ブロックはディスパッチ税で負ける
                     }

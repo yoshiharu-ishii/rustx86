@@ -58,17 +58,37 @@ impl From<MemRef> for JitMem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitOp {
     /// mov r32, imm32
-    MovRI { dst: u8, imm: u32 },
+    MovRI {
+        dst: u8,
+        imm: u32,
+    },
     /// mov r32, r32
-    MovRR { dst: u8, src: u8 },
+    MovRR {
+        dst: u8,
+        src: u8,
+    },
     /// ALU r32, r32 — dst = alu(kind, dst, src)。kind7 (CMP) はdstを書かない
-    AluRR { kind: u8, dst: u8, src: u8 },
+    AluRR {
+        kind: u8,
+        dst: u8,
+        src: u8,
+    },
     /// ALU r32, imm32 (0x83の符号拡張は済んでいる)
-    AluRI { kind: u8, dst: u8, imm: u32 },
+    AluRI {
+        kind: u8,
+        dst: u8,
+        imm: u32,
+    },
     /// test r32, r32 (フラグだけ)
-    TestRR { a: u8, b: u8 },
+    TestRR {
+        a: u8,
+        b: u8,
+    },
     /// inc/dec r32 (CFは不変)
-    IncDec { reg: u8, dec: bool },
+    IncDec {
+        reg: u8,
+        dec: bool,
+    },
     /// lea r32, [base + index<<scale + disp] — 計算だけ、メモリに触らない
     Lea {
         dst: u8,
@@ -78,43 +98,178 @@ pub enum JitOp {
         disp: u32,
     },
     /// mov r32, [mem] (F1b-1。フォールトしそうなら脱出)
-    MovRM { dst: u8, mem: JitMem },
+    MovRM {
+        dst: u8,
+        mem: JitMem,
+    },
     /// ALU r32, [mem] — dst = alu(kind, dst, mem)。kind7 (CMP) はdstを書かない
-    AluRM { kind: u8, dst: u8, mem: JitMem },
+    AluRM {
+        kind: u8,
+        dst: u8,
+        mem: JitMem,
+    },
     /// cmp [mem], r32 (ALUグリッドのrm=dst形でロードだけで済むkind7)
-    CmpMR { mem: JitMem, reg: u8 },
+    CmpMR {
+        mem: JitMem,
+        reg: u8,
+    },
     /// cmp [mem], imm32 (Grp1のkind7 — 同上)
-    CmpMI { mem: JitMem, imm: u32 },
+    CmpMI {
+        mem: JitMem,
+        imm: u32,
+    },
     /// test [mem], r32 (フラグだけ)
-    TestMR { mem: JitMem, reg: u8 },
+    TestMR {
+        mem: JitMem,
+        reg: u8,
+    },
     /// mov [mem], r32 (F1b-2。フォールトしそうなら書く前に脱出)
-    StoreMR { mem: JitMem, src: u8 },
+    StoreMR {
+        mem: JitMem,
+        src: u8,
+    },
     /// mov [mem], imm32
-    StoreMI { mem: JitMem, imm: u32 },
+    StoreMI {
+        mem: JitMem,
+        imm: u32,
+    },
     /// ALU [mem], r32 — read→alu→write をRustヘルパ1呼びで (kind7は来ない)
-    AluMR { kind: u8, mem: JitMem, reg: u8 },
+    AluMR {
+        kind: u8,
+        mem: JitMem,
+        reg: u8,
+    },
     /// ALU [mem], imm32
-    AluMI { kind: u8, mem: JitMem, imm: u32 },
+    AluMI {
+        kind: u8,
+        mem: JitMem,
+        imm: u32,
+    },
     /// push r32 (F1b-3。SP更新前に脱出できる — push32と同じ「成功時だけ確定」)
-    PushR { src: u8 },
+    PushR {
+        src: u8,
+    },
     /// push imm32
-    PushI { imm: u32 },
+    PushI {
+        imm: u32,
+    },
     /// pop r32
-    PopR { dst: u8 },
+    PopR {
+        dst: u8,
+    },
     /// leave (SP←BP、BP←pop)
     Leave,
     /// xchg eAX, r32 (レジスタ間 — 0x90 nop = 自分と交換も含む)
-    XchgA { reg: u8 },
+    XchgA {
+        reg: u8,
+    },
     /// 終端: 条件分岐 (取られたら ip += rel は命令長込みの相対)
-    Jcc { cc: u8, rel: u32 },
+    Jcc {
+        cc: u8,
+        rel: u32,
+    },
     /// 終端: 無条件相対ジャンプ
-    Jmp { rel: u32 },
+    Jmp {
+        rel: u32,
+    },
     /// 終端: call rel — 戻り番地 (頭+ここまでの長さ) をpushしてから ip += len+rel。
     /// pushが脱出点 (F1b-3)
-    CallRel { rel: u32 },
+    CallRel {
+        rel: u32,
+    },
     /// 終端: ret — pop した値が次のip。popが脱出点
     Ret,
+    // ---- ここから語彙v2 (F1c-b2、CAP_VOCAB2)。wasm生成器 (凍結) には
+    //      collectのcapsで渡らない — ネイティブ専用の拡張 ----
+    /// shift/rot r32 (imm形)。フラグはヘルパ内で完結 (shift_rotの意味論は
+    /// eager — cc材料の形が違うので畳まない。#PF不能なので脱出も不要)
+    ShiftRI {
+        kind: u8,
+        reg: u8,
+        count: u8,
+    },
+    /// shift/rot r32, CL。countは生成コードがCLから読んで渡す
+    ShiftRC {
+        kind: u8,
+        reg: u8,
+    },
+    /// movzx r32, r8 (レジスタ形。src8は8bitレジスタ番号 — 4..7はAH形)
+    MovzxBR {
+        dst: u8,
+        src8: u8,
+    },
+    /// movzx r32, [m8]
+    MovzxBM {
+        dst: u8,
+        mem: JitMem,
+    },
+    /// movzx r32, r16 (低16bit)
+    MovzxWR {
+        dst: u8,
+        src: u8,
+    },
+    /// movzx r32, [m16]
+    MovzxWM {
+        dst: u8,
+        mem: JitMem,
+    },
+    /// ALU r8, r8 (dst8/src8は8bitレジスタ番号)。kind7 (CMP) はdstを書かない
+    Alu8RR {
+        kind: u8,
+        dst8: u8,
+        src8: u8,
+    },
+    /// ALU r8, imm8
+    Alu8RI {
+        kind: u8,
+        dst8: u8,
+        imm: u8,
+    },
+    /// ALU r8, [m8] — dst8 = alu(dst8, mem)。ロードが脱出点
+    Alu8RM {
+        kind: u8,
+        dst8: u8,
+        mem: JitMem,
+    },
+    /// cmp [m8], r8 / imm8 (ロードだけで済むkind7)
+    Cmp8MR {
+        mem: JitMem,
+        reg8: u8,
+    },
+    Cmp8MI {
+        mem: JitMem,
+        imm: u8,
+    },
+    /// test r8, r8 / test [m8], r8 (フラグだけ)
+    Test8RR {
+        a8: u8,
+        b8: u8,
+    },
+    Test8MR {
+        mem: JitMem,
+        reg8: u8,
+    },
+    /// F6 kind0-3 (test imm/not/neg) のレジスタ形。NEGのCF上書きが
+    /// 遅延材料に畳めないのでヘルパで完結 (#PF不能・脱出不要)
+    Grp3b8R {
+        kind: u8,
+        reg8: u8,
+        imm: u8,
+    },
+    /// mov r8, r8 / mov r8, [m8]
+    Mov8RR {
+        dst8: u8,
+        src8: u8,
+    },
+    Mov8RM {
+        dst8: u8,
+        mem: JitMem,
+    },
 }
+
+/// 語彙の世代 (collectに渡す)。wasm生成器は凍結時点のF1B、ネイティブはV2
+pub const CAP_F1B: u32 = 0;
+pub const CAP_VOCAB2: u32 = 1;
 
 /// 焼き候補ブロック: 先頭物理アドレスと (命令長, op) の列。
 /// 終端は Jcc/Jmp、またはJIT対象外の命令の手前
@@ -125,7 +280,128 @@ pub struct JitBlock {
 }
 
 /// Uop 1個をJITの語彙へ。(op, これで終端か)。対象外は None
-fn convert(u: &Uop) -> Option<(JitOp, bool)> {
+fn convert(u: &Uop, caps: u32) -> Option<(JitOp, bool)> {
+    // ---- 語彙v2 (ネイティブ専用)。先に引き受け、外れたらF1B語彙へ ----
+    if caps & CAP_VOCAB2 != 0 {
+        let v2 = match *u {
+            Uop::ShiftRmImm {
+                kind,
+                rm: Rm::Reg(reg),
+                count,
+            } => Some(JitOp::ShiftRI { kind, reg, count }),
+            Uop::ShiftRmCl {
+                kind,
+                rm: Rm::Reg(reg),
+            } => Some(JitOp::ShiftRC { kind, reg }),
+            Uop::MovzxB {
+                reg,
+                rm: Rm::Reg(src8),
+            } => Some(JitOp::MovzxBR { dst: reg, src8 }),
+            Uop::MovzxB {
+                reg,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::MovzxBM {
+                dst: reg,
+                mem: mr.into(),
+            }),
+            Uop::MovzxW {
+                reg,
+                rm: Rm::Reg(src),
+            } => Some(JitOp::MovzxWR { dst: reg, src }),
+            Uop::MovzxW {
+                reg,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::MovzxWM {
+                dst: reg,
+                mem: mr.into(),
+            }),
+            Uop::Alu8RmR {
+                kind,
+                rm: Rm::Reg(dst8),
+                reg,
+            } => Some(JitOp::Alu8RR {
+                kind,
+                dst8,
+                src8: reg,
+            }),
+            Uop::Alu8RRm {
+                kind,
+                reg,
+                rm: Rm::Reg(src8),
+            } => Some(JitOp::Alu8RR {
+                kind,
+                dst8: reg,
+                src8,
+            }),
+            Uop::Alu8RRm {
+                kind,
+                reg,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::Alu8RM {
+                kind,
+                dst8: reg,
+                mem: mr.into(),
+            }),
+            // rm=dst形のmem: kind7 (CMP) はロードだけ、他 (RMW8) は語彙外のまま
+            Uop::Alu8RmR {
+                kind: 7,
+                rm: Rm::Mem(mr),
+                reg,
+            } => Some(JitOp::Cmp8MR {
+                mem: mr.into(),
+                reg8: reg,
+            }),
+            Uop::Grp18RmImm {
+                kind,
+                rm: Rm::Reg(dst8),
+                imm,
+            } => Some(JitOp::Alu8RI { kind, dst8, imm }),
+            Uop::Grp18RmImm {
+                kind: 7,
+                rm: Rm::Mem(mr),
+                imm,
+            } => Some(JitOp::Cmp8MI {
+                mem: mr.into(),
+                imm,
+            }),
+            Uop::Alu8AImm { kind, imm } => Some(JitOp::Alu8RI { kind, dst8: 0, imm }),
+            Uop::Test8RmR {
+                rm: Rm::Reg(a8),
+                reg,
+            } => Some(JitOp::Test8RR { a8, b8: reg }),
+            Uop::Test8RmR {
+                rm: Rm::Mem(mr),
+                reg,
+            } => Some(JitOp::Test8MR {
+                mem: mr.into(),
+                reg8: reg,
+            }),
+            Uop::Grp3b {
+                kind,
+                rm: Rm::Reg(reg8),
+                imm,
+            } if kind < 4 => Some(JitOp::Grp3b8R { kind, reg8, imm }),
+            Uop::Mov8RmR {
+                rm: Rm::Reg(dst8),
+                reg,
+            } => Some(JitOp::Mov8RR { dst8, src8: reg }),
+            Uop::Mov8RRm {
+                reg,
+                rm: Rm::Reg(src8),
+            } => Some(JitOp::Mov8RR { dst8: reg, src8 }),
+            Uop::Mov8RRm {
+                reg,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::Mov8RM {
+                dst8: reg,
+                mem: mr.into(),
+            }),
+            _ => None,
+        };
+        if let Some(op) = v2 {
+            return Some((op, false));
+        }
+    }
     let op = match *u {
         Uop::MovRImm { reg, imm } => JitOp::MovRI { dst: reg, imm },
         Uop::MovRmR {
@@ -270,7 +546,7 @@ fn convert(u: &Uop) -> Option<(JitOp, bool)> {
 /// このuopがJITの語彙に入っているか (opstatsの分布計測用)
 #[cfg(feature = "opstats")]
 pub(crate) fn in_vocab(u: &Uop) -> bool {
-    convert(u).is_some()
+    convert(u, CAP_VOCAB2).is_some()
 }
 
 /// `pa` から**走路ごと**切り出す (F1b-3のタイル焼き)。
@@ -282,13 +558,24 @@ pub(crate) fn in_vocab(u: &Uop) -> bool {
 /// 実行時のタイル張り (head_pending) が入口を作り、こちらが中身を量産する。
 /// 熱い頭1つから走路全体が一度に焼ける (セグメントごとの再加熱1024回が消える)
 pub fn collect_run(m: &Machine, pa: u32, cap: usize, max_blocks: usize) -> Vec<JitBlock> {
+    collect_run_caps(m, pa, cap, max_blocks, CAP_F1B)
+}
+
+/// capsつき版 (ネイティブランナーは CAP_VOCAB2 を渡す)
+pub fn collect_run_caps(
+    m: &Machine,
+    pa: u32,
+    cap: usize,
+    max_blocks: usize,
+    caps: u32,
+) -> Vec<JitBlock> {
     let mut blocks = Vec::new();
     let mut p = pa;
     // guard: 語彙外スキップの空回り対策 (ページ内で高々数十回)
     let mut guard = 0;
     while blocks.len() < max_blocks && guard < 64 {
         guard += 1;
-        if let Some(blk) = collect_block(m, p, cap) {
+        if let Some(blk) = collect_block_caps(m, p, cap, caps) {
             let end = blk
                 .head_pa
                 .wrapping_add(blk.ops.iter().map(|&(l, _)| l as u32).sum::<u32>());
@@ -340,13 +627,18 @@ pub fn collect_run(m: &Machine, pa: u32, cap: usize, max_blocks: usize) -> Vec<J
 /// 対象外の命令・ページ末・`cap` で打ち切り。1命令も取れなければ None。
 /// **デコードするだけ** — 機械の状態は変えない (&Machine)
 pub fn collect_block(m: &Machine, pa: u32, cap: usize) -> Option<JitBlock> {
+    collect_block_caps(m, pa, cap, CAP_F1B)
+}
+
+/// capsつき版
+pub fn collect_block_caps(m: &Machine, pa: u32, cap: usize, caps: u32) -> Option<JitBlock> {
     let mut ops = Vec::new();
     let mut p = pa;
     while ops.len() < cap {
         let Some((len, uop)) = decode::decode_at(m, p) else {
             break; // デコード不能の手前まで
         };
-        let Some((op, term)) = convert(&uop) else {
+        let Some((op, term)) = convert(&uop, caps) else {
             break; // JIT対象外の手前まで
         };
         ops.push((len, op));
