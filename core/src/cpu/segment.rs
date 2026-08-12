@@ -8,7 +8,10 @@
 use super::*;
 use crate::Machine;
 
-/// セグメントの隠しレジスタ1本分
+/// セグメントの隠しレジスタ1本分。
+/// **repr(C)はJITとの契約** (F1c-b): 生成コードが base をオフセット0で
+/// 直接読む (ストライドは jit::layout が渡す)
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegHidden {
     pub base: u32,

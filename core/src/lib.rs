@@ -245,6 +245,10 @@ pub struct Machine {
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
 /// 権限 (書ける/ユーザーで触れる) はここに持ち、CPLとWPは引くたびに新しく見る
+/// **repr(C)はJITとの契約** (F1c-b): 生成コードが tag/base_flags を
+/// 直接オフセット参照する (jit::layout が番地とストライドを渡す)。
+/// フィールドの並び・ビット割当を変えるときは jit-native の生成器も一緒に
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct TlbEntry {
     /// 仮想ページ番号 (la >> 12)。`INVALID` は空きスロット
@@ -404,6 +408,12 @@ impl Machine {
             }
             0xFFFF_FFFF
         }
+    }
+
+    /// TLB配列の先頭番地 (JITのレイアウト表用 — F1c-b)。
+    /// `Cell<TlbEntry>` は repr(transparent) なので TlbEntry の連続配列として読める
+    pub(crate) fn tlb_base_addr(&self) -> usize {
+        self.tlb.as_ptr() as usize
     }
 
     /// ページウォークからの A/D ビット持ち越し (&self経路用)。反映は [`Self::flush_ad`]
