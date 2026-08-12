@@ -232,6 +232,21 @@ struct Tr<'a, 'b> {
     /// ヘルパの前**で書き戻すのが規律 (脱出モデルとの整合はこれで保つ)
     live: u8,
     dirty: u8,
+    /// cc遅延化 (F1c-d4): ALUのcc材料6ストアを消費点まで遅延する。
+    /// 消費点 = 脱出・h_cond・call_cf・ccを触るヘルパ・終端。
+    /// 後続ALUが上書きすれば6ストアは丸ごと消える (デッドストア除去)
+    cc: Option<PendCc>,
+}
+
+/// 遅延中のcc材料 (op/wはcompile-time定数、値はSSA Value)
+#[derive(Clone, Copy)]
+struct PendCc {
+    op: u8,
+    w: u8,
+    a: Value,
+    b: Value,
+    cin: Value,
+    r: Value,
 }
 
 const F: MemFlags = MemFlags::trusted();
@@ -300,6 +315,27 @@ impl Tr<'_, '_> {
         self.live &= !mask;
         self.dirty &= !mask;
     }
+
+    /// 遅延中のccを**今いるブロックに**書き戻す。compile-time状態は変えない —
+    /// 脱出側ブロック専用 (fall-through側では引き続き遅延中)
+    fn flush_cc_here(&mut self) {
+        if let Some(c) = self.cc {
+            self.st8_at(self.lay.cc_op, c.op);
+            self.st8_at(self.lay.cc_w, c.w);
+            self.st32_at(self.lay.cc_a, c.a);
+            self.st32_at(self.lay.cc_b, c.b);
+            self.st32_at(self.lay.cc_cin, c.cin);
+            self.st32_at(self.lay.cc_r, c.r);
+        }
+    }
+    /// 遅延中のccを書き戻して確定する (消費点用)
+    fn flush_cc(&mut self) {
+        self.flush_cc_here();
+        self.cc = None;
+    }
+    fn set_cc(&mut self, op: u8, w: u8, a: Value, b: Value, cin: Value, r: Value) {
+        self.cc = Some(PendCc { op, w, a, b, cin, r });
+    }
     fn helper1(&mut self, sr: cranelift_codegen::ir::SigRef, f: usize, args: &[Value]) -> Value {
         let callee = self.fb.ins().iconst(types::I64, f as i64);
         let call = self.fb.ins().call_indirect(sr, callee, args);
@@ -340,6 +376,7 @@ impl Tr<'_, '_> {
     /// 返り値 = r。dstへの書き戻しは呼ぶ側 (kind7は書かない約束も呼ぶ側)
     fn alu8_core(&mut self, kind: u8, a: Value, b: Value) -> Value {
         let cin = if kind == 2 || kind == 3 {
+            self.flush_cc(); // call_cf (h_cf) はメモリのccから計算する
             self.call_cf()
         } else {
             self.c32(0)
@@ -358,12 +395,7 @@ impl Tr<'_, '_> {
             _ => self.fb.ins().bxor(a, b),
         };
         let r = self.fb.ins().band_imm(r0, 0xFF);
-        self.st8_at(self.lay.cc_op, kind);
-        self.st8_at(self.lay.cc_w, 0);
-        self.st32_at(self.lay.cc_a, a);
-        self.st32_at(self.lay.cc_b, b);
-        self.st32_at(self.lay.cc_cin, cin);
-        self.st32_at(self.lay.cc_r, r);
+        self.set_cc(kind, 0, a, b, cin, r);
         r
     }
 
@@ -461,6 +493,7 @@ impl Tr<'_, '_> {
         self.fb.seal_block(esc);
         // 脱出 = interpが「実行済みk命令のメモリ状態」から再開する — dirtyを実体化
         self.flush_here();
+        self.flush_cc_here();
         let ip = self.ld32_at(self.lay.ip);
         let off = self.c32(self.cur_ip_off);
         let nip = self.fb.ins().iadd(ip, off);
@@ -488,6 +521,7 @@ impl Tr<'_, '_> {
     /// 書いて k+1 (このjcc込みの完全実行数) で退出。不成立なら素通り。
     /// 脱出 (escape_if) と同じ形だが、こちらは**やり直し不要の正規の出口**
     fn emit_jcc_mid(&mut self, cc: u8, rel: u32, len: u32) {
+        self.flush_cc(); // h_condはメモリのccから判定する
         let m = self.m_ptr();
         let c = self.c32(cc as u32);
         let cond = self.helper1(self.sigs.cond, h_cond as usize, &[m, c]);
@@ -657,6 +691,9 @@ impl Tr<'_, '_> {
     /// 外れたらヘルパ (read→alu_w→writeをRustで完結 — 意味は同一)
     fn emit_rmw32(&mut self, mem: &JitMem, kind: u8, b: Value) {
         use rustx86_core::jit::{TLB_D, TLB_U, TLB_W};
+        // 分岐の中でALUする唯一のop。旧pendingは分岐前に実体化し (SSA支配)、
+        // 高速路が作る新ccも高速路内で即実体化する — rmwだけ遅延の恩恵なし
+        self.flush_cc();
         let (off, la) = self.lin_val(mem);
         let (pa, slow0) = self.tlb_probe(la, TLB_W | TLB_U | TLB_D);
         let vr = self.vram_hit(pa);
@@ -669,6 +706,7 @@ impl Tr<'_, '_> {
         self.fb.seal_block(fast_b);
         let a = self.ram_ld32(pa);
         let r = self.alu_core(kind, a, b, None);
+        self.flush_cc(); // 高速路内で確定 (contの先ではSSA支配が切れる)
         self.ram_st32(pa, r);
         self.fb.ins().jump(cont, &[]);
         self.fb.switch_to_block(slow_b);
@@ -687,6 +725,7 @@ impl Tr<'_, '_> {
     /// 返り値 = 結果r (RMWインラインがメモリへ書き戻すのに使う)
     fn alu_core(&mut self, kind: u8, a: Value, b: Value, dst: Option<u8>) -> Value {
         let cin = if kind == 2 || kind == 3 {
+            self.flush_cc(); // call_cf (h_cf) はメモリのccから計算する
             self.call_cf()
         } else {
             self.c32(0)
@@ -704,12 +743,7 @@ impl Tr<'_, '_> {
             4 => self.fb.ins().band(a, b),
             _ => self.fb.ins().bxor(a, b), // 6 = XOR
         };
-        self.st8_at(self.lay.cc_op, kind);
-        self.st8_at(self.lay.cc_w, 2);
-        self.st32_at(self.lay.cc_a, a);
-        self.st32_at(self.lay.cc_b, b);
-        self.st32_at(self.lay.cc_cin, cin);
-        self.st32_at(self.lay.cc_r, r);
+        self.set_cc(kind, 2, a, b, cin, r);
         if kind != 7 {
             if let Some(d) = dst {
                 self.set_reg(d, r);
@@ -745,6 +779,7 @@ impl Tr<'_, '_> {
             }
             JitOp::IncDec { reg, dec } => {
                 // CFは不変 — 遅延状態を上書きする前に評価してflagsのbit0へ退避
+                self.flush_cc(); // call_cf (h_cf) はメモリのccから計算する
                 let cf = self.call_cf();
                 let f = self.ld32_at(self.lay.flags);
                 let f = self.fb.ins().band_imm(f, !1i64);
@@ -757,14 +792,8 @@ impl Tr<'_, '_> {
                 } else {
                     self.fb.ins().iadd(a, one)
                 };
-                self.st8_at(self.lay.cc_op, if dec { 9 } else { 8 });
-                self.st8_at(self.lay.cc_w, 2);
-                self.st32_at(self.lay.cc_a, a);
-                let one2 = self.c32(1);
-                self.st32_at(self.lay.cc_b, one2);
                 let z = self.c32(0);
-                self.st32_at(self.lay.cc_cin, z);
-                self.st32_at(self.lay.cc_r, r);
+                self.set_cc(if dec { 9 } else { 8 }, 2, a, one, z, r);
                 self.set_reg(reg, r);
             }
             JitOp::Lea {
@@ -869,6 +898,7 @@ impl Tr<'_, '_> {
                 let r = self.c32(reg as u32);
                 let c = self.c32(count as u32);
                 self.flush_regs(1 << reg); // ヘルパが対象regを読み書きする
+                self.flush_cc(); // ヘルパはflags/ccも読み書きする (count=0はflags不変)
                 self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
                 self.invalidate(1 << reg);
             }
@@ -879,6 +909,7 @@ impl Tr<'_, '_> {
                 let r = self.c32(reg as u32);
                 let c = self.reg8v(1);
                 self.flush_regs(1 << reg);
+                self.flush_cc();
                 self.helper0(self.sigs.quad_void, h_shift_r as usize, &[m, k, r, c]);
                 self.invalidate(1 << reg);
             }
@@ -951,6 +982,7 @@ impl Tr<'_, '_> {
                 // ヘルパはreg8の土台 (AH形は r-4) を読み書きする
                 let backing = if reg8 < 4 { reg8 } else { reg8 - 4 };
                 self.flush_regs(1 << backing);
+                self.flush_cc();
                 self.helper0(self.sigs.quad_void, h_grp3b8_r as usize, &[m, k, r, i]);
                 self.invalidate(1 << backing);
             }
@@ -1024,6 +1056,7 @@ fn translate(
         budget: None,
         live: 0,
         dirty: 0,
+        cc: None,
     };
     // 予算 (jit_budget) はエントリで1回読む — coreがenter直前に書いている
     let b = tr.ld32_at(lay.jit_budget);
@@ -1064,6 +1097,7 @@ fn translate(
     // 出口: 全終端でdirtyなGPRを実体化してから帳尻を合わせる (F1c-d3)。
     // Call/Retのヘルパ (push/pop) がESPを読むのもこのflushが前提
     tr.flush_regs(0xFF);
+    tr.flush_cc();
     // ipの帳尻と (call/retなら) スタック操作
     match term {
         None => {
