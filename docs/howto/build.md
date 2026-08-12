@@ -246,7 +246,7 @@ wasm32 の線形メモリは 4GB が上限で、エミュレートする RAM も
 大きなディスクを扱いたくなったら、**Web Worker + OPFS** へ移す必要がある。
 OPFS の `createSyncAccessHandle()` は `read()`/`write()` が同期APIで、
 **Web Worker の中でしか使えない** — エミュレータ向けの設計になっている。
-このリポジトリでは [箱 B5](../README.md#b5-web-worker--opfs-への移行) として置いてある。
+このリポジトリでは [箱 B5](../roadmap.md) として置いてある。
 
 ## 6. 最小の Hello
 
