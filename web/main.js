@@ -134,10 +134,13 @@ function boot(image, label) {
         setStatus(s === 'up' ? 'ネットワーク: 接続した' : s === 'down' ? 'ネットワーク: 切断 (wsslirpdは動いているか)' : 'ネットワーク: 接続中…');
     }
   }
-  // 物理キーはそのまま、貼り付けはASCIIとして送る
+  // 物理キーはそのまま、貼り付けはASCIIとして送る。
+  // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
+  // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
+  // ¥キーで A:\> のパスが打てるのは、歴史的にはむしろ正しい姿である
   term.onKey = (code, down) => machine.key(code, down);
-  term.onChar = ch => machine.typeChar(ch);
-  term.onPaste = text => machine.paste(text);
+  term.onChar = ch => machine.typeChar(ch === '¥' ? '\\' : ch);
+  term.onPaste = text => machine.paste(text.replaceAll('¥', '\\'));
 
   // 動作確認用の窓口。手元で開いているときだけ出す
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
