@@ -320,13 +320,85 @@ jobs:
       - name: 合否判定
         run: test "${{ steps.t386.outcome }}" = "success"
 
+  snapshot:
+    name: スナップショット
+    # 保存/復元のIntegration: 往復ビット不変 + 復元の透明性 (K命令後の全状態一致)。
+    #
+    # 位置は**機能層** — 互換ピラミッドの最上段 (docs/reference/ci.md):
+    #   土台 (コードチェック) → CPU層 (照合+互換) → 機械層 (OS起動回帰) → ここ
+    # スナップショットは「動く機械の上の機能」— OSが起動しない機械の
+    # 状態保存に機能としての価値は無いので、起動回帰の合格の上に建つ。
+    # 下の層がPRでskipのときは素通し (mainで証明済みのまま)、failureなら止まる
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' && needs.regress.result != 'failure' }}
+    needs: [check, cosim, compat386, regress]
+    runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/fetch-images.sh elks
+          tools/fetch-images.sh linux
+          tools/extract-vmlinux.sh
+          tools/make-mini-initramfs.sh
+
+      - name: 保存と復元の検査
+        id: snaptest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## スナップショット — `cargo run --release --example snaptest`'
+            echo '```'
+            cargo run --release --example snaptest 2>&1 | tee /dev/stderr
+            echo '```'
+          } > snap-report.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat snap-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: スナップショット
+          title: ${{ steps.snaptest.outcome == 'success' && '往復ビット不変・復元は観測不能' || '保存/復元が壊れている' }}
+          outcome: ${{ steps.snaptest.outcome }}
+          report-file: snap-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: test "${{ steps.snaptest.outcome }}" = "success"
+
   regress:
     name: OS起動回帰
-    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
-    # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
-    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
-    if: github.event_name != 'pull_request'
-    needs: check
+    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU層、
+    # 機械層 (ここ+スナップショット) は**mainに載る瞬間**の門番。将来ここに
+    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる。
+    # 位置は機械層 — CPU層 (CPU照合+CPU互換) の合格の上に建つ (理由はsnapshot段の註)
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' }}
+    needs: [check, cosim, compat386]
     runs-on: ubuntu-latest
     env:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
@@ -424,7 +496,7 @@ jobs:
   ok:
     name: OK
     if: always()
-    needs: [check, cosim, compat386, regress]
+    needs: [check, cosim, compat386, regress, snapshot]
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
@@ -437,4 +509,6 @@ jobs:
             && { test "${{ needs.compat386.result }}" = "success" \
                  || test "${{ needs.compat386.result }}" = "skipped"; } \
             && { test "${{ needs.regress.result }}" = "success" \
-                 || test "${{ needs.regress.result }}" = "skipped"; }
+                 || test "${{ needs.regress.result }}" = "skipped"; } \
+            && { test "${{ needs.snapshot.result }}" = "success" \
+                 || test "${{ needs.snapshot.result }}" = "skipped"; }

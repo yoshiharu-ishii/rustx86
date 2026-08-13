@@ -123,11 +123,11 @@ pub const SREG_NAMES: [&str; 4] = ["ES", "CS", "SS", "DS"];
 /// 2つの状態の差分を人間可読な文字列で返す (一致ならNone)
 pub fn diff(ours: &State, oracle: &State, flag_mask: u16) -> Option<String> {
     let mut out = Vec::new();
-    for i in 0..8 {
+    for (i, name) in REG_NAMES.iter().enumerate() {
         if ours.regs[i] != oracle.regs[i] {
             out.push(format!(
-                "{}: ours={:04x} oracle={:04x}",
-                REG_NAMES[i], ours.regs[i], oracle.regs[i]
+                "{name}: ours={:04x} oracle={:04x}",
+                ours.regs[i], oracle.regs[i]
             ));
         }
     }
@@ -205,7 +205,7 @@ impl Rng {
     pub fn interesting_u8(&mut self) -> u8 {
         const EDGE: [u8; 8] = [0x00, 0x01, 0x0F, 0x10, 0x7F, 0x80, 0xFE, 0xFF];
         let r = self.next_u64();
-        if r % 2 == 0 {
+        if r.is_multiple_of(2) {
             EDGE[(r >> 8) as usize % EDGE.len()]
         } else {
             r as u8
@@ -217,7 +217,7 @@ impl Rng {
             0x0000, 0x0001, 0x000F, 0x0010, 0x7FFF, 0x8000, 0xFFFE, 0xFFFF,
         ];
         let r = self.next_u64();
-        if r % 2 == 0 {
+        if r.is_multiple_of(2) {
             EDGE[(r >> 8) as usize % EDGE.len()]
         } else {
             r as u16
@@ -420,7 +420,7 @@ pub fn random_case(rng: &mut Rng, t: &Template) -> TestCase {
 pub fn check(templates: &[Template], cases_per_template: usize, seed: u64) {
     let mut failures = Vec::new();
     for t in templates {
-        let mut rng = Rng::new(seed ^ t.name.len() as u64 * 0x9E37_79B9);
+        let mut rng = Rng::new(seed ^ (t.name.len() as u64 * 0x9E37_79B9));
         let mut checked = 0;
         for _ in 0..cases_per_template {
             let tc = random_case(&mut rng, t);

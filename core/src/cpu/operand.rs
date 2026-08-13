@@ -293,8 +293,6 @@ pub fn pop32(m: &mut Machine) -> u32 {
     v
 }
 
-
-
 /// 幅を実行時に選ぶpush
 pub fn push_w(m: &mut Machine, v: u32, wide: bool) {
     if wide {
