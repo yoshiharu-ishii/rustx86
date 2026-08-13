@@ -8,6 +8,39 @@ use rustx86_core::cpu::IF;
 use rustx86_core::dev::{isa::pit::CLOCK_HZ, Pic8259, Pit8254, Uart16550};
 use rustx86_core::Machine;
 
+// ---------- PCスピーカー ----------
+
+/// BIOSビープの手順そのまま: ch2をモード3にして分周値を書き、0x61の
+/// bit0/1を立てる。**両方立って初めて音**で、片方でも下りれば無音になる
+#[test]
+fn speaker_sounds_only_when_both_gate_bits_are_up() {
+    let mut m = Machine::new();
+    assert_eq!(m.speaker_tone(), None, "電源投入直後は無音");
+
+    // 0xB6 = ch2 (sel=10)、LoHi (rw=11)、モード3=矩形波 (011)、2進数モードoff (0)
+    m.io_write8(0x43, 0xB6);
+    m.io_write8(0x42, (1193u16 & 0xFF) as u8); // 1193182 / 1193 ≒ 1000 Hz
+    m.io_write8(0x42, (1193u16 >> 8) as u8);
+    assert_eq!(m.speaker_tone(), None, "ゲートが閉じていれば無音");
+
+    // 0x61 は読んで下位2bitを立てて書き戻すのが作法 (bit4-7は触らない)
+    let ctl = m.io_read8(0x61);
+    m.io_write8(0x61, ctl | 0b11);
+    let hz = m.speaker_tone().expect("ゲートが開いたので鳴る");
+    assert!((hz - 1000.15).abs() < 0.1, "1193分周 ≒ 1000 Hz、実際 {hz}");
+
+    // 分周値を書き換えると音程が変わる (ドライバはゲートを触り直さない)
+    m.io_write8(0x43, 0xB6);
+    m.io_write8(0x42, (2386u16 & 0xFF) as u8);
+    m.io_write8(0x42, (2386u16 >> 8) as u8);
+    let hz = m.speaker_tone().expect("鳴りっぱなしのまま音程だけ変わる");
+    assert!((hz - 500.07).abs() < 0.1, "2386分周 ≒ 500 Hz、実際 {hz}");
+
+    let ctl = m.io_read8(0x61);
+    m.io_write8(0x61, ctl & !0b10);
+    assert_eq!(m.speaker_tone(), None, "bit1が下りたら無音");
+}
+
 // ---------- 8259 PIC ----------
 
 /// OSはICW1〜ICW4を同じポートに順番に書く。

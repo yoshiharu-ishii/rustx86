@@ -159,6 +159,12 @@ impl Emulator {
         self.m.devices.uart.feed(bytes);
     }
 
+    /// PCスピーカーが今出している音の周波数 (Hz)。無音は 0。
+    /// 画面と同じくスライス境界でポーリングする — WebAudioを鳴らすのはJS側
+    pub fn speaker_tone(&self) -> f64 {
+        self.m.speaker_tone().unwrap_or(0.0)
+    }
+
     /// 未実装命令などで機械が止まった理由 (無ければ空文字列)
     pub fn trap_reason(&self) -> String {
         self.m
