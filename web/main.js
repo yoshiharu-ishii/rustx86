@@ -99,10 +99,19 @@ function syncControls() {
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
-  // スタート画面では両段とも伏せる。**まだ机に何も置いていないのだから、
-  // 机の備品も操作列も出す意味がない** — 選ぶことに集中させる
-  for (const t of document.querySelectorAll('.toolbar')) t.hidden = onWelcome;
-  if (onWelcome) return;
+  // スタート画面では機械まわりを丸ごと伏せる。**まだ机に何も置いていないの
+  // だから、備品も操作列も状態カードも出す意味がない** — 選ぶことに集中させる
+  for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'stateCard', 'devCard', 'infoCard']) {
+    $(id).hidden = onWelcome;
+  }
+  if (onWelcome) {
+    $('brandName').textContent = 'rustx86';
+    $('brandSub').textContent = 'ブラウザの中の1台のPC';
+    return;
+  }
+  // 左肩は今どの機械を机に置いているか
+  $('brandName').textContent = current?.label ?? 'rustx86';
+  $('brandSub').textContent = current?.sub ?? '';
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
   const powered = !!machine || !!linux?.booted;
   $('power').toggleAttribute('data-on', powered);
@@ -110,13 +119,15 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('layout').closest('.sel').hidden = !!linux;
+  $('layout').hidden = !!linux;
+  $('layout').previousElementSibling.hidden = !!linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // ネットワーク。**Linuxからは今のNE2000が見えない** — ltsカーネルは
   // ISAバスを知らず、PCI越しにしか装置を探さない (ADR-0017 5c で RTL8029 を作る)
-  $('net').disabled = !!linux;
-  if (linux) $('net').title = 'ネットワーク: Linuxは未対応 (PCI + RTL8029 待ち)';
+  $('netSel').disabled = !!linux;
+  if (linux) $('netSel').title = 'ネットワーク: Linuxは未対応 (PCI + RTL8029 待ち)';
+  syncSidebar();
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
@@ -193,25 +204,36 @@ function boot(image, label) {
   syncControls();
 }
 
+/** 状態を右上のピルと左のカードへ同時に書く。**同じ数字を2つ持たない** */
+function showState(text, hist) {
+  $('pillState').textContent = text;
+  $('stateRun').textContent = text;
+  $('pillHist').textContent = hist;
+  $('stateHist').textContent = hist;
+  // 走っていれば緑、止まっていれば灰
+  const live = text !== '停止中' && text !== '電源オフ';
+  for (const d of [$('pillDot'), $('stateDot')]) d.classList.toggle('ok', live);
+}
+
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
 setInterval(() => {
   if (linux) {
-    const parts = [];
     // 起動の定規 (時間で統一、2026-08-13)。headless.mjs と同じ定義の秒数
-    if (linux.bootSecs != null) parts.push(`起動 ${linux.bootSecs.toFixed(1)}s`);
+    const boot = linux.bootSecs != null ? `起動 ${linux.bootSecs.toFixed(1)}s` : '';
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
-    parts.push(linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '');
-    $('gauge').textContent = parts.filter(Boolean).join('   ');
+    const run = linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '起動中';
+    showState(run, boot || '—');
     return;
   }
-  if (!machine) return;
-  const parts = [];
-  parts.push(
-    machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`,
-  );
-  if (term.scrollback.length) parts.push(`履歴 ${term.scrollback.length}行`);
-  if (term.offset) parts.push(`▲${term.offset}行前`);
-  $('gauge').textContent = parts.join('   ');
+  if (!machine) {
+    showState('電源オフ', '履歴 0 行');
+    return;
+  }
+  const run = machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`;
+  const hist = term.offset
+    ? `▲ ${term.offset} 行前`
+    : `履歴 ${term.scrollback.length} 行`;
+  showState(run, hist);
 }, 500);
 
 // --- キーボード配列 ---
@@ -242,9 +264,32 @@ function focusScreen() {
 // Enter/Spaceがゲスト行きのつもりでボタンをもう一度押してしまう
 // (再起動の意図せぬ連打)。個々のハンドラではなくバブリングで一括して受ける。
 // デバッガだけは例外 — 子ウインドウに移った注意を奪い返さない
-document.querySelector('.toolbar').addEventListener('click', e => {
-  const b = e.target.closest('button');
-  if (b && b.id !== 'debug') focusScreen();
+for (const bar of document.querySelectorAll('.bar')) {
+  bar.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (b && b.id !== 'debug') focusScreen();
+  });
+}
+
+// --- コンソールの見出しにある2つ ---
+//
+// **クリアは画面を消すだけで、機械には触れない。** 実機のコンソールで
+// スクロールバッファを流すのと同じで、走っているOSは何も知らない
+$('clear').addEventListener('click', () => {
+  if (linux) return; // シリアル端末側は自分の履歴を持っている (別途)
+  term.reset();
+  term.draw();
+  focusScreen();
+});
+
+$('copy').addEventListener('click', async () => {
+  const text = linux ? linux.logText : term.allLines().join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus('コンソールの内容をコピーしました');
+  } catch {
+    setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
+  }
 });
 
 // --- デバッガの子ウインドウ ---
@@ -343,10 +388,33 @@ const NET_LABEL = {
 };
 
 function setNetLamp(state) {
-  const b = $('net');
-  if (state) b.dataset.net = state;
-  else delete b.dataset.net;
-  b.title = NET_LABEL[state] ?? NET_LABEL.off;
+  for (const el of [$('netSel'), $('devNicDot')]) {
+    if (state) el.dataset.net = state;
+    else delete el.dataset.net;
+  }
+  $('netSel').title = NET_LABEL[state] ?? NET_LABEL.off;
+  // 選択そのものも状態に追従させる (「設定…」を選んだ後に戻す用でもある)
+  $('netSel').value = link ? 'on' : 'off';
+  $('devNic').textContent = link
+    ? { up: 'NE2000 (0x300)', wait: '接続中…', down: 'リンク無し' }[state] ?? 'NE2000 (0x300)'
+    : '未接続';
+}
+
+/** 左の状態カードを今の姿に合わせる。**画面に出ている数字と同じ出どころ**にする */
+function syncSidebar() {
+  const conJp = $('layout').value === 'jp' ? 'JIS 配列' : 'US 配列';
+  $('devCon').textContent = linux ? 'シリアル (ttyS0)' : conJp;
+  $('devDisk').textContent = lastLabel || (linux ? 'initramfs' : '—');
+  $('infoImage').textContent = lastLabel || '—';
+  // 機種とRAMは機械自身に聞く (デバッガと同じ出どころ)
+  try {
+    const j = JSON.parse(machine?.emu.cpu_json() ?? 'null');
+    $('infoMachine').textContent = j?.machine ?? (linux ? 'PC (32bit)' : '—');
+    $('infoRam').textContent = j ? `${j.ramMb} MB` : linux ? '128 MB' : '—';
+    $('infoArch').textContent = j?.pe ? 'i386 (プロテクトモード)' : 'i386 (リアルモード)';
+  } catch {
+    /* 起動直後などで読めなくても、表示が古いだけなので黙って見送る */
+  }
 }
 
 /** ダイアログの中身を今の状態に合わせる */
@@ -379,13 +447,35 @@ function netDialogSync() {
   }
 }
 
-$('net').addEventListener('click', () => {
+/** ネットワークの設定画面を開く (今の設定を入れてから) */
+function openNetDialog() {
   const saved = netSaved();
   const q = netFromQuery();
   $('netUrl').value = q ?? saved.url;
   $('netToken').value = q ? '' : saved.token;
   netDialogSync();
   $('netDialog').showModal();
+}
+
+// NICの選択。**カードを挿すか抜くか**の2択で、設定は「設定…」から。
+// 覚えている繋ぎ先があるので、ふだんは選ぶだけで繋がる
+$('netSel').addEventListener('change', e => {
+  const v = e.target.value;
+  if (v === 'config') {
+    openNetDialog();
+    e.target.value = link ? 'on' : 'off'; // 「設定…」は選択肢ではなく入口
+    return;
+  }
+  if (v === 'on') {
+    const saved = netSaved();
+    netConnect(withToken(saved.url, saved.token));
+    if (machine && !machine.netlink) {
+      setStatus(`${NET_LABEL.up} — ゲストから使うには「再起動」`);
+    }
+  } else {
+    netDisconnect();
+    setStatus(NET_LABEL.off);
+  }
 });
 
 $('netForm').addEventListener('submit', e => {
@@ -659,13 +749,17 @@ async function renderMachines() {
     await Promise.all(MACHINES.map(async (m) => [m.id, await imageAvailable(m)])),
   );
   nav.textContent = '';
+  // カードの中身は .body に入れる (見出し帯を持つ他のカードと作法を揃える)
+  const body = document.createElement('div');
+  body.className = 'body';
+  nav.append(body);
   for (const [group, list] of byGroup()) {
     const rows = list.filter((m) => avail.get(m.id));
     if (rows.length === 0) continue; // 空のグループは見出しごと出さない
     if (group) {
-      const h = document.createElement('h2');
+      const h = document.createElement('h3');
       h.textContent = group;
-      nav.append(h);
+      body.append(h);
     }
     for (const m of rows) {
       // **別ページに住むマシンはリンクにする** (Linux)。見た目はボタンと揃えるが、
@@ -675,7 +769,7 @@ async function renderMachines() {
       // 緑ランプ + 名前だけの1行。「動く」は色で分かるので言葉にしない。
       // ランプはマシンだけ (「スタート」はマシンではない)
       const dot = m.status ? `<span class="dot ${m.status}"></span>` : '';
-      b.innerHTML = `<span class="name">${dot}${m.label}</span>`;
+      b.innerHTML = `${dot}<span class="name">${m.label}</span>`;
       if (m.href) {
         b.href = m.href;
       } else {
@@ -683,7 +777,7 @@ async function renderMachines() {
         b.disabled = m.status === 'todo';
         b.addEventListener('click', () => select(m));
       }
-      nav.append(b);
+      body.append(b);
     }
   }
 }
@@ -744,7 +838,7 @@ async function select(m, { autoBoot = true } = {}) {
     term.reset();
     $('screen').hidden = true;
     $('welcomePane').hidden = false;
-    $('gauge').textContent = ''; // 前のマシンの「アイドル」等を持ち越さない
+    showState('電源オフ', '履歴 0 行'); // 前のマシンの「アイドル」等を持ち越さない
     showNote(null);
     setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
     dbg.reset();
