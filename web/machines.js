@@ -35,14 +35,17 @@ export const MACHINES = [
     id: 'elks',
     label: 'ELKS 0.9.1',
     sub: 'フロッピー1枚のUNIX',
-    image: './fd1440.img',
+    image: './fd2880.img',
     status: 'ok',
     note:
       'ログイン名は root。tetris / invaders / ttypong / sl / matrix が入っている。' +
-      'BIOSはほとんど使わず、8042とテキストVRAMを直接叩くOSである。',
+      'BIOSはほとんど使わず、8042とテキストVRAMを直接叩くOSである。' +
+      'ネットワーク有効時 (?net=) は起動時にktcpが自動で上がり、' +
+      'urlget http://example.com/ で本物のインターネットからHTMLが引ける ' +
+      '(pingコマンドはELKSには無い。telnetd/ftpdも動いている)。',
     source: 'https://github.com/ghaerr/elks/releases',
     sourceLabel: 'ELKS のリリース',
-    file: 'fd1440.img',
+    file: 'fd2880.img',
   },
   {
     group: 'OSライブラリ',

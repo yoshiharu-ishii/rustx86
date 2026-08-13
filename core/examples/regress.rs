@@ -106,7 +106,7 @@ fn report(o: &Outcome) {
 /// 16bit回帰: ELKS がログインプロンプトまで起動する
 fn elks() -> Outcome {
     let name = "16bit回帰: ELKS 0.9.1";
-    let Ok(image) = std::fs::read(img("fd1440.img")) else {
+    let Ok(image) = std::fs::read(img("fd2880.img")) else {
         return Outcome {
             name,
             passed: None,
