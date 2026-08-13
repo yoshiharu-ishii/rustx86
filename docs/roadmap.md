@@ -163,25 +163,27 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       ブラウザで Linux 6.18 (Alpine) が起動し、busybox のシェルで遊べる
 - [ ] **4c: virtio-blk** — virtio-mmio を使えば PCI を実装せずに済む
 
-## Tier 5: ネットワーク
+## Tier 5: ネットワーク (2026-08-13 引き直し、[ADR-0017](adr/0017-network-isa-first.md))
 
-**Linux が起動してから手を付ける。** 順序を下げたのは、16bit時代に NE2000 を
-書くと **Linux に着いた時点で置き換えになる**からである。16bitのネットワーク自体を
-捨てるわけではなく、**踏み台と virtio-net が揃ってから足す** (5e)。
-そうすれば装置モデルを1つ増やすだけで済む
-([ADR-0005](adr/0005-local-first-roadmap.md))。
+旧計画は virtio-net 先行だったが、偵察で崩れた — Alpine lts は virtio-mmio を
+カーネル引数で発見できず (`CMDLINE_DEVICES` 無効)、virt フレーバーは PAE 必須で
+現行 core では起動しない。装置は「本物」に寄せ、**バスの歴史の順 (ISA → PCI)**
+で行く。網元は [wsslirp](https://github.com/yoshiharu-ishii/wsslirp) (Go、完成済み —
+DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検証済み)。
+境界は「1 WSバイナリメッセージ = 1 Ethernetフレーム」だけ。
 
-- [ ] **5a: 踏み台** — WSS → TAP → MASQUERADE。
-      **エミュレータの完成を待たず qemu を TAP に直結して単体検証できる**
-- [ ] **5b: virtio-net** — まず Linux が素直に使える方を作る
-- [ ] **5c: 疎通** — ARP / IP / ICMP / DNS。`ping 8.8.8.8` に本物の応答が返り、
-      `dig` が本物のAレコードを返す ([ADR-0003](adr/0003-networking-in-the-browser.md))
+- [x] **5a: 踏み台** — wsslirp として独立リポジトリで完成 (TAP/MASQUERADEではなく
+      gVisor netstackのユーザーモードNATになった。root不要でどこにでも置ける)
+- [ ] **5b: ISA NE2000 (DP8390)** — **16bitからpingを飛ばす**のが最初の絵。
+      FreeDOS (NE2000.COM + mTCP) と ELKS (ne2k + ktcp)。coreの境界は
+      フレーム送受のtraitだけ、WS等の非決定I/Oは外側 (ADR-0017)
+- [ ] **5c: PCI + RTL8029** — PCIバス (設定空間の列挙) を作り、**同じ8390コア**を
+      PCIの皮で包む。Alpine lts に `NE2K_PCI=m` があるので、**カーネル無変更で
+      Linuxからping** が通る。e1000/rtl8139 は ReactOS/DOS の要求が来たら同じバスへ
 - [ ] **5d: 本測定** — TCP over TCP の破綻、MTUの押し出し、レイテンシの内訳。
       **Linuxのスタックなので最初から本気で測れる**
-- [ ] **5e: 16bitもネットワークに繋ぐ** — ELKS は virtio を知らないので NE2000 を足す。
-      **ここまで来ていれば捨て仕事にならない** — 踏み台も virtio-net も既に在るので、
-      増えるのは装置モデルだけ。16bitマシンは NE2000、32bitマシンは virtio-net という
-      構成の差が、そのまま B1 のマシンプロファイルの差になる
+- 台帳: virtio-net/virtio-blk は microVM段 (Tier 8、自前カーネルとセット)、
+      PAE は x86_64 (Tier 9) で。詳細は ADR-0017
 
 ## Tier 6: GUI と、いろいろなメディアからの起動
 
