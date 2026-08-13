@@ -140,6 +140,83 @@ fn nic_absent_machine_sees_an_empty_slot() {
     assert!(m.net_take_frames().is_empty());
 }
 
+/// `rep insw` / `rep outsw` — ストリングI/O。NE2000のデータポートは
+/// これで読み書きするのが定石で、Crynwrパケットドライバの送受信の根幹。
+/// 未実装だった間、DOSゲストの送信は1バイトも出なかった (実話)
+#[test]
+fn rep_string_io_moves_data_through_the_port() {
+    let mut m = Machine::new();
+    m.net_attach(MAC);
+
+    // リモートDMA読み: PROM先頭4バイトをCPUの rep insw で 0000:8000 へ
+    m.io_write8(BASE + 0x0E, 0x49); // DCR (ワード転送の顔をしておく)
+    m.io_write8(BASE + 0x08, 0x00); // RSAR = 0
+    m.io_write8(BASE + 0x09, 0x00);
+    m.io_write8(BASE + 0x0A, 0x04); // RBCR = 4
+    m.io_write8(BASE + 0x0B, 0x00);
+    m.io_write8(BASE, 0x0A); // リモート読み + 開始
+
+    #[rustfmt::skip]
+    let prog: &[u8] = &[
+        0xFC,                   // cld
+        0xB8, 0x00, 0x00,       // mov ax,0
+        0x8E, 0xC0,             // mov es,ax
+        0xBF, 0x00, 0x80,       // mov di,0x8000
+        0xB9, 0x02, 0x00,       // mov cx,2 (ワード2個 = 4バイト)
+        0xBA, 0x10, 0x03,       // mov dx,0x310
+        0xF3, 0x6D,             // rep insw
+        0xF4,                   // hlt
+    ];
+    let mut sector = prog.to_vec();
+    sector.resize(512, 0);
+    sector[510] = 0x55;
+    sector[511] = 0xAA;
+    m.load_boot_sector(&sector).unwrap();
+    m.run(1000);
+    assert_eq!(
+        (0..4).map(|i| m.read8(0x8000 + i)).collect::<Vec<_>>(),
+        vec![MAC[0], MAC[0], MAC[1], MAC[1]],
+        "rep insw がPROMを運んでいない"
+    );
+
+    // リモートDMA書き: 0000:8100 の4バイトを rep outsw でSRAM 0x4000へ
+    #[rustfmt::skip]
+    let prog2: &[u8] = &[
+        0xFC,                   // cld
+        0xB8, 0x00, 0x00,       // mov ax,0
+        0x8E, 0xD8,             // mov ds,ax
+        0xBE, 0x00, 0x81,       // mov si,0x8100
+        0xB9, 0x02, 0x00,       // mov cx,2
+        0xBA, 0x10, 0x03,       // mov dx,0x310
+        0xF3, 0x6F,             // rep outsw
+        0xF4,                   // hlt
+    ];
+    let mut sector2 = prog2.to_vec();
+    sector2.resize(512, 0);
+    sector2[510] = 0x55;
+    sector2[511] = 0xAA;
+    // 機械は新品から (使い回すと前のHLT状態やRAMクリアの作法に足を取られる)。
+    // **素材とNICの設定はload_boot_sectorの後** — RAMがまっさらになるため
+    let mut m = Machine::new();
+    m.net_attach(MAC);
+    m.load_boot_sector(&sector2).unwrap();
+    for (i, b) in [0xDE, 0xAD, 0xBE, 0xEF].iter().enumerate() {
+        m.write8(0x8100 + i as u32, *b);
+    }
+    m.io_write8(BASE + 0x08, 0x00); // RSAR = 0x4000
+    m.io_write8(BASE + 0x09, 0x40);
+    m.io_write8(BASE + 0x0A, 0x04);
+    m.io_write8(BASE + 0x0B, 0x00);
+    m.io_write8(BASE, 0x12); // リモート書き + 開始
+    m.run(1000);
+    let got = dma_read(&mut m, 0x4000, 4);
+    assert_eq!(
+        got,
+        vec![0xDE, 0xAD, 0xBE, 0xEF],
+        "rep outsw がSRAMへ届いていない"
+    );
+}
+
 #[test]
 fn snapshot_roundtrip_keeps_the_nic() {
     let mut m = Machine::new();
