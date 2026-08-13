@@ -166,6 +166,15 @@ impl Ne2000 {
                 // TXPは「実行した」ら消える1回きりのビット。送信は瞬時に済む
                 // 世界なので、立てられた場でフレームを取り出して下ろす
                 self.cr = val & !CR_TXP;
+                // ISRのRSTは「停止中」の印: STOPで立ち、**STARTで自動的に下りる**
+                // (データシートの仕様)。ここを忘れるとELKSのISRハンドラが
+                // 「誰も処理しない0x80」を延々読み続けて無限ループする (実話。
+                // Crynwrは行儀よくISRに0xFFを書いて掃除するので気づけなかった)
+                if val & CR_STA != 0 {
+                    self.isr &= !ISR_RST;
+                } else if val & CR_STP != 0 {
+                    self.isr |= ISR_RST;
+                }
                 if val & CR_TXP != 0 {
                     self.transmit();
                 }
