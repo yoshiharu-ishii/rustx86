@@ -30,6 +30,22 @@ let machine = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
 
+/** ネットワーク設定 (?net= で opt-in)。無指定なら null = NIC無し */
+function netUrl() {
+  const q = new URLSearchParams(location.search);
+  const net = q.get('net');
+  if (!net) return null;
+  const base = net === '1' ? 'ws://127.0.0.1:8087/net' : net;
+  const token = q.get('nettoken');
+  return token ? `${base}${base.includes('?') ? '&' : '?'}token=${token}` : base;
+}
+
+/** 起動スクリプト。ネット有効なマシンは netScript の続きも流す */
+function scriptFor(m) {
+  if (!m?.script) return m?.script;
+  return netUrl() && m.netScript ? [...m.script, ...m.netScript] : m.script;
+}
+
 // ---------- スナップショット ----------
 //
 // 機械の状態は Rust 側がコンパクトなバイナリで書き出す (連長圧縮済み)。
@@ -110,12 +126,8 @@ function boot(image, label) {
   // ?nettoken=<共有トークン> も付けられる。無指定なら従来どおりNIC無し —
   // 起動のビット同一 (ADR-0017) は既定の姿で守る
   {
-    const q = new URLSearchParams(location.search);
-    const net = q.get('net');
-    if (net) {
-      const base = net === '1' ? 'ws://127.0.0.1:8087/net' : net;
-      const token = q.get('nettoken');
-      const url = token ? `${base}${base.includes('?') ? '&' : '?'}token=${token}` : base;
+    const url = netUrl();
+    if (url) {
       machine.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
       machine.netlink = new NetLink(url);
       machine.netlink.onState = s =>
@@ -227,7 +239,7 @@ const dbg = new Debugger({
     }
     if (!current) return;
     await bootFromUrl(current);
-    startScript(current.script);
+    startScript(scriptFor(current));
   },
 });
 
@@ -571,7 +583,7 @@ async function select(m, { autoBoot = true } = {}) {
   }
 
   await bootFromUrl(m);
-  startScript(m.script);
+  startScript(scriptFor(m));
   dbg.reset();
 }
 
