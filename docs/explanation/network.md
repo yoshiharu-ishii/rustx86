@@ -2,7 +2,12 @@
 
 ブラウザのWASMは生のソケットを持てない。それでも中のゲストOSは
 本物のインターネットに出られる — フレームを外へ運ぶ**ケーブル**と、
-その先でNATしてくれる**網元**があればよい。
+その先でNATしてくれる**SLiRP backend**があればよい。
+
+SLiRP backend というのは QEMU の `-netdev user`(通称 SLiRP)と同じ役の
+プロセスのこと。**ゲストのEthernetフレームを受け取り、ユーザー権限のまま
+TCP/UDPを終端して本物のソケットで外へ出す**。root も TAP も要らない代わりに、
+ゲストは NAT の内側に居ることになる。
 
 ```mermaid
 flowchart LR
@@ -10,12 +15,12 @@ flowchart LR
         guest["ゲストOS"] --> nic["仮想NIC"]
         nic --> link["NetLink (ケーブル)"]
     end
-    link -- "WebSocket<br/>1メッセージ = 1 Ethernetフレーム" --> slirp["wsslirpd (網元)"]
+    link -- "WebSocket<br/>1メッセージ = 1 Ethernetフレーム" --> slirp["wsslirpd (SLiRP backend)"]
     slirp --> inet["インターネット"]
 ```
 
 - **境界プロトコルはこれだけ**: 1 WebSocketバイナリメッセージ = 1 Ethernetフレーム
-- 網元は [wsslirp](https://github.com/yoshiharu-ishii/wsslirp) (Go)。gVisor netstackで
+- SLiRP backendは [wsslirp](https://github.com/yoshiharu-ishii/wsslirp) (Go)。gVisor netstackで
   ゲストのTCP/UDPを終端し、本物のソケットで外へ出る。DHCP・DNS・外向きICMPも
   こちらの仕事。QEMUの `-netdev user` を独立デーモンにしたものと思えば正確
 - 決定性は壊れない: coreはフレームの出入り口しか持たず、時計もソケットも
@@ -37,7 +42,7 @@ ISA→PCIの順で作るのは歴史の順そのものである
 
 ## 使い方
 
-1. 網元を立てる (どこか1つのターミナルで):
+1. SLiRP backendを立てる (どこか1つのターミナルで):
 
    ```
    go run ./cmd/wsslirpd -listen 127.0.0.1:8087 -token dev
@@ -50,7 +55,7 @@ ISA→PCIの順で作るのは歴史の順そのものである
    |---|---|---|
    | 灰 | Network:Disable | 繋いでいない (既定。故障ではない) |
    | 黄 (瞬き) | Network:Connecting | 接続を試している |
-   | 緑 | Network:Connect | 網元と繋がった |
+   | 緑 | Network:Connect | SLiRP backendと繋がった |
    | 赤 | Network:Disconnect | 繋がらない / 切れた |
 
    **緑はケーブルのリンクであって、ゲストが使えているかとは別物** —
@@ -69,8 +74,8 @@ ISA→PCIの順で作るのは歴史の順そのものである
 
 ## 自動化・E2E向け: ?net= パラメータ
 
-URLに `?net=1` を付けると既定の網元 (`ws://127.0.0.1:8087/net`) へ、
-`?net=<wsのURL>` で任意の網元へ、ページを開いた瞬間に繋ぐ。
+URLに `?net=1` を付けると既定のSLiRP backend (`ws://127.0.0.1:8087/net`) へ、
+`?net=<wsのURL>` で任意のSLiRP backendへ、ページを開いた瞬間に繋ぐ。
 `&nettoken=<トークン>` も付けられる。**?net= があるとダイアログの設定より
 そちらが勝つ** (E2Eの再現性のため)。ヘッドレスのE2Eは
 `tools/webtest/netping.mjs` を参照。

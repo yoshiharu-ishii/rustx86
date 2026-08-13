@@ -2,7 +2,7 @@
 //
 // FreeDOSを起動し、NE2000パケットドライバ + mTCP で DHCP → PING を打つ。
 // フレームは wsslirp (ユーザーモードNAT) へWebSocketで運ぶ。
-// 網元が要るのでopt-in — 起動中の wsslirpd を指して:
+// SLiRP backendが要るのでopt-in — 起動中の wsslirpd を指して:
 //
 //   (wsslirpリポジトリで) go run ./cmd/wsslirpd -listen 127.0.0.1:8098 -token test
 //   RUSTX86_NET_E2E_URL='ws://127.0.0.1:8098/net?token=test' node tools/webtest/netping.mjs
