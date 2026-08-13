@@ -77,10 +77,9 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::ShiftRmImm { rm, .. }
         | Uop::ShiftRmCl { rm, .. } => mem(rm),
         // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
-        Uop::MovAMoffs { .. }
-        | Uop::Mov8AMoffs { .. }
-        | Uop::Grp5 { .. }
-        | Uop::StrOne { .. } => true,
+        Uop::MovAMoffs { .. } | Uop::Mov8AMoffs { .. } | Uop::Grp5 { .. } | Uop::StrOne { .. } => {
+            true
+        }
     }
 }
 
@@ -520,16 +519,14 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 push_w(m, v, true);
             }
         }
-        Uop::PopR { reg } => {
-            match fast_pop32(m) {
-                Some(v) => m.cpu.regs[reg as usize] = v,
-                None => {
-                    m.guard_save_slim_at(prev_ip);
-                    let v = pop_w(m, true);
-                    m.cpu.regs[reg as usize] = v;
-                }
+        Uop::PopR { reg } => match fast_pop32(m) {
+            Some(v) => m.cpu.regs[reg as usize] = v,
+            None => {
+                m.guard_save_slim_at(prev_ip);
+                let v = pop_w(m, true);
+                m.cpu.regs[reg as usize] = v;
             }
-        }
+        },
         Uop::ShiftRmImm { kind, rm, count } => shift_exec(m, kind, rm, count),
         Uop::ShiftRmCl { kind, rm } => {
             let count = m.cpu.reg8(1); // CL
