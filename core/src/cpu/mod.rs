@@ -254,6 +254,11 @@ impl Cpu {
         self.cr0 & 1 != 0
     }
 
+    /// ページング有効か (CR0.PG)
+    pub fn pg(&self) -> bool {
+        self.cr0 & (1 << 31) != 0
+    }
+
     /// 仮想8086モードか (PE=1 かつ EFLAGS.VM)。
     /// VMは遅延6フラグの外なので flags を直に読める (IOPLと同じ)
     pub fn vm86(&self) -> bool {
