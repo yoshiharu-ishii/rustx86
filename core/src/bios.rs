@@ -159,7 +159,7 @@ impl Machine {
     /// 「HLTして割り込みを待つ」形の待ち合わせが**永久に目を覚まさない**。
     ///
     /// カウンタ0は分周値0 = 65536 で 18.2 Hz。この半端な数字は
-    /// [`pit`](crate::dev::pit) の説明のとおり、NTSCの水晶を流用した名残である。
+    /// [`pit`](crate::dev::isa::pit) の説明のとおり、NTSCの水晶を流用した名残である。
     /// カウンタ1はDRAMリフレッシュ用で、出力は使わないが現在値を読んで
     /// 時間を測るプログラムがあるので動かしておく。
     fn install_pit_defaults(&mut self) {
@@ -840,7 +840,7 @@ impl Machine {
 ///
 /// 装置が返すのはキーの位置で、文字にする対応表はファームウェアが持つ。
 /// 配列を差し替えられるのはこの層があるからで、
-/// [`crate::dev::kbd::scancode_shift`] のちょうど逆向きにあたる。
+/// [`crate::dev::isa::kbd::scancode_shift`] のちょうど逆向きにあたる。
 fn scancode_to_ascii(sc: u8, shift: bool, ctrl: bool) -> Option<u8> {
     const PLAIN: &[(u8, u8)] = &[
         (0x02, b'1'),
