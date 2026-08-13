@@ -223,6 +223,9 @@ export class Machine {
     // PCスピーカー (画面と同じポーリングの分業。鳴らすのは main.js)
     this.onTone?.(this.emu.speaker_tone());
 
+    // NIC。フレームの送り出しと注入はスライス境界でまとめて行う
+    this.netlink?.pump(this.emu);
+
     // 描かせるのは1フレームに1回だけ
     if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
     this.#schedule();
