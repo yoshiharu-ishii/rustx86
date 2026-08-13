@@ -27,66 +27,6 @@ let lastImage = null;
 // 機械の状態は Rust 側がコンパクトなバイナリで書き出す (連長圧縮済み)。
 // **JSONで束ねるのはここの仕事**で、いつ・何のイメージから取ったのかという
 // 人間向けの情報を添える。中身をJSONの数値配列にすると1MBが数MBに膨れるので、
-// バイナリは Base64 の文字列1本にして入れる。
-
-const SNAP_FORMAT = 'rustx86-snapshot';
-/** VGA機のスナップショット置き場 (localStorage) は**マシン別**。
-    ELKSで保存した状態がFreeDOSの「復元」を光らせるのは、状態が無いのに
-    押せるのと同じで、押した人を裏切る */
-const snapKey = () => `rustx86.snapshot.${current?.id ?? 'custom'}`;
-
-/**
- * gzip をかけてから Base64 にする。
- *
- * 連長圧縮 (Rust側) が潰せるのは**ゼロの海**だけで、ディスクイメージのような
- * 実データには効かない。1.44MBのフロッピーがそのまま乗ると 3.5MB になり、
- * localStorage (5MB程度) に1個しか入らなかった。
- * 汎用の圧縮を通すと数分の1になる。
- */
-async function gzip(bytes) {
-  const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
-
-async function gunzip(bytes) {
-  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
-
-const toBase64 = bytes => {
-  let s = '';
-  // 一度に渡すと引数が多すぎて落ちるので刻む
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(s);
-};
-
-const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-
-async function snapshotJson(name) {
-  const bytes = machine.saveState();
-  const packed = await gzip(bytes);
-  return JSON.stringify({
-    format: SNAP_FORMAT,
-    version: 1,
-    created: new Date().toISOString(),
-    image: name ?? 'unknown',
-    bytes: bytes.length,
-    encoding: 'gzip+base64',
-    state: toBase64(packed),
-  });
-}
-
-async function applySnapshotJson(text) {
-  const o = JSON.parse(text);
-  if (o.format !== SNAP_FORMAT) throw new Error('rustx86 のスナップショットではない');
-  let bytes = fromBase64(o.state);
-  if (o.encoding === 'gzip+base64') bytes = await gunzip(bytes);
-  machine.loadState(bytes);
-  return o;
-}
-
 function setStatus(text, warn = false) {
   $('status').textContent = text;
   $('status').className = warn ? 'warn' : '';
@@ -108,17 +48,15 @@ function syncControls() {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
-    $('snap').disabled = !linux.booted;
-    $('restore').disabled = !linux.hasSaved;
-    $('export').disabled = !linux.booted;
+    $('snapExport').disabled = !linux.booted;
+    $('snapImport').disabled = linux.busy;
     return;
   }
   $('pause').disabled = !on;
   $('pause').textContent = machine?.paused ? '再開' : '一時停止';
   $('boot').disabled = !lastImage;
-  $('snap').disabled = !on;
-  $('restore').disabled = !on || !localStorage.getItem(snapKey());
-  $('export').disabled = !on;
+  $('snapExport').disabled = !on;
+  $('snapImport').disabled = false;
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
@@ -292,33 +230,14 @@ $('boot').addEventListener('click', () => {
   if (lastImage) boot(lastImage, 'ディスク');
 });
 
-$('snap').addEventListener('click', async () => {
-  if (linux) {
-    linux.saveState(); // 返事 ('state') が来たら status と hasSaved が更新される
-    return;
-  }
-  if (!machine) return;
-  try {
-    const json = await snapshotJson(lastLabel);
-    localStorage.setItem(snapKey(), json);
-    setStatus(`状態を保存した (${(json.length / 1024).toFixed(0)} KB、この端末に残る)`);
-    syncControls();
-  } catch (e) {
-    // localStorage は数MBで埋まる。落ちた理由を隠さない
-    setStatus(`保存できない: ${e.message}`, true);
-  }
-});
-
-$('export').addEventListener('click', async () => {
-  // Tier 3g: バイナリのファイル書き出し (JSON+base64は廃止 — snapfile.js)
+$('snapExport').addEventListener('click', async () => {
+  // スナップショット書出 (Tier 3g)。保存の実体はこのファイルだけ —
+  // localStorage/ワーカー内のクイックセーブは廃止した (入り口は1つ)
   try {
     let state, label;
     if (linux) {
-      if (!linux.savedBytes) {
-        setStatus('先に「状態を保存」してから書き出してください', true);
-        return;
-      }
-      state = linux.savedBytes;
+      state = await linux.captureState();
+      if (!state) return;
       label = 'linux';
     } else if (machine) {
       state = machine.saveState();
@@ -326,32 +245,23 @@ $('export').addEventListener('click', async () => {
     } else {
       return;
     }
-    const bytes = await packSnapshot(state, label);
+    const bytes = await packSnapshot(state, label, linux ? 'L' : 'V');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
     a.download = `${label}${SNAP_EXT}`;
     a.click();
     URL.revokeObjectURL(a.href);
-    setStatus(`書き出した (${(bytes.length / 1024).toFixed(0)} KB、バイナリ形式)`);
+    setStatus(`スナップショットを書き出した (${(bytes.length / 1024).toFixed(0)} KB)`);
   } catch (e) {
     setStatus(`書き出せない: ${e.message}`, true);
   }
 });
 
-$('restore').addEventListener('click', async () => {
-  if (linux) {
-    linux.restoreState();
-    return;
-  }
-  const json = localStorage.getItem(snapKey());
-  if (!machine || !json) return;
-  try {
-    const o = await applySnapshotJson(json);
-    term.reset();
-    setStatus(`${o.created} の状態に戻した (${o.image})`);
-  } catch (e) {
-    setStatus(`復元できない: ${e.message}`, true);
-  }
+$('snapImport').addEventListener('click', () => $('snapFile').click());
+$('snapFile').addEventListener('change', () => {
+  const f = $('snapFile').files?.[0];
+  $('snapFile').value = '';
+  if (f) insertMedia(f); // 中身のmagicで見分ける — ドロップと同じ口
 });
 
 $('save').addEventListener('click', () => {
@@ -401,38 +311,32 @@ $('imageFile').addEventListener('change', () => {
 
 async function insertMedia(f) {
   // スナップショットならそこへ戻る。ディスクなら起動する。
-  // 判定は拡張子でなく中身のmagic (Tier 3g、旧JSON形式も読める)
+  // 判定は拡張子でなく中身のmagic (Tier 3g。旧JSON+localStorage形式は廃止 —
+  // 保存の実体はファイルに一本化)
   const head = new Uint8Array(await f.slice(0, 32).arrayBuffer());
   if (isSnapshotFile(head)) {
     try {
       const o = await unpackSnapshot(new Uint8Array(await f.arrayBuffer()));
-      if (linux?.booted) {
-        linux.loadStateBytes(o.state);
-        setStatus(`${f.name} の状態に戻した (${o.label}、${o.created.toLocaleString()})`);
+      const stamp = `${o.label}、${o.created.toLocaleString()}`;
+      if (o.kind === 'L') {
+        // Linux機の状態: 走っていればその場で復元、居なければ
+        // マウントして**この状態から起動** (まっさらなページでも一発で戻れる)
+        if (linux?.booted) {
+          linux.loadStateBytes(o.state);
+        } else {
+          if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+          await linux.boot({ snapshot: o.state });
+        }
+        setStatus(`${f.name} の状態に戻した (${stamp})`);
         return;
       }
       if (!machine) {
-        setStatus('先にディスクイメージを起動してください', true);
+        setStatus('先に同じディスクイメージを起動してください (VGA機のスナップショット)', true);
         return;
       }
       machine.loadState(o.state);
       term.reset();
-      setStatus(`${f.name} の状態に戻した (${o.label}、${o.created.toLocaleString()})`);
-      $('screen').focus();
-    } catch (err) {
-      setStatus(`復元できない: ${err.message}`, true);
-    }
-    return;
-  }
-  if (f.name.endsWith('.json')) {
-    if (!machine) {
-      setStatus('先にディスクイメージを起動してください', true);
-      return;
-    }
-    try {
-      const o = await applySnapshotJson(await f.text());
-      term.reset();
-      setStatus(`${f.name} の状態に戻した (${o.image}、${o.created})`);
+      setStatus(`${f.name} の状態に戻した (${stamp})`);
       $('screen').focus();
     } catch (err) {
       setStatus(`復元できない: ${err.message}`, true);
@@ -576,7 +480,7 @@ function showNote(m) {
   }
 }
 
-async function select(m) {
+async function select(m, { autoBoot = true } = {}) {
   // 「イメージを開く…」はまだ何も切り替えない — ファイルが選ばれた瞬間に
   // insertMedia が起動する (キャンセルなら何も起きない)
   if (m.kind === 'open') {
@@ -627,8 +531,9 @@ async function select(m) {
     });
     dbg.reset();
     syncControls();
-    // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)
-    await linux.boot();
+    // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)。
+    // スナップショットファイルからの復元時は呼び手が boot({snapshot}) する
+    if (autoBoot) await linux.boot();
     syncControls();
     return;
   }

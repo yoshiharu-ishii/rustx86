@@ -42,10 +42,9 @@ export function mountLinux(canvas, opts = {}) {
   let idle = false;
   /** 「状態を保存」の控え。64MBあるので localStorage ではなくメモリに持つ
       (ページを閉じると消える) */
-  let savedState = null;
+  let captureWaiters = []; // captureState (書出) の返事待ち
   /** 保存時の端末の姿 (画面・カーソル・履歴)。機械の状態にシリアルの履歴は
       入らないので、端末側の姿は端末側で控える — VGA機と使い勝手を揃えるため */
-  let savedTerm = null;
 
   // --- デバッガの覗き見RPC ---
   //
@@ -120,7 +119,7 @@ export function mountLinux(canvas, opts = {}) {
    * UI (電源ONボタン) から選べるようにする。スナップショットに乗っ取られて
    * フルブートが見られない、を防ぐ
    */
-  async function boot({ full = false } = {}) {
+  async function boot({ full = false, snapshot: given = null } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -132,10 +131,10 @@ export function mountLinux(canvas, opts = {}) {
     // まず**起動済みスナップショット**を探す (tools/make-linux-snapshot.sh が作る)。
     // あれば数秒で立つ — 「シンプルなカーネルの起動に1分」への即効薬で、
     // フル起動は電源ONボタンとスナップショット不在時の道
-    let snapshot = null;
+    let snapshot = given; // ファイルからの復元 (Tier 3g) はここから入る
     let kernel = null;
     let initrd = null;
-    if (!full) {
+    if (!full && !snapshot) {
       try {
         const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
         status('スナップショットを展開中…');
@@ -220,18 +219,19 @@ export function mountLinux(canvas, opts = {}) {
         case 'serial':
           term.write(new Uint8Array(msg.bytes));
           break;
-        case 'state':
-          savedState = new Uint8Array(msg.bytes);
-          // ここまでのシリアルは全部適用済み (メッセージは順序を守る) なので、
-          // 端末の姿は機械の控えと同じ瞬間のもの
-          savedTerm = term.snapshot();
-          status(`状態を保存した (${(savedState.length / 1e6).toFixed(1)}MB、このページの間だけ残る)`);
-          opts.onState?.();
+        case 'state': {
+          // captureState (スナップショット書出) の返事。控えは持たない —
+          // 保存/復元はファイルに一本化した (Tier 3g)
+          const bytes = new Uint8Array(msg.bytes);
+          const r = captureWaiters.splice(0);
+          for (const resolve of r) resolve(bytes);
           break;
+        }
         case 'loaded':
-          // 機械が戻ったので端末も保存時の姿へ (画面・カーソル・履歴ごと)
-          if (savedTerm) term.restore(savedTerm);
-          status('保存した状態に戻した');
+          // 機械が戻った。端末はリセットして以後のシリアルだけを映す
+          // (ファイルに端末の見た目は入っていない — Enterで即プロンプトが出る)
+          term.reset();
+          status('スナップショットの状態に戻した');
           canvas.focus();
           break;
         case 'status':
@@ -274,17 +274,13 @@ export function mountLinux(canvas, opts = {}) {
       paused = v;
       worker.postMessage({ type: v ? 'pause' : 'resume' });
     },
-    /** 今の状態をワーカーに控えさせる (返事は 'state' で届く) */
-    saveState() {
-      if (worker && booted) worker.postMessage({ type: 'save' });
-    },
-    /** 控えた状態へ戻す */
-    restoreState() {
-      if (worker && booted && savedState) {
-        // 転送で手放すと二度目が失敗する。写しを渡す
-        const copy = savedState.slice();
-        worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
-      }
+    /** 今の状態を取り出す (スナップショット書出用)。返事が来たら解決 */
+    captureState() {
+      if (!worker || !booted) return Promise.resolve(null);
+      return new Promise((resolve) => {
+        captureWaiters.push(resolve);
+        worker.postMessage({ type: 'save' });
+      });
     },
     /** ファイルから読んだ状態へ戻す (Tier 3g) */
     loadStateBytes(bytes) {
@@ -293,11 +289,8 @@ export function mountLinux(canvas, opts = {}) {
         worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
       }
     },
-    get hasSaved() { return savedState !== null; },
     /** デバッガが覗くための代役 (各メソッドが Promise を返す)。起動前は null */
     get dbgEmu() { return worker && booted ? dbgEmu : null; },
-    /** 控えた状態そのもの (JSON書き出し用)。無ければ null */
-    get savedBytes() { return savedState; },
     /** 端末が見た全文 (履歴1000行+今の画面)。VGA機の「ログを保存」と同じ意味論。
         スナップショット起動でも画面に見えている分は必ず入る */
     get logText() {
