@@ -74,6 +74,9 @@ pub enum IoTarget {
     Crtc,
     /// 0x3F8-0x3FF: UART 16550 (COM1)。Linuxのシリアルコンソールもここ
     Uart,
+    /// 0x300-0x31F: NE2000 (Ethernet)。ISAカードの定番アドレス。
+    /// カードを挿していない機械では Unmapped と同じ顔をする
+    Net,
     /// 誰も名乗り出ないポート
     Unmapped,
 }
@@ -86,6 +89,7 @@ pub fn decode_io(port: u16) -> IoTarget {
         0x60 | 0x64 => IoTarget::Keyboard,
         0x61 => IoTarget::SystemControl,
         0x70 | 0x71 => IoTarget::Cmos,
+        0x300..=0x31F => IoTarget::Net,
         0x3D4 | 0x3D5 => IoTarget::Crtc,
         0x3F8..=0x3FF => IoTarget::Uart,
         _ => IoTarget::Unmapped,
@@ -113,6 +117,9 @@ pub struct Devices {
     /// システム制御ポート (0x61)。bit4がDRAMリフレッシュの矩形波で、
     /// OSはこれを数えて時間を測ることがある
     pub sysctl: u8,
+    /// NE2000 (0x300-0x31F)。**挿さっていないのが既定** — NIC無し起動の
+    /// ビット同一 (ADR-0017の不変条件) は、装置が居ないことで自明に守られる
+    pub net: Option<crate::dev::Ne2000>,
 }
 
 impl Default for Devices {
@@ -131,6 +138,7 @@ impl Devices {
             cmos: crate::dev::Cmos::new(),
             crtc: crate::dev::Crtc::new(),
             sysctl: 0,
+            net: None,
         }
     }
 }

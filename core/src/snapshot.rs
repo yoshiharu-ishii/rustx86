@@ -27,7 +27,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v6: CR2/CR3 (ページング) を追加
 /// v7: x87の制御語 (fpu_cw) を追加
 /// v8: LDTRの隠しレジスタ (base/limit) を追加
-pub const VERSION: u16 = 8;
+/// v9: NE2000 (挿さっていれば) を追加
+pub const VERSION: u16 = 9;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -260,6 +261,13 @@ impl Machine {
         self.devices.keyboard.save(&mut w);
         self.devices.cmos.save(&mut w);
         self.devices.crtc.save(&mut w);
+        match &self.devices.net {
+            Some(net) => {
+                w.bool(true);
+                net.save(&mut w);
+            }
+            None => w.bool(false),
+        }
 
         // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
         w.rle(&self.mem);
@@ -338,6 +346,11 @@ impl Machine {
         m.devices.keyboard.load(&mut r)?;
         m.devices.cmos.load(&mut r)?;
         m.devices.crtc.load(&mut r)?;
+        m.devices.net = if r.bool()? {
+            Some(crate::dev::Ne2000::load(&mut r)?)
+        } else {
+            None
+        };
 
         // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
         // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
