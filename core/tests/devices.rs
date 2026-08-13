@@ -5,7 +5,7 @@
 //! **PITが挙手 → PICが交通整理 → CPUが受け取る**という一周を通す。
 
 use rustx86_core::cpu::IF;
-use rustx86_core::dev::{pit::CLOCK_HZ, Pic8259, Pit8254, Uart16550};
+use rustx86_core::dev::{isa::pit::CLOCK_HZ, Pic8259, Pit8254, Uart16550};
 use rustx86_core::Machine;
 
 // ---------- 8259 PIC ----------
@@ -230,7 +230,7 @@ fn timer_interrupt_reaches_the_cpu() {
 /// 記号がまったく入らなくなる (実際 `@` が落ちていた)。
 #[test]
 fn ascii_maps_to_us_layout_scancodes() {
-    use rustx86_core::dev::kbd::scancode_shift;
+    use rustx86_core::dev::isa::kbd::scancode_shift;
 
     // 数字段の記号は数字のShift。タイプライタからの引き継ぎで、
     // キーの位置に意味があるわけではない
@@ -265,7 +265,7 @@ fn ascii_maps_to_us_layout_scancodes() {
 /// 「その記号だけ入らない」という分かりにくい症状になる
 #[test]
 fn every_printable_ascii_can_be_typed() {
-    use rustx86_core::dev::kbd::scancode_shift;
+    use rustx86_core::dev::isa::kbd::scancode_shift;
     for c in 0x20u8..0x7F {
         let ch = c as char;
         assert!(scancode_shift(ch).is_some(), "{ch:?} ({c:#04x}) が打てない");
