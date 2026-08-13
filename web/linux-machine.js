@@ -249,6 +249,10 @@ export function mountLinux(canvas, opts = {}) {
           mips = msg.mips || 0;
           idle = !!msg.idle;
           break;
+        case 'tone':
+          // PCスピーカー。鳴らすのはメイン (WebAudioはワーカーから触れない)
+          opts.onTone?.(msg.hz);
+          break;
         case 'trap':
           booted = false;
           status(`停止: ${msg.reason} — 画面は倒れた瞬間のまま`, true);
