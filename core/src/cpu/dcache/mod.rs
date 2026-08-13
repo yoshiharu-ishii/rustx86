@@ -83,6 +83,16 @@ pub(crate) enum Uop {
         reg: u8,
         rm: Rm,
     },
+    /// 66 89: mov rm16, r16 (上位16bitは不変)
+    Mov16RmR {
+        rm: Rm,
+        reg: u8,
+    },
+    /// 66 8B: mov r16, rm16 (上位16bitは不変)
+    Mov16RRm {
+        reg: u8,
+        rm: Rm,
+    },
     /// B8-BF: mov r32, imm32
     MovRImm {
         reg: u8,
@@ -284,6 +294,10 @@ pub struct DecodeCache {
     pub hits: u64,
     pub fills: u64,
     pub fallbacks: u64,
+    /// 従来経路落ちの理由 (opstats時のみ計上)。語彙拡大の的はこれで決める:
+    /// [0]=0x66 [1]=0x67 [2]=REP(F2/F3) [3]=LOCK [4]=ページ端(跨ぎ疑い)
+    /// [5]=語彙外オペコード [6]=16bitモード (CS.D=0、fallbacksとは別口)
+    pub fb_reasons: [u64; 7],
 }
 
 impl DecodeCache {
@@ -296,6 +310,7 @@ impl DecodeCache {
             hits: 0,
             fills: 0,
             fallbacks: 0,
+            fb_reasons: [0; 7],
         }
     }
 
@@ -417,9 +432,57 @@ fn uop_name(u: &Uop) -> &'static str {
 ///   ページ表の書き換えは実機同様TLB/invlpgの約束の上に居るし、
 ///   mov cr3 / invlpg はuopに無いので連結はそこで自然に切れる
 /// - TF (シングルステップ) 中は連結しない — 毎命令 INT1 の意味を守る
+/// 従来経路落ちの理由分類 (opstats専用の診断 — ホットパス外)。
+/// decode_atの却下条件を軽く写す: プレフィクス→ページ端→語彙外の順
+#[allow(dead_code)]
+fn classify_fallback(m: &mut Machine, pa: u32) {
+    let start = pa as usize;
+    if start >= m.mem.len() {
+        return;
+    }
+    let end = ((start | 0xFFF) + 1).min(m.mem.len());
+    let b = &m.mem[start..end];
+    let mut i = 0usize;
+    loop {
+        match b.get(i) {
+            Some(0x66) => {
+                m.dcache.fb_reasons[0] += 1;
+                return;
+            }
+            Some(0x67) => {
+                m.dcache.fb_reasons[1] += 1;
+                return;
+            }
+            Some(0xF2) | Some(0xF3) => {
+                m.dcache.fb_reasons[2] += 1;
+                return;
+            }
+            Some(0xF0) => {
+                m.dcache.fb_reasons[3] += 1;
+                return;
+            }
+            Some(0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65) => i += 1,
+            Some(_) => break,
+            None => {
+                m.dcache.fb_reasons[4] += 1; // ページ端でプレフィクスすら読めない
+                return;
+            }
+        }
+    }
+    // 命令窓がページ端で切れている疑い (decode_atは16B窓で見る)
+    if end - start < 16 {
+        m.dcache.fb_reasons[4] += 1;
+    } else {
+        m.dcache.fb_reasons[5] += 1;
+    }
+}
+
 pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     // 16bitコードは対象外 (ELKS/FreeDOSは従来経路)
     if !m.cpu.seg_is32(CS) {
+        if cfg!(feature = "opstats") {
+            m.dcache.fb_reasons[6] += 1;
+        }
         m.guard_save();
         return super::step(m);
     }
@@ -482,6 +545,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                 }
                 None => {
                     m.dcache.fallbacks += 1;
+                    if cfg!(feature = "opstats") {
+                        classify_fallback(m, pa);
+                    }
                     // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
                     // ブロック先頭のIP)
                     m.trap_ip = m.cpu.ip;
