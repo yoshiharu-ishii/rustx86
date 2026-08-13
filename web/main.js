@@ -193,7 +193,7 @@ const dbg = new Debugger({
   // 起動の流れそのものなので、スナップショット復帰では意味がない
   restart: async () => {
     if (linux) {
-      await linux.boot({ full: true });
+      await linux.boot();
       return;
     }
     if (!current) return;
@@ -224,7 +224,7 @@ $('boot').addEventListener('click', () => {
     // **再起動 = フル起動。** 実機の再起動がBIOSから走るのと同じで、
     // カーネルログの流れる本物のブートをやり直す。
     // スナップショットからの高速復帰は「マシンを選び直したとき」の顔
-    linux.boot({ full: true });
+    linux.boot();
     return;
   }
   if (lastImage) boot(lastImage, 'ディスク');

@@ -84,11 +84,11 @@ export const MACHINES = [
     kind: 'linux',
     status: 'ok',
     // ライブラリに並べる条件: どれか1つでも取れれば起動できる
-    probe: ['./linux-booted.snap.gz', './vmlinux-lts.gz', './vmlinuz-lts'],
+    probe: ['./vmlinuz-lts', './vmlinux-lts.gz'],
     note:
       'BIOSは通さず、カーネルを直接ロードして32bitエントリへ飛ぶ。' +
-      'コンソールはシリアル (ttyS0)。選ぶと起動済みスナップショットから数秒で復帰し、' +
-      '「再起動」はカーネルログの流れる本物のフル起動をやり直す。' +
+      'コンソールはシリアル (ttyS0)。選ぶと電源ONからカーネルログの流れる' +
+      '本物のフル起動 (〜20秒)。途中の状態は「スナップショット書出/復元」で残せる。' +
       'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す
