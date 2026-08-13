@@ -454,8 +454,18 @@ impl Machine {
     /// #UD 巻き戻し — どれも保護モードでしか起きないので、条件は PE ひとつ。
     /// Boxの器は使い回して確保を避ける
     #[inline]
+    /// 控えが要る状況か。使い道は #PF の巻き戻し (ページング有効時しか
+    /// 起きない) と、ユーザー空間 (CPL=3、v86含む) の #UD 巻き戻しの2つ —
+    /// どちらも起き得ない「ページングOFFかつリング0」(bzImage解凍ステブ等)
+    /// では複写が純粋な無駄 (step_innerの注釈の条件を、ゲートにも正確に写す。
+    /// 従来はpe()で粗く見ていた = 解凍ステブ540Mで払い続けていた)
+    #[inline]
+    fn guard_needed(&self) -> bool {
+        self.cpu.pe() && (self.cpu.pg() || self.cpu.cpl() == 3 || self.cpu.vm86())
+    }
+
     pub(crate) fn guard_save(&mut self) {
-        if self.cpu.pe() {
+        if self.guard_needed() {
             self.fault_save = self.cpu.clone();
             self.fault_save_kind = FaultSaveKind::Full;
         }
@@ -466,7 +476,7 @@ impl Machine {
     /// Cpu丸ごと (~400B) の複写はプロファイルの memmove 11%だった
     #[inline]
     pub(crate) fn guard_save_slim(&mut self) {
-        if self.cpu.pe() {
+        if self.guard_needed() {
             self.cpu.save_slim(&mut self.fault_slim);
             self.fault_save_kind = FaultSaveKind::Slim;
         }
