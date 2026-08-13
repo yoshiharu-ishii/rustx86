@@ -194,6 +194,21 @@ impl Pit8254 {
         })
     }
 
+    /// カウンタ2 (スピーカー) が出している矩形波の周波数 (Hz)。
+    ///
+    /// モード3 (矩形波) が定石だが、モード2 (レートジェネレータ) で
+    /// 鳴らすソフトも居るので両方を音とみなす。分周値1以下は可聴域の
+    /// 外どころか設定途中の値なので無音扱い。
+    /// **鳴っているかどうかはここでは決めない** — ゲート (0x61のbit0/1) は
+    /// システム制御ポート側の持ち物で、束ねるのは Machine::speaker_tone
+    pub fn speaker_freq(&self) -> Option<f64> {
+        let c = &self.counters[2];
+        if !c.running || !matches!(c.mode, 2 | 3) || c.reload_value() < 2 {
+            return None;
+        }
+        Some(CLOCK_HZ as f64 / c.reload_value() as f64)
+    }
+
     /// カウンタ0の割り込み周波数 (Hz)。設定を確認するための補助
     pub fn irq0_hz(&self) -> f64 {
         let c = &self.counters[0];
