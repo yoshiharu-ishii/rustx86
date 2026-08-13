@@ -22,7 +22,7 @@
 #
 # 出来上がるもの:
 #
-#     images/fd1440.img     ELKS 0.9.1 (ゲーム同梱。ELKS本体が持っている)
+#     images/fd2880.img     ELKS 0.9.1 (ゲームもネット一式もELKS本体が持っている)
 #     images/fd14boot.img   FreeDOS 1.4 の素の起動フロッピー
 #     images/fd14games.img  FreeDOS + テキストモードのゲーム
 #
@@ -49,7 +49,9 @@ WEB=web
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
+# 2.88MB版 = ELKS公式の全部入り (ゲーム + ktcp/telnet/urlget のネット一式)。
+# 1.44MB版はネット系ユーザーランドが丸ごと入っていない (2026-08-14 実測)
+ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd2880-minix.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
 DEVEL_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/devel
@@ -124,8 +126,21 @@ copy_into_image() { # image file...
 
 build_elks() {
   mkdir -p "$IMAGES"
-  fetch "$ELKS_URL" "$IMAGES/fd1440.img"
-  say "ELKS 完了 (tetris / invaders / ttypong / sl / matrix が最初から入っている)"
+  fetch "$ELKS_URL" "$IMAGES/fd2880.img"
+  # /bootopts の「#net=ne0」を有効化する。minixファイルシステムはホストで
+  # マウントできないが、**同じ長さのバイト置換ならfsを壊さずに済む**
+  # (8文字 → 8文字。コメント記号を末尾の空白に置き換えるだけ)
+  python3 - "$IMAGES/fd2880.img" <<'PY'
+import sys
+p = sys.argv[1]
+d = open(p, 'rb').read()
+patched = d.replace(b'#net=ne0', b'net=ne0 ', 1)
+patched = patched.replace(b'#ne0=12,0x300,,0x80', b'ne0=3,0x300,,0x80  ', 1)  # IRQはこちらのカードの3に合わせる
+if patched != d:
+    open(p, 'wb').write(patched)
+    print('==> /bootopts の net=ne0 を有効化した')
+PY
+  say "ELKS 完了 (ゲーム一式 + ktcp/telnet/urlget。net=ne0有効)"
 }
 
 build_linux() {
@@ -196,7 +211,7 @@ build_freedos() {
 
 publish_to_web() {
   mkdir -p "$WEB"
-  [ -f "$IMAGES/fd1440.img" ] && cp "$IMAGES/fd1440.img" "$WEB/fd1440.img"
+  [ -f "$IMAGES/fd2880.img" ] && cp "$IMAGES/fd2880.img" "$WEB/fd2880.img"
   # ブラウザ版はゲーム入りの方を使う。**素の起動ディスクだと
   # プロンプトに着いても何も入っていない**ので、それでは動かないのと同じである
   [ -f "$IMAGES/fd14games.img" ] && cp "$IMAGES/fd14games.img" "$WEB/fd14boot.img"

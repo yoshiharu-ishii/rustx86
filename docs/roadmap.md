@@ -119,7 +119,7 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
 - [x] **2c: ELKS起動** — BIOS HLE (INT 10h/11h/12h/13h/15h/16h/1Ah、IRQ0/1) と
       BIOSデータエリア、8042 (A20)、CMOS RTC を実装。**loginプロンプトまで到達**。
       さらに8042へスキャンコードを流して**rootでログインし、シェルが動く**。
-      `cargo run --release --example boot -- images/fd1440.img 50000000 root "uname -a"`
+      `cargo run --release --example boot -- images/fd2880.img 50000000 root "uname -a"`
 - [x] **2d: ブラウザ化** — WASM + canvas。テキストVRAMを直接描き、キー入力を
       8042へスキャンコードとして流す。**ブラウザ上でブート→login→シェルが動く**。
       `web/index.html`。責務ごとに3つに分けてある:

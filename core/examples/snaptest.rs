@@ -106,7 +106,7 @@ fn main() {
     }
 
     // ELKS (16bit・リアルモード。50Mはログイン到達後)
-    if let Ok(image) = std::fs::read(img("fd1440.img")) {
+    if let Ok(image) = std::fs::read(img("fd2880.img")) {
         let mut m = Machine::new();
         m.boot_from_disk(image).expect("boot");
         ok &= check("ELKS (16bit、保存点50M)", m, 50_000_000, 10_000_000);

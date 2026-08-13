@@ -6,7 +6,7 @@
 //! シェルが出た後にブラウザへ繋いでもコアの作り直しは起きない。
 //!
 //! ```text
-//! cargo run --release --example boot -- images/fd1440.img
+//! cargo run --release --example boot -- images/fd2880.img
 //! ```
 
 use rustx86_core::Machine;
