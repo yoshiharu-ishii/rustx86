@@ -98,21 +98,6 @@ impl Machine {
 
     /// 物理アドレスから読む (変換しない)。ページテーブルの歩きと、
     /// 物理番地で語る装置・テストが使う
-    /// TLBスロットの読み。wasmだけ境界検査を省く (D3、ADR-0016) —
-    /// slotはTLB_SLOTS-1でマスク済み・tlbは生成時にTLB_SLOTS本で固定。
-    /// nativeは検査が分岐予測でタダ (exp/hotpath-batch2で実測) なので素のまま
-    #[cfg(target_arch = "wasm32")]
-    #[inline(always)]
-    fn tlb_at(&self, slot: usize) -> &std::cell::Cell<TlbEntry> {
-        debug_assert!(slot < self.tlb.len());
-        unsafe { self.tlb.get_unchecked(slot) }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline(always)]
-    fn tlb_at(&self, slot: usize) -> &std::cell::Cell<TlbEntry> {
-        &self.tlb[slot]
-    }
-
     pub fn read_phys8(&self, pa: u32) -> u8 {
         // RAMを超えた番地は未マップ。実機のバスと同じく 0xFF を返す (折り返さない)。
         // リアルモードのアドレスは cpu::lin が 1MB に丸めてから来るので、
@@ -121,18 +106,9 @@ impl Machine {
     }
 
     pub fn read_phys32(&self, pa: u32) -> u32 {
-        // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)。
-        // wasmだけ検査を省いた非整列1発読み (D3 — 範囲はifが証明済み。
-        // nativeはLLVMが畳むのを実測済みなので素のまま)
+        // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
         let a = pa as usize;
         if a + 4 <= self.mem.len() {
-            #[cfg(target_arch = "wasm32")]
-            {
-                return u32::from_le(unsafe {
-                    std::ptr::read_unaligned(self.mem.as_ptr().add(a) as *const u32)
-                });
-            }
-            #[cfg(not(target_arch = "wasm32"))]
             u32::from_le_bytes([
                 self.mem[a],
                 self.mem[a + 1],
@@ -184,7 +160,7 @@ impl Machine {
         // --- TLBを引く。当たれば表を歩かない ---
         let vpn = la >> 12;
         let slot = (vpn as usize) & (TLB_SLOTS - 1);
-        let e = self.tlb_at(slot).get();
+        let e = self.tlb[slot].get();
         // ミス時: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
         // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る。
         // pde_addr は A ビットの宛先 (フィル時だけ要る)
