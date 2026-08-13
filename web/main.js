@@ -30,6 +30,14 @@ let machine = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
 
+/**
+ * **何から起動したVMなのか。** 一覧のどれを選んだかとは別物で、
+ * 落としたイメージや復元した状態から動いていることもある
+ * @type {'library'|'image'|'snapshot'|null}
+ */
+let bootOrigin = null;
+const ORIGIN_LABEL = { library: 'ライブラリ', image: 'イメージ', snapshot: '状態復元' };
+
 // ---------- ネットワーク ----------
 //
 // **既定は繋がない。** 電源を入れた機械にLANケーブルが刺さっていないのと
@@ -101,20 +109,14 @@ function syncControls() {
   const onWelcome = !$('welcomePane').hidden;
   // スタート画面では機械まわりを丸ごと伏せる。**まだ机に何も置いていないの
   // だから、備品も操作列も状態カードも出す意味がない** — 選ぶことに集中させる
-  for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'stateCard', 'devCard', 'infoCard']) {
+  for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'devCard', 'infoCard']) {
     $(id).hidden = onWelcome;
   }
   // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か
   $('footGuide').hidden = !onWelcome;
   $('footDisk').hidden = onWelcome;
-  if (onWelcome) {
-    $('brandName').textContent = 'rustx86';
-    $('brandSub').textContent = 'ブラウザの中の1台のPC';
-    return;
-  }
-  // 左肩は今どの機械を机に置いているか
-  $('brandName').textContent = current?.label ?? 'rustx86';
-  $('brandSub').textContent = current?.sub ?? '';
+  syncVmCard();
+  if (onWelcome) return;
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
   const powered = !!machine || !!linux?.booted;
   $('power').toggleAttribute('data-on', powered);
@@ -210,12 +212,10 @@ function boot(image, label) {
 /** 状態を右上のピルと左のカードへ同時に書く。**同じ数字を2つ持たない** */
 function showState(text, hist) {
   $('pillState').textContent = text;
-  $('stateRun').textContent = text;
   $('pillHist').textContent = hist;
-  $('stateHist').textContent = hist;
   // 走っていれば緑、止まっていれば灰
   const live = text !== '停止中' && text !== '電源オフ';
-  for (const d of [$('pillDot'), $('stateDot')]) d.classList.toggle('ok', live);
+  $('pillDot').classList.toggle('ok', live);
 }
 
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
@@ -403,6 +403,31 @@ function setNetLamp(state) {
     : '未接続';
 }
 
+/**
+ * 左上の「今のVM」と、端末の上の「起動元」。
+ * **同じ事実を粗さを変えて2箇所に出す** — 左は状態(何が動いているか)、
+ * 端末の上は素性(何を食わせて動いているか)
+ */
+function syncVmCard() {
+  const live = !!machine || !!linux?.booted;
+  const paused = machine?.paused || linux?.paused;
+  const via = bootOrigin ? `（${ORIGIN_LABEL[bootOrigin]}起動）` : '';
+  $('vmDot').classList.toggle('ok', live && !paused);
+  $('vmDot').classList.toggle('partial', !!paused);
+  $('vmState').textContent = !live ? '停止中' : paused ? `一時停止中${via}` : `実行中${via}`;
+  // **名前も素性に合わせる。** 落としたイメージで動いているのに一覧で
+  // 選んだOS名が出ていると、別物を見ていることになる
+  const name = bootOrigin === 'library' ? current?.label : lastLabel || current?.label;
+  $('vmName').textContent = live || bootOrigin ? name ?? '—' : 'マシンを選んでください';
+
+  const showOrigin = live && !!bootOrigin;
+  $('originRow').hidden = !showOrigin;
+  if (showOrigin) {
+    $('originKind').textContent = `起動元：${ORIGIN_LABEL[bootOrigin]}`;
+    $('originName').textContent = lastLabel || current?.file || '—';
+  }
+}
+
 /** 左の状態カードを今の姿に合わせる。**画面に出ている数字と同じ出どころ**にする */
 function syncSidebar() {
   const conJp = $('layout').value === 'jp' ? 'JIS 配列' : 'US 配列';
@@ -519,6 +544,7 @@ $('power').addEventListener('click', async () => {
     machine = null;
     term.reset();
     term.draw();
+    // 素性 (bootOrigin) は残す — 同じものからもう一度立ち上げるため
     setStatus('電源を切りました。もう一度押すと同じイメージで立ち上がります');
   } else if (lastImage) {
     boot(lastImage, lastLabel);
@@ -670,6 +696,7 @@ async function insertMedia(f) {
           linux.loadStateBytes(o.state);
         } else {
           if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+          bootOrigin = 'snapshot';
           await linux.boot({ snapshot: o.state });
         }
         setStatus(`${f.name} の状態に戻した (${stamp})`);
@@ -679,6 +706,7 @@ async function insertMedia(f) {
         setStatus('先に同じディスクイメージを起動してください (VGA機のスナップショット)', true);
         return;
       }
+      bootOrigin = 'snapshot';
       machine.loadState(o.state);
       term.reset();
       setStatus(`${f.name} の状態に戻した (${stamp})`);
@@ -695,9 +723,12 @@ async function insertMedia(f) {
   // 拡張子では決めない — vmlinux-lts のように拡張子を持たないものがある
   if (isKernel(bytes)) {
     if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+    bootOrigin = 'image';
+    lastLabel = f.name;
     await linux.boot({ kernel: bytes, kernelName: f.name });
     return;
   }
+  bootOrigin = 'image';
   boot(bytes, f.name);
 }
 
@@ -881,6 +912,8 @@ async function select(m, { autoBoot = true } = {}) {
     $('screen').hidden = true;
     $('welcomePane').hidden = false;
     showState('電源オフ', '履歴 0 行'); // 前のマシンの「アイドル」等を持ち越さない
+    bootOrigin = null;
+    lastLabel = '';
     showNote(null);
     setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
     dbg.reset();
@@ -909,6 +942,7 @@ async function select(m, { autoBoot = true } = {}) {
     return;
   }
 
+  bootOrigin = 'library';
   await bootFromUrl(m);
   startScript(scriptFor(m));
   dbg.reset();
