@@ -91,6 +91,8 @@ pub const IRQ_TIMER: u8 = 0;
 pub const IRQ_KEYBOARD: u8 = 1;
 /// IRQ4 (COM1) の割り込み線
 pub const IRQ_COM1: u8 = 4;
+/// NE2000の定番IRQ。DOSのパケットドライバの既定値に合わせる
+pub const IRQ_NET: u8 = 3;
 
 /// マシン全体。メモリとBIOS HLE (高位エミュレーション) を持つ。
 /// 本物のBIOSは実装せず、INT命令をフックして最小限のサービスだけ提供する。
@@ -433,6 +435,11 @@ impl Machine {
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
+        if let Some(net) = &self.devices.net {
+            if net.irq_pending() {
+                self.devices.pic[0].raise(IRQ_NET);
+            }
+        }
         // キーボードは割り込み駆動。**1バイトにつき1回だけ**挙手する
         if self.devices.keyboard.take_irq() {
             self.devices.pic[0].raise(IRQ_KEYBOARD);
@@ -611,6 +618,30 @@ impl Machine {
     /// 描画側が読んだ印。次の書き込みまで dirty が下りる
     pub fn take_vram_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.vram_dirty, false)
+    }
+
+    /// NE2000を挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
+    /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる
+    pub fn net_attach(&mut self, mac: [u8; 6]) {
+        self.devices.net = Some(dev::Ne2000::new(mac));
+    }
+
+    /// 外の世界 (WebSocket等) から届いたEthernetフレームを受信リングへ。
+    /// シリアルの feed と同じ境界 — 入れるタイミングは外側が決め、
+    /// 同じ列を同じタイミングで入れれば実行は決定的になる
+    pub fn net_inject_frame(&mut self, frame: &[u8]) -> bool {
+        match &mut self.devices.net {
+            Some(net) => net.inject_frame(frame),
+            None => false,
+        }
+    }
+
+    /// ゲストが送信したフレームを回収する (読むと消える)。serial_outと同じ作法
+    pub fn net_take_frames(&mut self) -> Vec<Vec<u8>> {
+        match &mut self.devices.net {
+            Some(net) => net.tx_out.drain(..).collect(),
+            None => Vec::new(),
+        }
     }
 
     /// PCスピーカーが今出している音の周波数 (Hz)。無音なら None。
