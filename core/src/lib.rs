@@ -252,7 +252,7 @@ pub(crate) struct PcTrans {
     pub(crate) epoch: u32,
 }
 /// 器のスロット数。census: 静的PC~26万に対して64K — 衝突分は素直にmiss
-pub(crate) const PRED_SLOTS: usize = 64 * 1024;
+pub(crate) const PRED_SLOTS: usize = 8 * 1024;
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
 /// 権限 (書ける/ユーザーで触れる) はここに持ち、CPLとWPは引くたびに新しく見る
