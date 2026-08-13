@@ -5,6 +5,7 @@
 
 pub mod bus;
 
+use crate::{PcTrans, PRED_SLOTS};
 use crate::{cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
 
 /// ページウォーク1回の結果。物理先頭・権限に加えて、
@@ -24,6 +25,8 @@ impl Machine {
     /// スナップショット復元の後に呼ぶ。**表を書き換えたのに写しが古いと
     /// 幽霊のページが見え続ける**ので、切り替えの合図で必ず捨てる
     pub fn tlb_flush(&self) {
+        // PC-lookaheadも同時に一括失効 (epoch1本 — 実TLBと同じ点で閉じる)
+        self.tlb_epoch.set(self.tlb_epoch.get().wrapping_add(1));
         for slot in &self.tlb {
             let mut e = slot.get();
             e.tag = TLB_INVALID;
@@ -34,6 +37,9 @@ impl Machine {
     /// TLBの1ページだけ無効化する (INVLPG)。ページテーブルの1エントリを
     /// 書き換えたカーネルは、この命令でそのページの写しだけを捨てる
     pub fn tlb_flush_page(&self, la: u32) {
+        // 1ページ失効でもpredictorは全体失効 (過剰だが意味論上は完全に安全 —
+        // まず勝つかを見る。細粒度化は勝ってから)
+        self.tlb_epoch.set(self.tlb_epoch.get().wrapping_add(1));
         let slot = ((la >> 12) as usize) & (TLB_SLOTS - 1);
         let mut e = self.tlb[slot].get();
         e.tag = TLB_INVALID;
@@ -156,6 +162,21 @@ impl Machine {
     pub fn translate_for(&self, la: u32, write: bool) -> Result<u32, PageFault> {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
             return Ok(la); // PG off: 線形がそのまま物理
+        }
+        // census (opstats時のみ): 同じ静的命令PCが前回と同じVPNを触るか —
+        // PC-indexed translation lookaheadの的中率見積もり
+        if cfg!(feature = "opstats") {
+            // 器を無限にしたときの真の天井 (HashMap) — 実装時の器サイズは別途
+            let pc = self.census_pc.get();
+            let vpn = la >> 12;
+            let mut tab = self.pred_census_map.borrow_mut();
+            let mut c = self.pred_census_counts.get();
+            match tab.insert(pc, vpn) {
+                Some(prev) if prev == vpn => c[0] += 1, // hit
+                Some(_) => c[1] += 1,                   // vpn変化
+                None => c[2] += 1,                      // 初回
+            }
+            self.pred_census_counts.set(c);
         }
         // --- TLBを引く。当たれば表を歩かない ---
         let vpn = la >> 12;
@@ -392,15 +413,39 @@ impl Machine {
     /// 呼び手はguard控えを省ける。揃わなければ None (呼び手は控えてから
     /// 従来経路へ — フォールトの配送は常に従来経路 = 控えの不変条件は無傷)
     #[inline]
-    pub(crate) fn fast_read32(&mut self, seg: usize, off: u32) -> Option<u32> {
+    pub(crate) fn fast_read32(&mut self, seg: usize, off: u32, pc: u32) -> Option<u32> {
         if !self.cpu.pe() || self.cpu.vm86() || !self.cpu.hidden[seg].flat_rw() {
             return None;
         }
         if off & 0xFFF > 0xFFC {
             return None; // ページ跨ぎは従来経路 (write16×2系の意味を守る)
         }
+        // PC-indexed translation lookahead: 器の添字はpcだけから決まる
+        // (EA非依存の独立枝)。当たれば TLBロード→base→RAM の2段が
+        // base既知→RAM の1段になる。CPL0の読み限定 (v1)
+        let vpn = off >> 12;
+        let slot = ((pc >> 2) ^ (pc >> 18)) as usize & (PRED_SLOTS - 1);
+        let pr = self.pred[slot];
+        if pr.pc_tag == pc
+            && pr.vpn == vpn
+            && pr.epoch == self.tlb_epoch.get()
+            && self.cpu.cpl() == 0
+        {
+            return Some(self.read_phys32(pr.base | (off & 0xFFF)));
+        }
         match self.translate_for(off, false) {
-            Ok(pa) => Some(self.read_phys32(pa)),
+            Ok(pa) => {
+                // fillは変換成功後だけ — 権限検査とA-bitは今この経路で確立した
+                if self.cpu.cpl() == 0 {
+                    self.pred[slot] = PcTrans {
+                        pc_tag: pc,
+                        vpn,
+                        base: pa & !0xFFF,
+                        epoch: self.tlb_epoch.get(),
+                    };
+                }
+                Some(self.read_phys32(pa))
+            }
             Err(_) => None, // フォールトは従来経路が控えつきでやり直す
         }
     }

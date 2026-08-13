@@ -176,12 +176,12 @@ fn fast_push32(m: &mut Machine, v: u32) -> bool {
 
 /// popの速い道。読みが確定したときだけSPを確定 (push32/pop_wと同じ約束)
 #[inline]
-fn fast_pop32(m: &mut Machine) -> Option<u32> {
+fn fast_pop32(m: &mut Machine, pc: u32) -> Option<u32> {
     if !m.cpu.hidden[SS].big {
         return None;
     }
     let sp = m.cpu.regs[SP];
-    let v = m.fast_read32(SS, sp)?;
+    let v = m.fast_read32(SS, sp, pc)?;
     m.cpu.regs[SP] = sp.wrapping_add(4);
     Some(v)
 }
@@ -231,7 +231,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
                 Rm::Mem(mr) => {
                     let off = off_of(m, &mr);
-                    match m.fast_read32(mr.seg as usize, off) {
+                    match m.fast_read32(mr.seg as usize, off, prev_ip) {
                         Some(v) => v,
                         None => {
                             m.guard_save_slim_at(prev_ip);
@@ -306,7 +306,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 Rm::Mem(mr) => {
                     let off = off_of(m, &mr);
                     if kind == 7 {
-                        let a = match m.fast_read32(mr.seg as usize, off) {
+                        let a = match m.fast_read32(mr.seg as usize, off, prev_ip) {
                             Some(v) => v,
                             None => slow_read32(m, &mr, prev_ip),
                         };
@@ -327,7 +327,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
                 Rm::Mem(mr) => {
                     let off = off_of(m, &mr);
-                    match m.fast_read32(mr.seg as usize, off) {
+                    match m.fast_read32(mr.seg as usize, off, prev_ip) {
                         Some(v) => v,
                         None => {
                             m.guard_save_slim_at(prev_ip);
@@ -411,7 +411,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             Rm::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if kind == 7 {
-                    let a = match m.fast_read32(mr.seg as usize, off) {
+                    let a = match m.fast_read32(mr.seg as usize, off, prev_ip) {
                         Some(v) => v,
                         None => slow_read32(m, &mr, prev_ip),
                     };
@@ -455,7 +455,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
                 Rm::Mem(mr) => {
                     let off = off_of(m, &mr);
-                    match m.fast_read32(mr.seg as usize, off) {
+                    match m.fast_read32(mr.seg as usize, off, prev_ip) {
                         Some(v) => v,
                         None => {
                             m.guard_save_slim_at(prev_ip);
@@ -504,7 +504,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             m.cpu.set_ip(ret.wrapping_add(rel));
         }
         Uop::Ret => {
-            let ip = match fast_pop32(m) {
+            let ip = match fast_pop32(m, prev_ip) {
                 Some(v) => v,
                 None => {
                     m.guard_save_slim_at(prev_ip);
@@ -521,7 +521,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             }
         }
         Uop::PopR { reg } => {
-            match fast_pop32(m) {
+            match fast_pop32(m, prev_ip) {
                 Some(v) => m.cpu.regs[reg as usize] = v,
                 None => {
                     m.guard_save_slim_at(prev_ip);
@@ -609,7 +609,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             let bp = m.cpu.regs[BP];
             let fast = m.cpu.hidden[SS].big;
             if fast {
-                if let Some(v) = m.fast_read32(SS, bp) {
+                if let Some(v) = m.fast_read32(SS, bp, prev_ip) {
                     // 読みが確定してから両レジスタを動かす (jit_try_leaveと同順)
                     m.cpu.regs[SP] = bp.wrapping_add(4);
                     m.cpu.regs[BP] = v;

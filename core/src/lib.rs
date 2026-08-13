@@ -198,6 +198,23 @@ pub struct Machine {
     /// 読み取って、「飛ばした時間ぶんだけ実時間で待つ」ことでゲストの時計を
     /// 実時間に繋ぎ止める。忙しい実行は自由に速く、暇は実時間どおりに流れる
     pub idle_skipped: u64,
+    /// PC-indexed translation lookahead (2026-08-13、census天井83.5%)。
+    /// 命令PCをキーに「前回この命令が触ったdata VPNとphys base」を控える。
+    /// **器のロード番地はEAに依存しない独立枝** — OoOがEA計算と並列に発行でき、
+    /// 当たればTLBロードが依存鎖から消える (判別則(2)の一段潰し)。
+    /// fillはtranslate_for成功後だけ (権限・A-bitは既存経路で確立済み)
+    pred: Vec<PcTrans>,
+    /// TLB無効化の世代。tlb_flush / tlb_flush_page で進む = predictorの一括失効。
+    /// spurious #PF対策のflush_pageもここを通るので、意味論は実TLBと同時に閉じる
+    tlb_epoch: std::cell::Cell<u32>,
+    /// PC-indexed translation lookaheadのcensus (opstats時のみ動く)。
+    /// 「同じ静的命令PCが前回と同じdata VPNを触るか」の的中率を測る —
+    /// 80%超なら予測器を実装する価値がある (ChatGPT提案 2026-08-13)
+    pub pred_census_map: std::cell::RefCell<std::collections::HashMap<u32, u32>>,
+    /// [0]=hit (同PC同VPN) [1]=vpn変化 [2]=衝突/初回
+    pub pred_census_counts: std::cell::Cell<[u64; 3]>,
+    /// いま実行中の命令の物理番地 (step_cachedが毎命令書く、opstats時のみ)
+    pub census_pc: std::cell::Cell<u32>,
     /// オペコードの実行回数 (計測用)。0..256 = 1バイト命令、256.. = 0F 2バイト目。
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
@@ -224,6 +241,18 @@ pub struct Machine {
     /// 値は例外ベクタ (13=#GP / 12=#SS)。エラーコードは常に0
     pending_seg_fault: std::cell::Cell<Option<u8>>,
 }
+
+/// PC-indexed translation lookaheadの1エントリ (16B)。
+/// epoch不一致 = 失効 (default=0は常に失効)
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PcTrans {
+    pub(crate) pc_tag: u32,
+    pub(crate) vpn: u32,
+    pub(crate) base: u32,
+    pub(crate) epoch: u32,
+}
+/// 器のスロット数。census: 静的PC~26万に対して64K — 衝突分は素直にmiss
+pub(crate) const PRED_SLOTS: usize = 64 * 1024;
 
 /// TLBの1エントリ。present な変換だけを載せる (不在フォールトは載せない)。
 /// 権限 (書ける/ユーザーで触れる) はここに持ち、CPLとWPは引くたびに新しく見る
@@ -307,6 +336,11 @@ impl Machine {
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
+            pred: vec![PcTrans::default(); PRED_SLOTS],
+            tlb_epoch: std::cell::Cell::new(1), // 0はdefault(空き)と衝突させない
+            pred_census_map: std::cell::RefCell::new(std::collections::HashMap::new()),
+            pred_census_counts: std::cell::Cell::new([0; 3]),
+            census_pc: std::cell::Cell::new(0),
             op_counts: vec![0; 512],
             console: Vec::new(),
             disk: None,
