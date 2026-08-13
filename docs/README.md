@@ -20,6 +20,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [アーキテクチャ](explanation/architecture.md) | CPUと装置の接続図。なぜPCはこの形なのか。**最初はここから** |
 | [ロードマップ](roadmap.md) | 深さ (Tier 1〜9) × 広さ (箱 B1〜B5) の計画全文。原本はここ (READMEには書かない) |
 | [JITの考え方と仕組み](explanation/jit.md) | インタプリタ/AOT/JITの違い、なぜ速くなるのか、結果論の台帳 |
+| [ネットワーク](explanation/network.md) | ブラウザの中のPCがインターネットに出るまで。灯りの読み方、ゲストごとのNIC |
 | [踏んだ罠の型](explanation/pitfalls.md) | 「教科書どおりに書いたのに罠」10型。他所でも踏み得るものだけ |
 
 ### 🔧 手を動かす (how-to — 作業のとき開く)

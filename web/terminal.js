@@ -132,6 +132,10 @@ export class Terminal {
     this.scrollback.length = 0;
     this.scrollbackAttrs.length = 0;
     this.screen = [];
+    // **表示中のセルも捨てる。** ここを残すと、次に draw() したとき
+    // 消したはずの前の画面がそのまま描き直される (電源を切っても
+    // 画面が消えなかった)。起動経路は reset の直後に sample() で入れ直す
+    this.cells = null;
     this.prevCells = null;
     this.offset = 0;
     this.selection = null;

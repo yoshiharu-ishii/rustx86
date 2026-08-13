@@ -92,6 +92,49 @@
     font: inherit; font-size: .8rem; padding: .15rem .3rem; border-radius: .3rem;
     border: 1px solid #3d3d3d; background: #1e1e1e; color: #e0e0e0;
   }
+  /* 上段 (机の上の備品) は下段より控えめに。**主役は機械の操作**である */
+  .toolbar.rig { background: #101010; padding-top: .4rem; padding-bottom: .4rem; }
+  .toolbar.box { border-bottom: 1px solid #2a2a2a; }
+
+  /* 電源。押した先が「入」か「切」かはボタンの色で言う */
+  .toolbar .power { display: inline-flex; align-items: center; gap: .35rem; }
+  .power svg {
+    width: 1.05em; height: 1.05em; fill: none; stroke: currentColor;
+    stroke-width: 1.6; stroke-linecap: round; color: #8a8a8a;
+  }
+  .power[data-on] svg { color: #5dbb5d; }
+
+  /* ネットワークボタン。**状態は色で言う** — 文字を読ませない。
+     既定 (灰) は「まだ繋いでいない」で、故障ではない */
+  .toolbar .netbtn { display: inline-flex; align-items: center; gap: .35rem; }
+  .netbtn svg { width: 1.05em; height: 1.05em; fill: currentColor; color: #6b6b6b; }
+  .netbtn svg .pin { fill: #141414; }
+  .netbtn[data-net="up"] svg { color: #4ade80; }
+  .netbtn[data-net="down"] svg { color: #f87171; }
+  /* 接続を試している間だけ瞬く。相手が居ないときの数秒を「固まった」に見せない */
+  .netbtn[data-net="wait"] svg { color: #fbbf24; animation: netblink 1s steps(2) infinite; }
+  @keyframes netblink { 50% { opacity: .35 } }
+
+  /* 設定ダイアログ。<dialog>::backdrop を使うので z-index も後始末も要らない */
+  dialog.panel {
+    border: 1px solid #3d3d3d; border-radius: .5rem; background: #1a1a1a; color: #e0e0e0;
+    padding: 1rem 1.1rem; width: min(26rem, 92vw); font: inherit;
+  }
+  dialog.panel::backdrop { background: #000a; }
+  dialog.panel h3 { margin: 0 0 .2rem; font-size: 1rem; font-weight: 500; }
+  dialog.panel .hint { margin: 0 0 .9rem; font-size: .8rem; color: #9a9a9a; line-height: 1.5; }
+  dialog.panel label { display: block; font-size: .78rem; color: #9a9a9a; margin: .6rem 0 .2rem; }
+  dialog.panel input[type=text] {
+    width: 100%; box-sizing: border-box; font: inherit; font-size: .85rem;
+    font-family: ui-monospace, Menlo, monospace;
+    padding: .3rem .45rem; border-radius: .3rem;
+    border: 1px solid #3d3d3d; background: #111; color: #9fd39f;
+  }
+  dialog.panel .row { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; }
+  dialog.panel .msg { font-size: .8rem; min-height: 1.3em; margin-top: .7rem; }
+  dialog.panel .msg.ok { color: #4ade80; }
+  dialog.panel .msg.ng { color: #f87171; }
+  dialog.panel .msg.wait { color: #fbbf24; }
   .spacer { flex: 1 }
   .gauge {
     font-family: ui-monospace, Menlo, monospace; font-size: .78rem;
@@ -149,7 +192,37 @@
   <nav class="machines" id="machines" aria-label="マシン"></nav>
   <div>
   <div class="console" id="console">
-    <div class="toolbar">
+    <!-- 上段は**機械の外側にあるもの**。どの機械を選んでも同じで、
+         機械を選ぶ前から触れる (LANケーブルもキーボードも、机の上の備品) -->
+    <div class="toolbar rig">
+      <!-- NIC。**LANポートの絵**そのもの (RJ45の爪つき) を灯りにする。
+           灰=繋いでいない / 緑=繋がった / 赤=繋がらない -->
+      <button id="net" class="netbtn" title="Network:Disable">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 1.5h8v4.2h2.2v8.8H1.8V5.7H4z" />
+          <rect class="pin" x="4.2" y="7.5" width="1.2" height="2.4" />
+          <rect class="pin" x="6.3" y="7.5" width="1.2" height="2.4" />
+          <rect class="pin" x="8.4" y="7.5" width="1.2" height="2.4" />
+          <rect class="pin" x="10.5" y="7.5" width="1.2" height="2.4" />
+        </svg>
+        NIC
+      </button>
+      <label class="sel">配列
+        <select id="layout">
+          <option value="jp">JIS</option>
+          <option value="us">US</option>
+        </select>
+      </label>
+    </div>
+    <!-- 下段は**この機械の操作**。機械を選んでいないときは丸ごと伏せる -->
+    <div class="toolbar box">
+      <button id="power" class="power" disabled title="電源">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 1.6v6.2" />
+          <path d="M12.2 3.4a5.6 5.6 0 1 1-8.4 0" />
+        </svg>
+        電源
+      </button>
       <button id="boot" disabled>再起動</button>
       <button id="pause" disabled>一時停止</button>
       <button id="snapExport" disabled>スナップショット書出</button>
@@ -157,12 +230,6 @@
       <input id="snapFile" type="file" accept=".rx86snap" hidden>
       <button id="save">ログを保存</button>
       <button id="debug" disabled>デバッガ</button>
-      <label class="sel">配列
-        <select id="layout">
-          <option value="jp">JIS</option>
-          <option value="us">US</option>
-        </select>
-      </label>
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
     </div>
@@ -191,6 +258,31 @@
   <p id="machineNote"></p>
   </div>
   </div>
+
+  <!-- ネットワークの設定。**繋ぎ先を覚えるのはブラウザの仕事**なので
+       localStorage に置く。URLに ?net= があるときはそちらが勝ち、
+       この画面は「今どこに繋がっているか」の表示だけになる -->
+  <dialog id="netDialog" class="panel">
+    <h3>ネットワーク</h3>
+    <p class="hint">網元 (<a href="https://github.com/yoshiharu-ishii/wsslirp" target="_blank"
+        rel="noopener">wsslirpd</a>) を手元で動かしているなら既定のままで繋がります。
+      仕組みとゲストごとの使い方は
+      <a href="https://github.com/yoshiharu-ishii/rustx86/blob/main/docs/explanation/network.md"
+        target="_blank" rel="noopener">network.md</a> に。</p>
+    <form method="dialog" id="netForm">
+      <label for="netUrl">接続先 (ws:// または wss://)</label>
+      <input id="netUrl" type="text" value="ws://127.0.0.1:8087/net" spellcheck="false">
+      <label for="netToken">トークン (デーモンに -token を付けていなければ空)</label>
+      <input id="netToken" type="text" spellcheck="false" autocomplete="off">
+      <p class="msg" id="netMsg"></p>
+      <div class="row">
+        <button id="netConnect" value="connect">Connect</button>
+        <button id="netDisconnect" value="disconnect" hidden>Disconnect</button>
+        <span class="spacer"></span>
+        <button value="close">閉じる</button>
+      </div>
+    </form>
+  </dialog>
 
 
   <input type="file" id="imageFile" accept=".img,.ima,.bin,.json" hidden>
