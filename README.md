@@ -121,8 +121,8 @@ Unicorn との突き合わせ (`cosim`) はビルドに数分かかるため、
 ### ディスクイメージを取ってくる
 
 ```bash
-tools/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
-tools/fetch-images.sh elks     # 片方だけでもよい
+tools/images/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
+tools/images/fetch-images.sh elks     # 片方だけでもよい
 ```
 
 **イメージはリポジトリに含めていない。** 再配布が禁じられているからではなく
@@ -150,12 +150,12 @@ CGAグラフィックスを要求するものは Tier 6 まで動かない
 ### ブラウザで動かす (これが主役)
 
 ```bash
-tools/build-web.sh        # wasm を焼く
+tools/build/build-web.sh        # wasm を焼く
 python3 web/serve.py 8001
 # http://localhost:8001/ を開き、左からマシンを選ぶ
 ```
 
-- **`tools/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
+- **`tools/build/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
   `serve.py` の `no-store` が全部引き受けるので、**かつてあった `?v=番号` は
   廃止した** — 手で番号を上げる方式は、上げ忘れ・片方だけ上げるという
   新しい事故を生むだけだった

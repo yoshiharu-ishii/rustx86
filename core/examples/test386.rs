@@ -1,6 +1,6 @@
 //! test386.asm ROM実行ハーネス — 互換ピラミッド L1 (CPU総合バイナリ)。
 //!
-//!   tools/fetch-images.sh test386   # ROMのビルド (nasm) と期待値の取得
+//!   tools/images/fetch-images.sh test386   # ROMのビルド (nasm) と期待値の取得
 //!   cargo run --release --example test386
 //!
 //! 86Box/PCem界隈の定番CPUテストROMを生で実行する。判定は2段:

@@ -5,7 +5,7 @@
 # エミュレータにはまだブロックデバイスが無い。探させない。
 # busybox は Alpine の initramfs-lts から借りる (静的リンク・動作実績あり)。
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 [ -f images/initramfs-lts ] || { echo "images/initramfs-lts が無い"; exit 1; }
 [ -f tools/guest/snake ] || { echo "tools/guest/snake が無い"; exit 1; }
 
@@ -17,7 +17,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 if command -v cpio >/dev/null 2>&1; then
   (cd "$work" && gunzip -c "$OLDPWD/images/initramfs-lts" | cpio -idm --quiet 2>/dev/null)
 else
-  python3 tools/mkcpio.py --extract images/initramfs-lts "$work"
+  python3 tools/images/mkcpio.py --extract images/initramfs-lts "$work"
 fi
 [ -f "$work/bin/busybox" ] || { echo "busyboxが取り出せない"; exit 1; }
 [ -f "$work/lib/ld-musl-i386.so.1" ] || { echo "ld-muslが取り出せない"; exit 1; }
@@ -45,9 +45,9 @@ echo
 exec /bin/busybox sh
 INIT
 chmod 755 "$work/root/init"
-# cpioは自前で書く (tools/mkcpio.py) — /dev/console ノードを非rootで
+# cpioは自前で書く (tools/images/mkcpio.py) — /dev/console ノードを非rootで
 # 含めるため。コンソールノードが無いとinitは入出力ゼロの盲目で走る
-python3 tools/mkcpio.py "$work/mini.cpio" "$work/root" --console
+python3 tools/images/mkcpio.py "$work/mini.cpio" "$work/root" --console
 gzip -c "$work/mini.cpio" > images/initramfs-mini
 # ブラウザ版 (linux-machine.js) は web/ から読む。置き忘れると initrd 無しで
 # 起動して VFS パニックになる (実際になった) ので、作ったその場で配る

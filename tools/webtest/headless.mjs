@@ -39,9 +39,11 @@ while (n < CAP) {
   if (tr) { console.log(`[TRAP] ${tr}`); break; }
   if (serial.includes('busybox shell')) { banner = true; break; }
 }
+// 尺度は時間 (ネイティブの100m走と同じ)。命令数は決定的に毎回同一なので
+// 変数は時間だけ — MIPSは分子固定の割り算にすぎず、出さない (2026-08-13)。
+// course はこの定規のコース長 (50M刻みの量子化込み)。コースが同じ走り同士だけ比べる
 const bootSecs = ((Date.now() - t0) / 1000).toFixed(1);
-const mips = (n / ((Date.now() - t0) / 1000) / 1e6).toFixed(1);
-console.log(`banner=${banner}  instrs=${(n/1e6)|0}M  time=${bootSecs}s  ${mips}MIPS`);
+console.log(`banner=${banner}  course=${(n/1e6)|0}M  time=${bootSecs}s`);
 
 let snakeOk = false;
 if (banner) {

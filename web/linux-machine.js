@@ -40,6 +40,14 @@ export function mountLinux(canvas, opts = {}) {
   let mips = 0;
   /** アイドル (HLT待ち) か。ワーカーが実時間に間を合わせている印 */
   let idle = false;
+  /** 起動の定規 (headless.mjs と同じ定義): 機械を組んでからシリアルに
+      バナーが出るまでの秒数。尺度は時間で統一 (2026-08-13)。
+      bootT0 が非null の間だけ計測中 */
+  let bootT0 = null;
+  let bootSecs = null;
+  let bannerTail = ''; // バナー検出用のシリアル末尾 (全文は持たない)
+  const BANNER = 'busybox shell';
+  const latin1 = new TextDecoder('latin1');
   /** 「状態を保存」の控え。64MBあるので localStorage ではなくメモリに持つ
       (ページを閉じると消える) */
   let captureWaiters = []; // captureState (書出) の返事待ち
@@ -158,7 +166,7 @@ export function mountLinux(canvas, opts = {}) {
       } catch (e) {
         status(
           `イメージが読めない: ${e.message}。` +
-            'tools/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
+            'tools/images/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
           true,
         );
         busy = false;
@@ -187,6 +195,11 @@ export function mountLinux(canvas, opts = {}) {
           if (snapshot) {
             worker.postMessage({ type: 'boot', snapshot: snapshot.buffer }, [snapshot.buffer]);
           } else {
+            // 定規の始点 = 機械を組み始める瞬間 (headless.mjs の t0 と同じ)。
+            // fetch は含めない — 測るのは計算の速さで、回線の速さではない
+            bootT0 = performance.now();
+            bootSecs = null;
+            bannerTail = '';
             worker.postMessage(
               { type: 'boot', kernel: kernel.buffer, initrd: initrd?.buffer, cmdline: 'console=ttyS0', ramMb: 128 },
               initrd ? [kernel.buffer, initrd.buffer] : [kernel.buffer],
@@ -203,9 +216,20 @@ export function mountLinux(canvas, opts = {}) {
           opts.onState?.();
           break;
         }
-        case 'serial':
-          term.write(new Uint8Array(msg.bytes));
+        case 'serial': {
+          const bytes = new Uint8Array(msg.bytes);
+          term.write(bytes);
+          // 起動の定規: バナーが流れてきた瞬間に止める (境界跨ぎ対策で末尾を継ぐ)
+          if (bootT0 !== null) {
+            bannerTail = (bannerTail + latin1.decode(bytes)).slice(-4096);
+            if (bannerTail.includes(BANNER)) {
+              bootSecs = (performance.now() - bootT0) / 1000;
+              bootT0 = null;
+              bannerTail = '';
+            }
+          }
           break;
+        }
         case 'state': {
           // captureState (スナップショット書出) の返事。控えは持たない —
           // 保存/復元はファイルに一本化した (Tier 3g)
@@ -256,6 +280,8 @@ export function mountLinux(canvas, opts = {}) {
     get paused() { return paused; },
     get mips() { return mips; },
     get idle() { return idle; },
+    /** 起動〜バナーの秒数 (headless.mjs と同じ定義)。未到達なら null */
+    get bootSecs() { return bootSecs; },
     setPaused(v) {
       if (!worker || !booted || paused === v) return;
       paused = v;

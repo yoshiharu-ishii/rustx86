@@ -2,7 +2,7 @@
 //! 燃えているか」を出す計測ハーネス。
 //!
 //!   cargo run --release --example bootprof -- images/vmlinux-lts > /tmp/bootprof.txt
-//!   uv run --with pyelftools python3 tools/bootprof-resolve.py /tmp/bootprof.txt images/vmlinux-lts
+//!   uv run --with pyelftools python3 tools/perf/bootprof-resolve.py /tmp/bootprof.txt images/vmlinux-lts
 //!
 //! 決定的なので同じイメージなら毎回同じヒストグラムになる。
 //! サンプリングは4096命令ごと (580Mで約14万点) — E系 (実行量を減らす) の
