@@ -1,27 +1,13 @@
-//! ISA時代の装置。
+//! 装置。**ハードウェアバスごとにディレクトリを分ける** ([ADR-0017](../../../docs/adr/0017-network-isa-first.md))。
 //!
-//! この3つは **32bit Linuxでもそのまま使う**。だから捨てにならない順として
-//! 最初に作っている ([ADR-0002](../../../docs/adr/0002-devices-and-16bit-unix.md))。
+//! - [`isa`] — ISA (とその前身のPC/XTバス) の装置。アドレスは定数で、
+//!   デコーダは `match` で足りる
+//! - `pci` (将来) — 装置を数える仕組み (設定空間) を持つ側。動的な振り分けは
+//!   PCIが来たときにPCI側が持つ
 //!
-//! - [`pic`] 8259 — 割り込みの交通整理
-//! - [`crtc`] MC6845 — カーソル位置と表示開始アドレス
-//! - [`cmos`] MC146818 — 時計とマシンの構成情報
-//! - [`kbd`] 8042 — キーボード。**ついでにA20ゲートも握っている**
-//! - [`pit`] 8254 — 時を刻む
-//! - [`uart`] 16550 — シリアルコンソール
-//!
-//! いずれも1980年代前半の部品で、互換性のために現代のPCにも生き残っている。
+//! 再エクスポートしているのは、使う側 (バスのデコーダ) にとって装置の所属バスが
+//! 型名の一部である必要は無いからである。
 
-pub mod cmos;
-pub mod crtc;
-pub mod kbd;
-pub mod pic;
-pub mod pit;
-pub mod uart;
+pub mod isa;
 
-pub use cmos::Cmos;
-pub use crtc::Crtc;
-pub use kbd::Kbd8042;
-pub use pic::Pic8259;
-pub use pit::Pit8254;
-pub use uart::Uart16550;
+pub use isa::{Cmos, Crtc, Kbd8042, Pic8259, Pit8254, Uart16550};
