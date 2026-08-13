@@ -324,14 +324,13 @@ jobs:
     name: スナップショット
     # 保存/復元のIntegration: 往復ビット不変 + 復元の透明性 (K命令後の全状態一致)。
     #
-    # 位置は**機械層** (互換ピラミッド、docs/reference/ci.md):
-    #   土台 (コードチェック) → CPU層 (CPU照合+CPU互換) → 機械層 (OS起動回帰+ここ)
-    # 命令の意味が合っていない機械の「状態一致」は無意味 (両方同じように
-    # 間違っていても通る) — だから機械層はCPU層の合格の上に建つ。
-    # CPU層がPRでskipされた場合 (CPUに触れないPR) は素通しでよい —
-    # その場合CPUの意味はmainで証明済みのまま変わっていない
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' }}
-    needs: [check, cosim, compat386]
+    # 位置は**機能層** — 互換ピラミッドの最上段 (docs/reference/ci.md):
+    #   土台 (コードチェック) → CPU層 (照合+互換) → 機械層 (OS起動回帰) → ここ
+    # スナップショットは「動く機械の上の機能」— OSが起動しない機械の
+    # 状態保存に機能としての価値は無いので、起動回帰の合格の上に建つ。
+    # 下の層がPRでskipのときは素通し (mainで証明済みのまま)、failureなら止まる
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' && needs.regress.result != 'failure' }}
+    needs: [check, cosim, compat386, regress]
     runs-on: ubuntu-latest
     env:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
