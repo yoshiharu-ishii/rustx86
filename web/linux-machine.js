@@ -114,12 +114,12 @@ export function mountLinux(canvas, opts = {}) {
   }
 
   /**
-   * 起動する。既定はスナップショット優先 (数秒でシェル)。
-   * `{ full: true }` で**必ずフル起動** — カーネルログが流れる本物の起動を
-   * UI (電源ONボタン) から選べるようにする。スナップショットに乗っ取られて
-   * フルブートが見られない、を防ぐ
+   * 起動する。**既定は電源ONからのフル起動** — カーネルログが流れる本物の
+   * 起動がこのエミュレータの意味なので、起動済みスナップショットの自動復帰は
+   * やめた (2026-08-13)。復元はユーザーの明示操作 (.rx86snapの書出/復元、
+   * Tier 3g) だけ — その場合は `{ snapshot }` でここへ入る
    */
-  async function boot({ full = false, snapshot: given = null } = {}) {
+  async function boot({ snapshot: given = null } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -128,22 +128,9 @@ export function mountLinux(canvas, opts = {}) {
     term.reset();
     opts.onState?.();
 
-    // まず**起動済みスナップショット**を探す (tools/make-linux-snapshot.sh が作る)。
-    // あれば数秒で立つ — 「シンプルなカーネルの起動に1分」への即効薬で、
-    // フル起動は電源ONボタンとスナップショット不在時の道
-    let snapshot = given; // ファイルからの復元 (Tier 3g) はここから入る
+    const snapshot = given; // ファイルからの復元 (Tier 3g) だけがここを通る
     let kernel = null;
     let initrd = null;
-    if (!full && !snapshot) {
-      try {
-        const gz = await fetchWithProgress('./linux-booted.snap.gz', '起動済みスナップショット');
-        status('スナップショットを展開中…');
-        const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
-        snapshot = new Uint8Array(await new Response(ds).arrayBuffer());
-      } catch {
-        snapshot = null; // 無ければカーネルからのフル起動に落ちる
-      }
-    }
 
     if (!snapshot) {
       // **既定は bzImage — 自己解凍ステブごと実行する本物のフル起動。**
