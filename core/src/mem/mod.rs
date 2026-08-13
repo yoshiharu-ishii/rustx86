@@ -109,12 +109,9 @@ impl Machine {
         // RAMに収まるなら4バイトを一気に読む (ページウォークの熱い経路)
         let a = pa as usize;
         if a + 4 <= self.mem.len() {
-            u32::from_le_bytes([
-                self.mem[a],
-                self.mem[a + 1],
-                self.mem[a + 2],
-                self.mem[a + 3],
-            ])
+            // スライス1本で読む — 個別indexの検査4回を1回の範囲で済ませ、
+            // 確実に1発の非整列ロードへ畳ませる
+            u32::from_le_bytes(self.mem[a..a + 4].try_into().unwrap())
         } else {
             u32::from_le_bytes([
                 self.read_phys8(pa),
@@ -423,8 +420,14 @@ impl Machine {
         if self.dbg.on || (bus::VRAM_TEXT_BASE..=bus::VRAM_TEXT_END).contains(&(a as u32)) {
             return false;
         }
-        for i in 0..width as usize {
-            self.mem[a + i] = (val >> (i * 8)) as u8;
+        match width {
+            4 => self.mem[a..a + 4].copy_from_slice(&val.to_le_bytes()),
+            2 => self.mem[a..a + 2].copy_from_slice(&(val as u16).to_le_bytes()),
+            _ => {
+                for i in 0..width as usize {
+                    self.mem[a + i] = (val >> (i * 8)) as u8;
+                }
+            }
         }
         true
     }

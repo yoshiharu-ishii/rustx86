@@ -521,7 +521,11 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let mut cached = None;
         if !m.dcache.entries.is_empty() {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            let e = &m.dcache.entries[slot];
+            // 不変条件: entriesは初回fillでSLOTS本に固定され、以後長さは
+            // 変わらない (このファイル内のvec!とfillだけが書き手)。slotは
+            // SLOTS-1でマスク済み — 証明済みの範囲なので毎命令の検査を省く
+            debug_assert_eq!(m.dcache.entries.len(), SLOTS);
+            let e = unsafe { m.dcache.entries.get_unchecked(slot) };
             if e.tag == pa && e.gen == gen_now {
                 cached = Some((e.len_flags, e.uop));
                 // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
