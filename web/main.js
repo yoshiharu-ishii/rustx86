@@ -69,16 +69,19 @@ function netSaved() {
 }
 
 /**
- * 次に起動する機械を繋ぐ先。null なら NIC を挿さない。
- * **?net= があるときだけ、頼まれなくても繋ぐ。** それ以外は
- * 人が「繋ぐ」を押すまで null のまま (灰色) である
+ * 網元への結線。**これはケーブルであって、機械の部品ではない。**
+ *
+ * 実機でも、LANケーブルを生きたスイッチに挿せばリンクランプは点く —
+ * その machine が起動しているかも、OSがドライバを持っているかも関係ない。
+ * だから結線はページに1本だけ持ち、機械の入れ替えでも抜かない。
+ * 機械に**NICを挿す**のは別の話で、そちらは電源ONの瞬間にしかできない。
  */
-let netWanted = netFromQuery();
+let link = null;
 
-/** 起動スクリプト。ネット有効なマシンは netScript の続きも流す */
+/** 起動スクリプト。ネットが繋がっている機械は netScript の続きも流す */
 function scriptFor(m) {
   if (!m?.script) return m?.script;
-  return netWanted && m.netScript ? [...m.script, ...m.netScript] : m.script;
+  return link && m.netScript ? [...m.script, ...m.netScript] : m.script;
 }
 
 // ---------- スナップショット ----------
@@ -96,7 +99,12 @@ function syncControls() {
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
-  document.querySelector('.toolbar').hidden = onWelcome;
+  // **ネットワークだけはスタート画面にも残す。** ケーブルは機械の部品では
+  // ないので、どの機械を机に置くか決める前から挿しておける (先に挿しておけば
+  // 最初の起動からNICが載る)
+  for (const el of document.querySelector('.toolbar').children) {
+    el.hidden = onWelcome && el.id !== 'net';
+  }
   if (onWelcome) return;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
@@ -131,8 +139,8 @@ function boot(image, label) {
   $('screen').hidden = false;
   machine?.stop();
   speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
-  machine?.netlink?.close(); // 前の機械のネットワークも道連れにしない
-  setNetLamp(null); // 灯りも消す。次の機械が挿し直したらまた点く
+  // **ケーブルは抜かない。** 機械を替えてもスイッチとの結線は生きたままで、
+  // 灯りも点きっぱなし — 実機で床のLANケーブルを抜かないのと同じである
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
     linux.destroy();
@@ -162,7 +170,7 @@ function boot(image, label) {
   machine.onTone = hz => speaker.update(hz);
   // **NICを挿すのは電源を入れるこの瞬間だけ。** 起動時にしか装置を探さない
   // ゲスト (ELKSのカーネル) が居るので、後から挿しても見えない — 実機と同じ
-  if (netWanted) attachNet(machine, netWanted);
+  if (link) attachNet(machine);
   // 物理キーはそのまま、貼り付けはASCIIとして送る。
   // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
   // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
@@ -283,27 +291,53 @@ const dbg = new Debugger({
 //   緑 繋がった
 //   赤 繋がらない / 切れた
 
-/** 機械にNICを挿し、網元へ結線する */
-function attachNet(m, url) {
-  m.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
-  m.netlink = new NetLink(url);
+/**
+ * ケーブルを挿す。**機械が動いていなくても繋がるし、灯りも点く** —
+ * リンクの成否は網元との間の話で、ゲストのドライバとは関係ない
+ */
+function netConnect(url) {
+  link?.close();
+  link = new NetLink(url);
   setNetLamp('wait');
-  m.netlink.onState = (s, reason) => {
+  link.onState = (s, reason) => {
     setNetLamp(s);
-    if (s === 'up') setStatus(`ネットワーク: ${url} に繋がった`);
-    else if (s === 'down') setStatus(`ネットワーク: ${reason}`, true);
+    // **状態は灯りと同じ短い名前で言う。** 繋ぎ先や失敗の詳しい理由は
+    // ダイアログの仕事で、ここは1行の状態表示に徹する
+    if (s === 'up') setStatus(NET_LABEL.up);
+    else if (s === 'down') setStatus(`${NET_LABEL.down} — ${reason}`, true);
     netDialogSync();
   };
   netDialogSync();
 }
 
-/** 灯りの3色に対応する名前。**装置の状態は装置の言葉で言う** —
-    ifconfig や ip link と同じ語彙にしておくと、ゲストの中で見る状態と繋がる */
+/** ケーブルを抜く */
+function netDisconnect() {
+  link?.close();
+  link = null;
+  if (machine) machine.netlink = null;
+  setNetLamp(null);
+  netDialogSync();
+}
+
+/**
+ * 機械にNICを挿す。**電源ONの瞬間にしかできない。**
+ * ケーブルが死んでいても (赤) カードは挿す — スロットに刺さったNICと
+ * 抜けたケーブルは別物で、ゲストからは「リンクの無いNIC」に見えるのが正しい
+ */
+function attachNet(m) {
+  m.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
+  m.netlink = link;
+}
+
+/** 灯りの3色に対応する名前。**装置の状態は装置の言葉で短く言う** —
+    ifconfig や ip link と同じ語彙にしておくと、ゲストの中で見る状態と繋がる。
+    ボタンの吹き出しにも状態表示にも同じ文字を使う (2箇所で言い方が違うと、
+    同じ状態なのか判断させることになる) */
 const NET_LABEL = {
-  up: 'Network: Connect',
-  down: 'Network: Disconnect',
-  wait: 'Network: Connecting',
-  off: 'Network: Disable',
+  up: 'Network:Connect',
+  down: 'Network:Disconnect',
+  wait: 'Network:Connecting',
+  off: 'Network:Disable',
 };
 
 function setNetLamp(state) {
@@ -313,22 +347,21 @@ function setNetLamp(state) {
   b.title = NET_LABEL[state] ?? NET_LABEL.off;
 }
 
-/** 今の結線 (機械が居なければ null) */
-function netlink() {
-  return machine?.netlink ?? null;
-}
-
 /** ダイアログの中身を今の状態に合わせる */
 function netDialogSync() {
-  const link = netlink();
   const msg = $('netMsg');
   const byQuery = !!netFromQuery();
   msg.className = 'msg';
   if (!link) {
-    msg.textContent = machine ? '' : '機械を起動すると繋げます';
+    msg.textContent = '';
   } else if (link.state === 'up') {
     msg.textContent = `${link.url} に繋がっています`;
     msg.classList.add('ok');
+    // ケーブルは生きているが、この機械はNIC無しで起動している状態を明示する。
+    // **繋いだのに使えない**が一番の混乱どころなので、ここで先回りする
+    if (machine && !machine.netlink) {
+      msg.textContent += ' (この機械はNIC無しで起動しています。「再起動」で挿さります)';
+    }
   } else if (link.state === 'down') {
     msg.textContent = link.reason;
     msg.classList.add('ng');
@@ -338,7 +371,7 @@ function netDialogSync() {
   }
   // ?net= が居るときは、この画面から設定を変えても意味がない (URLが勝つ)
   for (const id of ['netUrl', 'netToken', 'netConnect']) $(id).disabled = byQuery;
-  $('netDisconnect').hidden = !link || link.state === 'down';
+  $('netDisconnect').hidden = !link;
   if (byQuery) {
     msg.textContent += (msg.textContent ? ' — ' : '') + 'URLの ?net= で指定されています';
   }
@@ -360,19 +393,17 @@ $('netForm').addEventListener('submit', e => {
     const url = $('netUrl').value.trim();
     const token = $('netToken').value.trim();
     localStorage.setItem(NET_STORE, JSON.stringify({ url, token }));
-    netWanted = withToken(url, token);
-    if (machine) {
-      // **既に走っている機械には後から挿せない** (ELKSのカーネルは起動時にしか
-      // 装置を探さない)。実機と同じく、電源を入れ直してもらう
-      setStatus('ネットワーク: 次の起動から有効になります。「再起動」を押してください');
-      setNetLamp(null);
+    // **ケーブルはその場で挿さる** (灯りも点く)。ただしNICが機械に
+    // 挿さるのは電源ONの瞬間だけなので、走行中なら再起動を促す
+    netConnect(withToken(url, token));
+    // 走行中の機械はNIC無しで起動している。**この一言だけは足す** —
+    // 「繋いだのに使えない」で詰まるのが一番もったいない
+    if (machine && !machine.netlink) {
+      setStatus(`${NET_LABEL.up} — ゲストから使うには「再起動」`);
     }
   } else if (how === 'disconnect') {
-    netWanted = null;
-    netlink()?.close();
-    if (machine) machine.netlink = null;
-    setNetLamp(null);
-    setStatus('ネットワーク: 切りました (次の起動からNIC無し)');
+    netDisconnect();
+    setStatus(NET_LABEL.off);
   }
 });
 
@@ -774,6 +805,10 @@ try {
   }
   setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
   syncControls();
+  // ?net= があれば、機械を選ぶより先にケーブルを挿しておく。
+  // E2Eも「開いたら既に繋がっている」方が扱いやすい
+  const q = netFromQuery();
+  if (q) netConnect(q);
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
 }
