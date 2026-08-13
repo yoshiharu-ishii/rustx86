@@ -15,6 +15,7 @@
 pub mod cmos;
 pub mod crtc;
 pub mod kbd;
+pub mod ne2000;
 pub mod pic;
 pub mod pit;
 pub mod uart;
@@ -22,6 +23,7 @@ pub mod uart;
 pub use cmos::Cmos;
 pub use crtc::Crtc;
 pub use kbd::Kbd8042;
+pub use ne2000::Ne2000;
 pub use pic::Pic8259;
 pub use pit::Pit8254;
 pub use uart::Uart16550;
