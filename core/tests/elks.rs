@@ -5,8 +5,8 @@
 //! 「動かしていないのに緑」になるので、走ったかどうかは標準エラーに出す。
 //!
 //! ```text
-//! curl -sL -o images/fd1440.img \
-//!   https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
+//! curl -sL -o images/fd2880.img \
+//!   https://github.com/ghaerr/elks/releases/download/v0.9.1/fd2880.img
 //! ```
 //!
 //! co-simは1命令単位なので、装置の状態遷移も割り込みの受付タイミングも
@@ -14,7 +14,7 @@
 
 use rustx86_core::Machine;
 
-const IMAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/fd1440.img");
+const IMAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/fd2880.img");
 
 /// 画面に文字列が出るまで走らせる
 fn run_until(m: &mut Machine, needle: &str, budget: u64) -> bool {
@@ -44,7 +44,7 @@ fn boot() -> Option<Machine> {
 #[test]
 fn elks_boots_to_login_prompt() {
     let Some(mut m) = boot() else {
-        eprintln!("images/fd1440.img が無いのでスキップ");
+        eprintln!("images/fd2880.img が無いのでスキップ");
         return;
     };
     assert!(
@@ -76,7 +76,7 @@ fn elks_boots_to_login_prompt() {
 #[test]
 fn elks_tetris_tempo() {
     let Some(mut m) = boot() else {
-        eprintln!("images/fd1440.img が無いのでスキップ");
+        eprintln!("images/fd2880.img が無いのでスキップ");
         return;
     };
     assert!(
@@ -169,7 +169,7 @@ fn elks_tetris_tempo() {
 #[test]
 fn elks_accepts_keyboard_login() {
     let Some(mut m) = boot() else {
-        eprintln!("images/fd1440.img が無いのでスキップ");
+        eprintln!("images/fd2880.img が無いのでスキップ");
         return;
     };
     assert!(
