@@ -99,10 +99,9 @@ function syncControls() {
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
-  // 上段 (机の上の備品) は常に居る。**NICは機械の部品ではない**ので、
-  // どの機械を置くか決める前から挿しておける (先に挿せば最初の起動からNICが載る)。
-  // 下段 (この機械の操作) だけを伏せる
-  document.querySelector('.toolbar.box').hidden = onWelcome;
+  // スタート画面では両段とも伏せる。**まだ机に何も置いていないのだから、
+  // 机の備品も操作列も出す意味がない** — 選ぶことに集中させる
+  for (const t of document.querySelectorAll('.toolbar')) t.hidden = onWelcome;
   if (onWelcome) return;
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
   const powered = !!machine || !!linux?.booted;
