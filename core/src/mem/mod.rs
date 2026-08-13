@@ -663,6 +663,14 @@ impl Machine {
                 self.devices.sysctl ^= 0x10;
                 self.devices.sysctl
             }
+            IoTarget::Net => match &mut self.devices.net {
+                Some(net) => net.read(port - 0x300),
+                // カードが挿さっていなければ、ただの空きスロットである
+                None => {
+                    self.unhandled_io.insert(port);
+                    0xFF
+                }
+            },
             IoTarget::Unmapped => {
                 self.unhandled_io.insert(port);
                 0xFF
@@ -726,6 +734,12 @@ impl Machine {
                 }
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
+            IoTarget::Net => match &mut self.devices.net {
+                Some(net) => net.write(port - 0x300, val),
+                None => {
+                    self.unhandled_io.insert(port);
+                }
+            },
             IoTarget::Unmapped => {
                 self.unhandled_io.insert(port);
             }

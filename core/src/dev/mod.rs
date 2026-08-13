@@ -10,4 +10,4 @@
 
 pub mod isa;
 
-pub use isa::{Cmos, Crtc, Kbd8042, Pic8259, Pit8254, Uart16550};
+pub use isa::{Cmos, Crtc, Kbd8042, Ne2000, Pic8259, Pit8254, Uart16550};
