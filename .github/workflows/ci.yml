@@ -323,10 +323,15 @@ jobs:
   snapshot:
     name: スナップショット
     # 保存/復元のIntegration: 往復ビット不変 + 復元の透明性 (K命令後の全状態一致)。
-    # 位置は「CPU照合の次」(ユーザー決定 2026-08-13) — CPUの意味が合っていることを
-    # 確かめてから、その状態の保存と復元が観測不能であることを確かめる
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' }}
-    needs: [check, cosim]
+    #
+    # 位置は**機械層** (互換ピラミッド、docs/reference/ci.md):
+    #   土台 (コードチェック) → CPU層 (CPU照合+CPU互換) → 機械層 (OS起動回帰+ここ)
+    # 命令の意味が合っていない機械の「状態一致」は無意味 (両方同じように
+    # 間違っていても通る) — だから機械層はCPU層の合格の上に建つ。
+    # CPU層がPRでskipされた場合 (CPUに触れないPR) は素通しでよい —
+    # その場合CPUの意味はmainで証明済みのまま変わっていない
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' }}
+    needs: [check, cosim, compat386]
     runs-on: ubuntu-latest
     env:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
@@ -389,11 +394,12 @@ jobs:
 
   regress:
     name: OS起動回帰
-    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU照合、
-    # OS起動回帰 (とJIT決定性) は**mainに載る瞬間**の門番。将来ここに
-    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる
-    if: github.event_name != 'pull_request'
-    needs: check
+    # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU層、
+    # 機械層 (ここ+スナップショット) は**mainに載る瞬間**の門番。将来ここに
+    # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる。
+    # 位置は機械層 — CPU層 (CPU照合+CPU互換) の合格の上に建つ (理由はsnapshot段の註)
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' }}
+    needs: [check, cosim, compat386]
     runs-on: ubuntu-latest
     env:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
