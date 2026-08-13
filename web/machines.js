@@ -71,12 +71,11 @@ export const MACHINES = [
       { when: 'full shell command line', send: '\\FREEDOS\\BIN\\COMMAND.COM\n' },
     ],
     // ネットワーク有効時 (?net=) だけ script の続きとして流す:
-    // パケットドライバ常駐 → mTCP設定 の**下ごしらえだけ**。
-    // DHCP と PING は自分で打つ楽しみに残す (どちらも \ が要らないので
-    // どのキーボードでも打てる。\ の要る2つだけ機械にやらせる)
+    // パケットドライバ常駐 → mTCP設定 → DHCP でアドレス取得まで。
+    // PING は自分で打つ楽しみに残す (\ が要らないのでどのキーボードでも打てる)
     netScript: [
       { when: 'A:\\>', send: 'NE2000 0x60 3 0x300\n' },
-      { when: 'My Ethernet address', send: 'SET MTCPCFG=A:\\MTCP.CFG\n' },
+      { when: 'My Ethernet address', send: 'SET MTCPCFG=A:\\MTCP.CFG\nDHCP\n' },
     ],
     source: 'https://download.freedos.org/1.4/FD14-FloppyEdition.zip',
     sourceLabel: 'FreeDOS 1.4 Floppy Edition',
