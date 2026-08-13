@@ -56,28 +56,28 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::PopR { .. }
         | Uop::PushImm { .. }
         | Uop::CallRel { .. }
-        | Uop::Ret => false,
+        | Uop::Ret
+        | Uop::Mov8RmR { .. }
+        | Uop::Mov8RRm { .. }
+        | Uop::Mov16RmR { .. }
+        | Uop::Mov16RRm { .. }
+        | Uop::AluRmR { .. }
+        | Uop::Alu8RmR { .. }
+        | Uop::Alu8RRm { .. }
+        | Uop::Grp1RmImm { .. }
+        | Uop::Grp18RmImm { .. }
+        | Uop::Test8RmR { .. }
+        | Uop::MovRm8Imm { .. }
+        | Uop::Leave => false,
         // r/m形: メモリオペランドのときだけ
-        Uop::Mov8RmR { rm, .. }
-        | Uop::Mov8RRm { rm, .. }
-        | Uop::Mov16RmR { rm, .. }
-        | Uop::Mov16RRm { rm, .. }
-        | Uop::AluRmR { rm, .. }
-        | Uop::Alu8RmR { rm, .. }
-        | Uop::Alu8RRm { rm, .. }
-        | Uop::Grp1RmImm { rm, .. }
-        | Uop::Grp18RmImm { rm, .. }
-        | Uop::Test8RmR { rm, .. }
-        | Uop::MovRm8Imm { rm, .. }
-        | Uop::Grp3b { rm, .. }
+        Uop::Grp3b { rm, .. }
         | Uop::Grp3w { rm, .. }
         | Uop::SetCC { rm, .. }
         | Uop::ImulRRm { rm, .. }
         | Uop::ShiftRmImm { rm, .. }
         | Uop::ShiftRmCl { rm, .. } => mem(rm),
         // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
-        Uop::Leave
-        | Uop::MovAMoffs { .. }
+        Uop::MovAMoffs { .. }
         | Uop::Mov8AMoffs { .. }
         | Uop::Grp5 { .. }
         | Uop::StrOne { .. } => true,
@@ -85,6 +85,79 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
 }
 
 // ---------- 実行 (従来経路と同じヘルパで) ----------
+
+// ---- translate-firstの低速路 (F1c-d5増分3の#[cold]化) ----
+//
+// 増分3の初版 (+17%悪化、タグ exp/translate-first-rmw) の敗因は
+// armにfast+slowを二重内蔵したコードの嵩 (B3と同族)。低速路を
+// #[cold]#[inline(never)]でホットなmatchの外に追い出し、armには
+// fast path数行+呼び出し1行だけを残す
+
+#[cold]
+#[inline(never)]
+fn slow_rmw32(m: &mut Machine, mr: &MemRef, kind: u8, b: u32, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    let addr = addr_of(m, mr, 4, true);
+    let a = m.read32(addr);
+    let v = alu_w(&mut m.cpu, kind, a, b, true);
+    m.write32(addr, v);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_rmw8(m: &mut Machine, mr: &MemRef, kind: u8, b: u8, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    let addr = addr_of(m, mr, 1, true);
+    let a = m.read8(addr);
+    let v = alu8(&mut m.cpu, kind, a, b);
+    m.write8(addr, v);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_read32(m: &mut Machine, mr: &MemRef, prev_ip: u32) -> u32 {
+    m.guard_save_slim_at(prev_ip);
+    m.read32(addr_of(m, mr, 4, false))
+}
+
+#[cold]
+#[inline(never)]
+fn slow_read16(m: &mut Machine, mr: &MemRef, prev_ip: u32) -> u16 {
+    m.guard_save_slim_at(prev_ip);
+    m.read16(addr_of(m, mr, 2, false))
+}
+
+#[cold]
+#[inline(never)]
+fn slow_read8(m: &mut Machine, mr: &MemRef, prev_ip: u32) -> u8 {
+    m.guard_save_slim_at(prev_ip);
+    m.read8(addr_of(m, mr, 1, false))
+}
+
+#[cold]
+#[inline(never)]
+fn slow_write8(m: &mut Machine, mr: &MemRef, v: u8, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    let a = addr_of(m, mr, 1, true);
+    m.write8(a, v);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_write16(m: &mut Machine, mr: &MemRef, v: u16, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    let a = addr_of(m, mr, 2, true);
+    m.write16(a, v);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_leave(m: &mut Machine, bp: u32, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    sp_write(m, bp);
+    let v = pop_w(m, true);
+    m.cpu.regs[BP] = v;
+}
 
 /// pushの速い道 (translate-first)。SSが平坦・32bitスタックで書き込みが
 /// 確定するときだけ実行してtrue。falseなら呼び手が控えて従来経路へ
@@ -174,8 +247,10 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             match rm {
                 Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
                 Rm::Mem(mr) => {
-                    let a = addr_of(m, &mr, 1, true);
-                    m.write8(a, v);
+                    let off = off_of(m, &mr);
+                    if m.fast_write8(mr.seg as usize, off, v).is_none() {
+                        slow_write8(m, &mr, v, prev_ip);
+                    }
                 }
             }
         }
@@ -184,22 +259,36 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             match rm {
                 Rm::Reg(r) => m.cpu.set_reg16(r as usize, v),
                 Rm::Mem(mr) => {
-                    let a = addr_of(m, &mr, 2, true);
-                    m.write16(a, v);
+                    let off = off_of(m, &mr);
+                    if m.fast_write16(mr.seg as usize, off, v).is_none() {
+                        slow_write16(m, &mr, v, prev_ip);
+                    }
                 }
             }
         }
         Uop::Mov16RRm { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.reg16(r as usize),
-                Rm::Mem(mr) => m.read16(addr_of(m, &mr, 2, false)),
+                Rm::Mem(mr) => {
+                    let off = off_of(m, &mr);
+                    match m.fast_read16(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read16(m, &mr, prev_ip),
+                    }
+                }
             };
             m.cpu.set_reg16(reg as usize, v);
         }
         Uop::Mov8RRm { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
+                Rm::Mem(mr) => {
+                    let off = off_of(m, &mr);
+                    match m.fast_read8(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read8(m, &mr, prev_ip),
+                    }
+                }
             };
             m.cpu.set_reg8(reg as usize, v);
         }
@@ -215,11 +304,19 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     }
                 }
                 Rm::Mem(mr) => {
-                    let addr = addr_of(m, &mr, 4, kind != 7);
-                    let a = m.read32(addr);
-                    let v = alu_w(&mut m.cpu, kind, a, b, true);
-                    if kind != 7 {
-                        m.write32(addr, v);
+                    let off = off_of(m, &mr);
+                    if kind == 7 {
+                        let a = match m.fast_read32(mr.seg as usize, off) {
+                            Some(v) => v,
+                            None => slow_read32(m, &mr, prev_ip),
+                        };
+                        alu_w(&mut m.cpu, kind, a, b, true);
+                    } else if let Some(pa) = m.fast_rmw32_addr(mr.seg as usize, off) {
+                        let a = u32::from_le_bytes(m.mem[pa..pa + 4].try_into().unwrap());
+                        let v = alu_w(&mut m.cpu, kind, a, b, true);
+                        m.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+                    } else {
+                        slow_rmw32(m, &mr, kind, b, prev_ip);
                     }
                 }
             }
@@ -255,11 +352,19 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     }
                 }
                 Rm::Mem(mr) => {
-                    let addr = addr_of(m, &mr, 1, kind != 7);
-                    let a = m.read8(addr);
-                    let v = alu8(&mut m.cpu, kind, a, b);
-                    if kind != 7 {
-                        m.write8(addr, v);
+                    let off = off_of(m, &mr);
+                    if kind == 7 {
+                        let a = match m.fast_read8(mr.seg as usize, off) {
+                            Some(v) => v,
+                            None => slow_read8(m, &mr, prev_ip),
+                        };
+                        alu8(&mut m.cpu, kind, a, b);
+                    } else if let Some(pa) = m.fast_rmw8_addr(mr.seg as usize, off) {
+                        let a = m.mem[pa];
+                        let v = alu8(&mut m.cpu, kind, a, b);
+                        m.mem[pa] = v;
+                    } else {
+                        slow_rmw8(m, &mr, kind, b, prev_ip);
                     }
                 }
             }
@@ -268,7 +373,13 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             let a = m.cpu.reg8(reg as usize);
             let b = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
+                Rm::Mem(mr) => {
+                    let off = off_of(m, &mr);
+                    match m.fast_read8(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read8(m, &mr, prev_ip),
+                    }
+                }
             };
             let v = alu8(&mut m.cpu, kind, a, b);
             if kind != 7 {
@@ -298,11 +409,19 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 }
             }
             Rm::Mem(mr) => {
-                let addr = addr_of(m, &mr, 4, kind != 7);
-                let a = m.read32(addr);
-                let v = alu_w(&mut m.cpu, kind, a, imm, true);
-                if kind != 7 {
-                    m.write32(addr, v);
+                let off = off_of(m, &mr);
+                if kind == 7 {
+                    let a = match m.fast_read32(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read32(m, &mr, prev_ip),
+                    };
+                    alu_w(&mut m.cpu, kind, a, imm, true);
+                } else if let Some(pa) = m.fast_rmw32_addr(mr.seg as usize, off) {
+                    let a = u32::from_le_bytes(m.mem[pa..pa + 4].try_into().unwrap());
+                    let v = alu_w(&mut m.cpu, kind, a, imm, true);
+                    m.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+                } else {
+                    slow_rmw32(m, &mr, kind, imm, prev_ip);
                 }
             }
         },
@@ -315,11 +434,19 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 }
             }
             Rm::Mem(mr) => {
-                let addr = addr_of(m, &mr, 1, kind != 7);
-                let a = m.read8(addr);
-                let v = alu8(&mut m.cpu, kind, a, imm);
-                if kind != 7 {
-                    m.write8(addr, v);
+                let off = off_of(m, &mr);
+                if kind == 7 {
+                    let a = match m.fast_read8(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read8(m, &mr, prev_ip),
+                    };
+                    alu8(&mut m.cpu, kind, a, imm);
+                } else if let Some(pa) = m.fast_rmw8_addr(mr.seg as usize, off) {
+                    let a = m.mem[pa];
+                    let v = alu8(&mut m.cpu, kind, a, imm);
+                    m.mem[pa] = v;
+                } else {
+                    slow_rmw8(m, &mr, kind, imm, prev_ip);
                 }
             }
         },
@@ -343,7 +470,13 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::Test8RmR { rm, reg } => {
             let a = match rm {
                 Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
+                Rm::Mem(mr) => {
+                    let off = off_of(m, &mr);
+                    match m.fast_read8(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => slow_read8(m, &mr, prev_ip),
+                    }
+                }
             };
             let b = m.cpu.reg8(reg as usize);
             alu8(&mut m.cpu, 4, a, b);
@@ -441,8 +574,10 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::MovRm8Imm { rm, imm } => match rm {
             Rm::Reg(r) => m.cpu.set_reg8(r as usize, imm),
             Rm::Mem(mr) => {
-                let a = addr_of(m, &mr, 1, true);
-                m.write8(a, imm);
+                let off = off_of(m, &mr);
+                if m.fast_write8(mr.seg as usize, off, imm).is_none() {
+                    slow_write8(m, &mr, imm, prev_ip);
+                }
             }
         },
         Uop::MovAMoffs { load, seg, off } => {
@@ -470,11 +605,20 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             }
         }
         Uop::Leave => {
-            // LEAVE: SP←BP、そしてBPをpop (従来経路の写し)
+            // LEAVE: SP←BP、そしてBPをpop
             let bp = m.cpu.regs[BP];
-            sp_write(m, bp);
-            let v = pop_w(m, true);
-            m.cpu.regs[BP] = v;
+            let fast = m.cpu.hidden[SS].big;
+            if fast {
+                if let Some(v) = m.fast_read32(SS, bp) {
+                    // 読みが確定してから両レジスタを動かす (jit_try_leaveと同順)
+                    m.cpu.regs[SP] = bp.wrapping_add(4);
+                    m.cpu.regs[BP] = v;
+                } else {
+                    slow_leave(m, bp, prev_ip);
+                }
+            } else {
+                slow_leave(m, bp, prev_ip);
+            }
         }
         Uop::XchgAR { reg } => {
             m.cpu.regs.swap(AX, reg as usize);
