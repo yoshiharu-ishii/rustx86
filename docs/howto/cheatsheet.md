@@ -19,8 +19,8 @@ tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
 | やりたいこと | コマンド |
 |---|---|
 | Linuxを対話起動 (シリアルをターミナルへ) | `cargo run --release --example run -- images/vmlinux` |
-| ディスクからOS起動 | `cargo run --release --example boot -- images/fd1440.img` |
-| 起動して1コマンド打って結果を見る | `cargo run --release --example boot -- images/fd1440.img 50000000 root "uname -a"` |
+| ディスクからOS起動 | `cargo run --release --example boot -- images/fd2880.img` |
+| 起動して1コマンド打って結果を見る | `cargo run --release --example boot -- images/fd2880.img 50000000 root "uname -a"` |
 | gdb風デバッガで追う | `cargo run --release --example dbg -- images/fd14games.img` |
 | スナップショットから即起動 | `cargo run --release --example snapboot` |
 | ブラウザ版 (別ポートで) | `python3 web/serve.py` → `http://localhost:8000/?kernel=vmlinux` |

@@ -217,6 +217,20 @@ fn rep_string_io_moves_data_through_the_port() {
     );
 }
 
+/// ISRのRSTビットの生涯: 電源投入とSTOPで立ち、**STARTで自動的に下りる**。
+/// これが残っているとELKSのISRハンドラが「誰も処理しない0x80」を
+/// 読み続けて無限ループする (実際にktcp起動がそれで凍った)
+#[test]
+fn isr_reset_bit_clears_on_start() {
+    let mut m = Machine::new();
+    m.net_attach(MAC);
+    assert_ne!(m.io_read8(BASE + 0x07) & 0x80, 0, "電源投入直後はRSTが立つ");
+    m.io_write8(BASE, 0x22); // START
+    assert_eq!(m.io_read8(BASE + 0x07) & 0x80, 0, "STARTでRSTが下りる");
+    m.io_write8(BASE, 0x21); // STOP
+    assert_ne!(m.io_read8(BASE + 0x07) & 0x80, 0, "STOPでまた立つ");
+}
+
 #[test]
 fn snapshot_roundtrip_keeps_the_nic() {
     let mut m = Machine::new();
