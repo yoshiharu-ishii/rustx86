@@ -275,14 +275,14 @@ jobs:
           path: |
             images/test386.bin
             images/test386-EE-reference.txt
-          key: test386-rom-v1-${{ hashFiles('tools/fetch-images.sh') }}
+          key: test386-rom-v1-${{ hashFiles('tools/images/fetch-images.sh') }}
 
       - name: test386 ROMのビルド (nasm)
         if: steps.rom-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq nasm
-          tools/fetch-images.sh test386
+          tools/images/fetch-images.sh test386
 
       - name: test386 実行 (POST完走 + EE照合)
         id: t386
@@ -344,16 +344,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
-          tools/fetch-images.sh linux
-          tools/extract-vmlinux.sh
-          tools/make-mini-initramfs.sh
+          tools/images/fetch-images.sh linux
+          tools/images/extract-vmlinux.sh
+          tools/images/make-mini-initramfs.sh
 
       - name: wasm-pack の用意
         run: |
@@ -368,7 +368,7 @@ jobs:
           {
             echo '## wasm起動 — `node tools/webtest/headless.mjs`'
             echo '```'
-            bash tools/build-web.sh 2>&1 | tail -2
+            bash tools/build/build-web.sh 2>&1 | tail -2
             node tools/webtest/headless.mjs 2>&1 | tee /dev/stderr
             echo '```'
           } > wasmboot-report.md
@@ -422,17 +422,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
-          tools/fetch-images.sh elks
-          tools/fetch-images.sh linux
-          tools/extract-vmlinux.sh
-          tools/make-mini-initramfs.sh
+          tools/images/fetch-images.sh elks
+          tools/images/fetch-images.sh linux
+          tools/images/extract-vmlinux.sh
+          tools/images/make-mini-initramfs.sh
 
       - name: 保存と復元の検査
         id: snaptest
@@ -486,25 +486,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
-      # 入手経路は tools/fetch-images.sh ただ一つ — CIだけの取り方を作ると
+      # 入手経路は tools/images/fetch-images.sh ただ一つ — CIだけの取り方を作ると
       # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
       - name: イメージのキャッシュ
         id: img-cache
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
-          tools/fetch-images.sh elks
-          tools/fetch-images.sh freedos-boot
-          tools/fetch-images.sh linux
-          tools/extract-vmlinux.sh
-          tools/make-mini-initramfs.sh
+          tools/images/fetch-images.sh elks
+          tools/images/fetch-images.sh freedos-boot
+          tools/images/fetch-images.sh linux
+          tools/images/extract-vmlinux.sh
+          tools/images/make-mini-initramfs.sh
 
       - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
         id: regress
@@ -527,7 +527,7 @@ jobs:
           rustup target add wasm32-unknown-unknown
           curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
       - name: wasm を焼く
-        run: bash tools/build-web.sh
+        run: bash tools/build/build-web.sh
       # ブートログを証跡として残す。ゲストの時計は決定的なので、
       # 実行同士のログは**タイムスタンプごとdiffできる回帰資料**になる
       # (dmesgの1行増減・順序の変化・ゲスト時間での遅れが行単位で見える)

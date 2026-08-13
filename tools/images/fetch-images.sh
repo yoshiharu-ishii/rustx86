@@ -16,9 +16,9 @@
 #
 # ## 使い方
 #
-#     tools/fetch-images.sh          # 全部
-#     tools/fetch-images.sh elks     # ELKSだけ
-#     tools/fetch-images.sh freedos  # FreeDOS (ゲーム入り) だけ
+#     tools/images/fetch-images.sh          # 全部
+#     tools/images/fetch-images.sh elks     # ELKSだけ
+#     tools/images/fetch-images.sh freedos  # FreeDOS (ゲーム入り) だけ
 #
 # 出来上がるもの:
 #
@@ -38,6 +38,8 @@ if [ -d "$here/web" ]; then
   cd "$here"
 elif [ -d "$here/../web" ]; then
   cd "$here/.."
+elif [ -d "$here/../../web" ]; then
+  cd "$here/../.."
 else
   echo "web/ が見つからない。リポジトリのルートか、配布zipの展開先で実行する" >&2
   exit 1

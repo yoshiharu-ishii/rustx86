@@ -84,7 +84,7 @@ impl Machine {
     /// bzImage の自己解凍ステブは**起動全体の55% (540M命令) を無言で食う**。
     /// 展開済みのカーネルをこちらで物理メモリに置けば、その区間は丸ごと消える。
     /// Firecracker が bzImage ではなく vmlinux を要求するのと同じ判断。
-    /// vmlinux は tools/extract-vmlinux.sh で bzImage から取り出せる
+    /// vmlinux は tools/images/extract-vmlinux.sh で bzImage から取り出せる
     pub fn boot_vmlinux_with_initrd(
         &mut self,
         image: &[u8],

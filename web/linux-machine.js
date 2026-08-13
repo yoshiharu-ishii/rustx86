@@ -166,7 +166,7 @@ export function mountLinux(canvas, opts = {}) {
       } catch (e) {
         status(
           `イメージが読めない: ${e.message}。` +
-            'tools/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
+            'tools/images/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
           true,
         );
         busy = false;

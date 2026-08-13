@@ -13,7 +13,7 @@
 # 前提: images/ にLinux一式 (fetch-images.sh linux + extract-vmlinux.sh)。
 # 出力: target/pgo-use/release/examples/ 以下 (bootphase / regress など)
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 PGO_DATA="${PGO_DATA:-target/pgo-data}"
 PROFDATA=$(ls "$HOME"/.rustup/toolchains/*/lib/rustlib/*/bin/llvm-profdata | head -1)

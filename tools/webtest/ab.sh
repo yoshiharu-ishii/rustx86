@@ -4,13 +4,14 @@
 # 2つの pkg ディレクトリ (wasm-pack の出力一式) を交互に headless.mjs で
 # 走らせ、**時間の差だけ**を見る。出力はネイティブの定規と同じ
 #   round1 main: 18.3s / feat: 18.1s
-# の形 (ラベルはディレクトリ名)。単発の速さは熱ダレの運として捨て、
-# 対の符号と平均で読む。
+# の形。ラベルは pkg の BUILDINFO (build-web.sh がブランチ名を刻む —
+# ネイティブA/Bの「バイナリ名=ブランチ」と同じ意味論)。無ければディレクトリ名。
+# 単発の速さは熱ダレの運として捨て、対の符号と平均で読む。
 #
 #   tools/webtest/ab.sh <pkgA(main)> <pkgB(開発)> [rounds=5]
 #
 # 例: 現行mainのビルドを控えてから候補ビルドと比べる
-#   bash tools/build-web.sh && cp -r web/pkg /tmp/pkg_main
+#   bash tools/build/build-web.sh && cp -r web/pkg /tmp/pkg_main
 #   (候補をビルド)          && cp -r web/pkg /tmp/pkg_dev
 #   tools/webtest/ab.sh /tmp/pkg_main /tmp/pkg_dev
 #
@@ -20,7 +21,10 @@ cd "$(dirname "$0")/../.."
 A=${1:?使い方: ab.sh <pkgA(main)> <pkgB(開発)> [rounds]}
 B=${2:?使い方: ab.sh <pkgA(main)> <pkgB(開発)> [rounds]}
 R=${3:-5}
-LA=$(basename "$A"); LB=$(basename "$B")
+label() {
+  if [ -f "$1/BUILDINFO" ]; then cat "$1/BUILDINFO"; else basename "$1"; fi
+}
+LA=$(label "$A"); LB=$(label "$B")
 
 bak=$(mktemp -d)
 cp -r web/pkg/. "$bak"/

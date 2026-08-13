@@ -2,7 +2,7 @@
 #
 # ブラウザ版を焼き直す (wasm-pack の包み紙)。
 #
-#     tools/build-web.sh
+#     tools/build/build-web.sh
 #
 # ## 以前ここにあった「?v= 番号を揃える」仕組みは廃止した
 #
@@ -19,7 +19,7 @@
 #  デプロイでコンテンツハッシュを付ける。手で番号を上げる方式には戻さない)
 
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "wasm-pack が無い。  cargo install wasm-pack" >&2
@@ -32,6 +32,11 @@ fi
 
 echo "==> wasm を作る"
 (cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg)
+
+# どのブランチを焼いたかを pkg に刻む (webtest/ab.sh がラベルに使う —
+# ネイティブA/Bの「バイナリ名=ブランチ」と同じ意味論)。feat/xxx は xxx に縮める
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+echo "${branch##*/}" > web/pkg/BUILDINFO
 
 wasm=$(wc -c < web/pkg/rustx86_wasm_bg.wasm)
 glue=$(wc -c < web/pkg/rustx86_wasm.js)
