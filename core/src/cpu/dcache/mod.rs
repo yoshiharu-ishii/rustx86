@@ -514,6 +514,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         // 前の命令のページウォークが立てた A/D を表へ反映。
         // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
         m.flush_ad();
+        if cfg!(feature = "opstats") {
+            m.census_pc.set(pa); // census用: いまの命令の物理番地
+        }
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 

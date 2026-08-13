@@ -52,6 +52,17 @@ fn main() {
                     d.fallbacks / 1_000_000
                 );
             }
+            let pcc = m.pred_census_counts.get();
+            let pt: u64 = pcc.iter().sum();
+            if pt > 0 {
+                println!(
+                    "PC-lookahead census: hit {:.1}% / VPN変化 {:.1}% / 衝突・初回 {:.1}%  (総変換 {}M)",
+                    pcc[0] as f64 * 100.0 / pt as f64,
+                    pcc[1] as f64 * 100.0 / pt as f64,
+                    pcc[2] as f64 * 100.0 / pt as f64,
+                    pt / 1_000_000
+                );
+            }
             // 従来経路落ちの理由 (opstats時のみ) — 語彙拡大の的はこの分解で決める
             let fr = &m.dcache.fb_reasons;
             if fr.iter().sum::<u64>() > 0 {
