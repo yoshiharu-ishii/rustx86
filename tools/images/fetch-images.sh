@@ -52,6 +52,7 @@ trap 'rm -rf "$WORK"' EXIT
 ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
+DEVEL_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/devel
 # Alpine の netboot 配布物 (32bit x86)。カーネルと initramfs の2つで起動できる
 # 版は固定する (latest-stableは中身が動き、System.mapとカーネルの版ズレで
 # プロファイルが全部ゴミになる — 2026-08-12に踏んだ)。上げるときは3点セットで
@@ -156,9 +157,21 @@ build_freedos() {
     for p in "${list[@]}"; do files+=("$WORK/games/$p"); done
   done
 
+  # おまけ2つ。どちらも無くても起動には困らないので、取れなければ諦める
+  # - AIR.COM: PCスピーカーでG線上のアリアを演奏する自作デモ
+  #   (tools/guest/air/。生成物をコミットしてあるので nasm 不要)
+  # - DEBUG.COM: FreeDOS公式の lDebug。起動フロッピーにはデバッガが
+  #   入っていないので、DOSの中から AIR.COM を逆アセンブルできるように载せる
+  [ -f tools/guest/air/AIR.COM ] && files+=(tools/guest/air/AIR.COM)
+  if fetch "$DEVEL_BASE/ldebug.zip" "$WORK/ldebug.zip"; then
+    unzip_one "$WORK/ldebug.zip" "BIN/ldebug.com" "$WORK"
+    cp "$WORK/ldebug.com" "$WORK/DEBUG.COM"
+    files+=("$WORK/DEBUG.COM")
+  fi
+
   cp "$IMAGES/fd14boot.img" "$IMAGES/fd14games.img"
   copy_into_image "$IMAGES/fd14games.img" "${files[@]}"
-  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman)"
+  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman + AIR / DEBUG)"
 }
 
 publish_to_web() {
