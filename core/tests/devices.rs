@@ -17,8 +17,8 @@ fn speaker_sounds_only_when_both_gate_bits_are_up() {
     let mut m = Machine::new();
     assert_eq!(m.speaker_tone(), None, "電源投入直後は無音");
 
-    // ch2 (sel=10)、LoHi (rw=11)、モード3 (矩形波)
-    m.io_write8(0x43, 0b10_11_011_0);
+    // 0xB6 = ch2 (sel=10)、LoHi (rw=11)、モード3=矩形波 (011)、2進数モードoff (0)
+    m.io_write8(0x43, 0xB6);
     m.io_write8(0x42, (1193u16 & 0xFF) as u8); // 1193182 / 1193 ≒ 1000 Hz
     m.io_write8(0x42, (1193u16 >> 8) as u8);
     assert_eq!(m.speaker_tone(), None, "ゲートが閉じていれば無音");
@@ -30,7 +30,7 @@ fn speaker_sounds_only_when_both_gate_bits_are_up() {
     assert!((hz - 1000.15).abs() < 0.1, "1193分周 ≒ 1000 Hz、実際 {hz}");
 
     // 分周値を書き換えると音程が変わる (ドライバはゲートを触り直さない)
-    m.io_write8(0x43, 0b10_11_011_0);
+    m.io_write8(0x43, 0xB6);
     m.io_write8(0x42, (2386u16 & 0xFF) as u8);
     m.io_write8(0x42, (2386u16 >> 8) as u8);
     let hz = m.speaker_tone().expect("鳴りっぱなしのまま音程だけ変わる");
