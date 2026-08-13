@@ -165,6 +165,37 @@ impl Emulator {
         self.m.speaker_tone().unwrap_or(0.0)
     }
 
+    /// NE2000を挿す (mac は6バイト)。呼ばなければNICは無く、起動はビット同一のまま
+    pub fn net_attach(&mut self, mac: &[u8]) -> Result<(), JsError> {
+        let mac: [u8; 6] = mac
+            .try_into()
+            .map_err(|_| JsError::new("MACは6バイトで渡す"))?;
+        self.m.net_attach(mac);
+        Ok(())
+    }
+
+    /// 外 (WebSocket) から届いたEthernetフレームを受信リングへ
+    pub fn net_inject_frame(&mut self, frame: &[u8]) -> bool {
+        self.m.net_inject_frame(frame)
+    }
+
+    /// デバッグ用: NE2000のI/Oトレースを取り出す (一時計測)
+    pub fn net_trace(&mut self) -> Vec<u32> {
+        match &mut self.m.devices.net {
+            Some(net) => std::mem::take(&mut net.trace),
+            None => Vec::new(),
+        }
+    }
+
+    /// ゲストが送信したフレームを1枚取り出す (空なら長さ0)。
+    /// serial_out と同じ「読むと消える」作法。JSはスライスごとに空になるまで呼ぶ
+    pub fn net_take_frame(&mut self) -> Vec<u8> {
+        match &mut self.m.devices.net {
+            Some(net) => net.tx_out.pop_front().unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
     /// 未実装命令などで機械が止まった理由 (無ければ空文字列)
     pub fn trap_reason(&self) -> String {
         self.m
