@@ -271,13 +271,23 @@ pub(crate) enum Uop {
     },
 }
 
+/// len_flags のビット割当: 下位4bit = 命令長 (x86最大15B)、
+/// bit4 = メモリに触るuop (guard判定のmatch再実行を消す)、
+/// bit5 = 制御uop (実行後の ip==直線 比較を省ける)。
+/// デコード時に一度だけ分類し、実行時はビット1つを見る —
+/// 「デコード済みなのに毎命令再分類していた」を消す (2026-08-13)
+const LEN_MASK: u8 = 0x0F;
+const F_MEM: u8 = 0x10;
+const F_CTL: u8 = 0x20;
+
 #[derive(Clone, Copy)]
 struct Entry {
     /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
     tag: u32,
     /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
     gen: u32,
-    len: u8,
+    /// 命令長 + 属性ビット (LEN_MASK/F_MEM/F_CTL)
+    len_flags: u8,
     uop: Uop,
 }
 
@@ -486,7 +496,10 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         m.guard_save();
         return super::step(m);
     }
-    let mut lin = m.cpu.lin(CS, m.cpu.ip);
+    // CS基底はブロック中不変 (CSを変える命令は語彙外) — 掴み置きして
+    // 分岐着地のlin()呼び (seg_base読み+pe判定) を足し算にする
+    let cs_base = m.cpu.lin(CS, 0);
+    let mut lin = cs_base.wrapping_add(m.cpu.ip);
     let Ok(mut pa) = m.translate_for(lin, false) else {
         // フェッチがフォールトする状況は従来経路に任せる (#PF配送もそちら)
         m.guard_save();
@@ -510,12 +523,15 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
             let e = &m.dcache.entries[slot];
             if e.tag == pa && e.gen == gen_now {
-                cached = Some((e.len, e.uop));
-                m.dcache.hits += 1;
+                cached = Some((e.len_flags, e.uop));
+                // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
+                if cfg!(feature = "opstats") {
+                    m.dcache.hits += 1;
+                }
             }
         }
 
-        let (len, uop) = match cached {
+        let (lf, uop) = match cached {
             Some(x) => x,
             None => match decode::decode_at(m, pa) {
                 Some((len, uop)) => {
@@ -524,24 +540,33 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                             Entry {
                                 tag: TAG_INVALID,
                                 gen: 0,
-                                len: 0,
+                                len_flags: 0,
                                 uop: Uop::Ret,
                             };
                             SLOTS
                         ];
                     }
                     let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+                    // 分類はデコード時の一度だけ — 実行時はビットを見るだけ
+                    let mut lf = len;
+                    debug_assert!(len & !LEN_MASK == 0);
+                    if exec::may_touch_memory(&uop) {
+                        lf |= F_MEM;
+                    }
+                    if exec::is_control(&uop) {
+                        lf |= F_CTL;
+                    }
                     m.dcache.entries[slot] = Entry {
                         tag: pa,
                         gen,
-                        len,
+                        len_flags: lf,
                         uop,
                     };
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
                         *h = true;
                     }
                     m.dcache.fills += 1;
-                    (len, uop)
+                    (lf, uop)
                 }
                 None => {
                     m.dcache.fallbacks += 1;
@@ -559,12 +584,14 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
 
         // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
         // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
-        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない
-        if exec::may_touch_memory(&uop) {
+        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない。
+        // 判定はデコード時に焼いたF_MEMビット (uopのmatch再実行をしない)
+        let len = (lf & LEN_MASK) as u32;
+        if lf & F_MEM != 0 {
             m.guard_save_slim();
         }
-        let ip_linear = m.cpu.ip.wrapping_add(len as u32);
-        m.cpu.advance_ip(len as u32);
+        m.cpu.advance_ip32(len);
+        let ip_linear = m.cpu.ip; // 直線ならexec後もこのまま
         exec::exec(m, uop);
 
         // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
@@ -580,10 +607,13 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             return;
         }
         // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
-        let new_lin = if m.cpu.ip == ip_linear {
-            lin.wrapping_add(len as u32)
+        let new_lin = if lf & F_CTL == 0 {
+            // 非制御uopはIPに触らない — 比較すら不要で直線が確定
+            lin.wrapping_add(len)
+        } else if m.cpu.ip == ip_linear {
+            lin.wrapping_add(len)
         } else {
-            m.cpu.lin(CS, m.cpu.ip)
+            cs_base.wrapping_add(m.cpu.ip)
         };
         if new_lin >> 12 != lin >> 12 {
             return; // ページを跨いだら外へ (変換からやり直し)
