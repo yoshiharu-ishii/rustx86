@@ -127,7 +127,14 @@ export function mountLinux(canvas, opts = {}) {
    * やめた (2026-08-13)。復元はユーザーの明示操作 (.rx86snapの書出/復元、
    * Tier 3g) だけ — その場合は `{ snapshot }` でここへ入る
    */
-  async function boot({ snapshot: given = null } = {}) {
+  /**
+   * @param {object} [o]
+   * @param {Uint8Array} [o.snapshot] 起動済みの状態から戻す
+   * @param {Uint8Array} [o.kernel] **持ち込みのカーネル** (ドロップされた
+   *   vmlinux / bzImage)。指定があれば取りに行かず、これを起動する
+   * @param {string} [o.kernelName] 画面に出す名前
+   */
+  async function boot({ snapshot: given = null, kernel: givenKernel = null, kernelName = '' } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -140,7 +147,17 @@ export function mountLinux(canvas, opts = {}) {
     let kernel = null;
     let initrd = null;
 
-    if (!snapshot) {
+    if (!snapshot && givenKernel) {
+      // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
+      // カーネルだけ落とされても、ルートFSが無ければシェルに着けないので
+      kernel = givenKernel;
+      status(`${kernelName || 'カーネル'} を起動します`);
+      try {
+        initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+      } catch {
+        initrd = null;
+      }
+    } else if (!snapshot) {
       // **既定は bzImage — 自己解凍ステブごと実行する本物のフル起動。**
       // 実機がやることを全部やるのがこのエミュレータの意味なので、
       // 速さのための近道 (vmlinux直接ロード) は ?kernel=vmlinux の

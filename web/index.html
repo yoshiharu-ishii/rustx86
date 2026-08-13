@@ -155,7 +155,15 @@
   /* Linuxのシリアル端末は24行 */
   #linuxScreen { aspect-ratio: 730 / 384; max-width: min(730px, calc((100vh - 17rem) * 730 / 384)); }
   #screen:focus, #linuxScreen:focus { outline: none; }
+  /* ドラッグ中の合図。**受け皿がどれかを言う** —
+     機械が動いていれば端末の面、まだなら投入口そのものが光る */
+  .console.drop { border-color: var(--green); }
   .console.drop .stage { outline: 2px dashed var(--green); outline-offset: -6px; }
+  .console.drop #welcomePane .slot {
+    border-color: var(--green); background: #0e140e; border-style: solid;
+  }
+  .console.drop #welcomePane .slot svg { transform: scale(1.08); }
+  #welcomePane .slot svg { transition: transform .12s; }
 
   /* 下辺。**起動しているイメージと、今キーが効くか**だけを言う */
   .foot {

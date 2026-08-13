@@ -620,17 +620,28 @@ $('save').addEventListener('click', () => {
 // --- ディスクイメージの受け取り ---
 
 const consoleBox = $('console');
-for (const ev of ['dragenter', 'dragover']) {
-  consoleBox.addEventListener(ev, e => {
-    e.preventDefault();
-    consoleBox.classList.add('drop');
-  });
-}
-for (const ev of ['dragleave', 'drop']) {
-  consoleBox.addEventListener(ev, () => consoleBox.classList.remove('drop'));
-}
+// **子要素をまたぐたびに dragleave が飛ぶ**ので、素直に付け外しすると
+// 枠が明滅する。入った回数を数えて、0になったときだけ消す
+let dragDepth = 0;
+consoleBox.addEventListener('dragenter', e => {
+  e.preventDefault();
+  if (++dragDepth === 1) consoleBox.classList.add('drop');
+});
+consoleBox.addEventListener('dragover', e => {
+  e.preventDefault();
+  // 「コピーして取り込む」の意思表示。これが無いとカーソルが禁止マークになる
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+});
+consoleBox.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    consoleBox.classList.remove('drop');
+  }
+});
 consoleBox.addEventListener('drop', async e => {
   e.preventDefault();
+  dragDepth = 0;
+  consoleBox.classList.remove('drop');
   const f = e.dataTransfer?.files?.[0];
   if (f) insertMedia(f);
 });
@@ -678,7 +689,28 @@ async function insertMedia(f) {
     return;
   }
   setStatus(`${f.name} を読み込み中…`);
-  boot(new Uint8Array(await f.arrayBuffer()), f.name);
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  // **中身で行き先を決める。** 落ちてくるものは3種類ある:
+  //   スナップショット (上で処理済み) / Linuxカーネル / ディスクイメージ
+  // 拡張子では決めない — vmlinux-lts のように拡張子を持たないものがある
+  if (isKernel(bytes)) {
+    if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+    await linux.boot({ kernel: bytes, kernelName: f.name });
+    return;
+  }
+  boot(bytes, f.name);
+}
+
+/**
+ * Linuxカーネルか。**先頭のELF印**(vmlinux)か、
+ * **setupヘッダの "HdrS"**(bzImage、0x202固定)で見分ける。
+ * どちらもブートセクタとは形が違うので、取り違えようがない
+ */
+function isKernel(b) {
+  const elf = b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46;
+  const hdrs =
+    b.length > 0x206 && b[0x202] === 0x48 && b[0x203] === 0x64 && b[0x204] === 0x72 && b[0x205] === 0x53;
+  return elf || hdrs;
 }
 
 // ---------- 起動シナリオ ----------
