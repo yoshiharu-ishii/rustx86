@@ -240,9 +240,11 @@
        この画面は「今どこに繋がっているか」の表示だけになる -->
   <dialog id="netDialog" class="panel">
     <h3>ネットワーク</h3>
-    <p class="hint">仮想NE2000を、ユーザーモードNATの
-      <a href="https://github.com/yoshiharu-ishii/wsslirp" target="_blank" rel="noopener">wsslirpd</a>
-      へ繋ぎます。手元で動かしているなら既定のままで繋がります。</p>
+    <p class="hint">網元 (<a href="https://github.com/yoshiharu-ishii/wsslirp" target="_blank"
+        rel="noopener">wsslirpd</a>) を手元で動かしているなら既定のままで繋がります。
+      仕組みとゲストごとの使い方は
+      <a href="https://github.com/yoshiharu-ishii/rustx86/blob/main/docs/explanation/network.md"
+        target="_blank" rel="noopener">network.md</a> に。</p>
     <form method="dialog" id="netForm">
       <label for="netUrl">接続先 (ws:// または wss://)</label>
       <input id="netUrl" type="text" value="ws://127.0.0.1:8087/net" spellcheck="false">
@@ -250,8 +252,8 @@
       <input id="netToken" type="text" spellcheck="false" autocomplete="off">
       <p class="msg" id="netMsg"></p>
       <div class="row">
-        <button id="netConnect" value="connect">繋ぐ</button>
-        <button id="netDisconnect" value="disconnect" hidden>切る</button>
+        <button id="netConnect" value="connect">Connect</button>
+        <button id="netDisconnect" value="disconnect" hidden>Disconnect</button>
         <span class="spacer"></span>
         <button value="close">閉じる</button>
       </div>
