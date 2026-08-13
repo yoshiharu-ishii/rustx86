@@ -505,3 +505,19 @@ may_touch_memoryのuop match (二重ディスパッチ) とip_maskのload+分岐
 
 教訓の更新: OoOが隠すのは「独立な帳簿」だけ。**次の値 (ip・分岐先・guard
 判定) を作る仕事は名前が付帯処理でも直列** — B4/受け口の税/本件で三度目。
+
+## 2026-08-13 translate-first (F1c-d5) — 全勝 (-5%)、ベスト10.9s = 89 MIPS
+
+メモリ系uopのguard控え (slim 76B) を「成功を確定してから実行」で成功路から
+消す。mov32のみ: 6勝2敗 -3.1%。スタック系 (push/pop/call/ret) + load系
+(alu/test/movzx/mov imm) へ展開: **8勝0敗 -4.9%** (中央値11.5→11.05s、
+ベスト10.9s)。フォールトは常に従来経路が控えつきで配送 — guard_restoreの
+assert不変条件は無傷。
+
+買った教訓: exec内 (advance_ip後) の控えは巻き戻し先ipが1命令先になる —
+#PF後の再実行が飛び、Linux initがSIGSEGVで死ぬ (3OS回帰が即検出)。
+save_slim_at(命令頭) で解決。「フォールトした命令は何も起きなかったことに
+なる」の約束はipも含む。
+
+残りの増分: RMW族 (AluRmR/Grp1/Shift/Grp3 — 書き込み権限を先に変換する
+jit_try_rmw32の技) と8/16bit mov族・moffs・Leave。
