@@ -30,20 +30,55 @@ let machine = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
 
-/** ネットワーク設定 (?net= で opt-in)。無指定なら null = NIC無し */
-function netUrl() {
+// ---------- ネットワーク ----------
+//
+// **既定は繋がない。** 電源を入れた機械にLANケーブルが刺さっていないのと
+// 同じ、ごく普通の状態である (NIC無し起動のビット同一 = ADR-0017 の不変条件も
+// これで守られる)。繋ぎたくなったらツールバーのLANポートを押す。
+//
+// 繋ぎ先は2通りの決まり方をする:
+//   1. URLの ?net= — E2Eや自動化のための**上書き**。これがあれば即座に試し、
+//      ダイアログは「今どこに繋がっているか」の表示に徹する
+//   2. ダイアログでの入力 — 人間用。localStorage に覚える
+
+const NET_DEFAULT_URL = 'ws://127.0.0.1:8087/net';
+const NET_STORE = 'rustx86.net';
+
+/** ?net= の指定 (無ければ null)。?net=1 は手元のwsslirpdの意味 */
+function netFromQuery() {
   const q = new URLSearchParams(location.search);
   const net = q.get('net');
   if (!net) return null;
-  const base = net === '1' ? 'ws://127.0.0.1:8087/net' : net;
+  const base = net === '1' ? NET_DEFAULT_URL : net;
   const token = q.get('nettoken');
-  return token ? `${base}${base.includes('?') ? '&' : '?'}token=${token}` : base;
+  return token ? withToken(base, token) : base;
 }
+
+function withToken(url, token) {
+  if (!token) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
+
+/** ブラウザが覚えている設定。{url, token} */
+function netSaved() {
+  try {
+    return { url: NET_DEFAULT_URL, token: '', ...JSON.parse(localStorage.getItem(NET_STORE) || '{}') };
+  } catch {
+    return { url: NET_DEFAULT_URL, token: '' };
+  }
+}
+
+/**
+ * 次に起動する機械を繋ぐ先。null なら NIC を挿さない。
+ * **?net= があるときだけ、頼まれなくても繋ぐ。** それ以外は
+ * 人が「繋ぐ」を押すまで null のまま (灰色) である
+ */
+let netWanted = netFromQuery();
 
 /** 起動スクリプト。ネット有効なマシンは netScript の続きも流す */
 function scriptFor(m) {
   if (!m?.script) return m?.script;
-  return netUrl() && m.netScript ? [...m.script, ...m.netScript] : m.script;
+  return netWanted && m.netScript ? [...m.script, ...m.netScript] : m.script;
 }
 
 // ---------- スナップショット ----------
@@ -68,6 +103,10 @@ function syncControls() {
   $('layout').closest('.sel').hidden = !!linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
+  // ネットワーク。**Linuxからは今のNE2000が見えない** — ltsカーネルは
+  // ISAバスを知らず、PCI越しにしか装置を探さない (ADR-0017 5c で RTL8029 を作る)
+  $('net').disabled = !!linux;
+  if (linux) $('net').title = 'ネットワーク: Linuxは未対応 (PCI + RTL8029 待ち)';
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
@@ -93,6 +132,7 @@ function boot(image, label) {
   machine?.stop();
   speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
   machine?.netlink?.close(); // 前の機械のネットワークも道連れにしない
+  setNetLamp(null); // 灯りも消す。次の機械が挿し直したらまた点く
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
     linux.destroy();
@@ -120,20 +160,9 @@ function boot(image, label) {
     syncControls();
   };
   machine.onTone = hz => speaker.update(hz);
-  // ネットワーク (opt-in)。URLに ?net=1 を付けると NE2000 が挿さり、
-  // ローカルの wsslirpd (ws://127.0.0.1:8087/net) へ繋がる。
-  // ?net=<wsのURL> なら任意の網元 (値はencodeURIComponentしておく)。
-  // ?nettoken=<共有トークン> も付けられる。無指定なら従来どおりNIC無し —
-  // 起動のビット同一 (ADR-0017) は既定の姿で守る
-  {
-    const url = netUrl();
-    if (url) {
-      machine.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
-      machine.netlink = new NetLink(url);
-      machine.netlink.onState = s =>
-        setStatus(s === 'up' ? 'ネットワーク: 接続した' : s === 'down' ? 'ネットワーク: 切断 (wsslirpdは動いているか)' : 'ネットワーク: 接続中…');
-    }
-  }
+  // **NICを挿すのは電源を入れるこの瞬間だけ。** 起動時にしか装置を探さない
+  // ゲスト (ELKSのカーネル) が居るので、後から挿しても見えない — 実機と同じ
+  if (netWanted) attachNet(machine, netWanted);
   // 物理キーはそのまま、貼り付けはASCIIとして送る。
   // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
   // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
@@ -244,6 +273,107 @@ const dbg = new Debugger({
     await bootFromUrl(current);
     startScript(scriptFor(current));
   },
+});
+
+// ---------- ネットワークの灯り と 設定ダイアログ ----------
+//
+// LANポートの絵が3色で状態を言う。**文字で説明しない** —
+// 実機のハブのランプと同じで、色だけで足りる:
+//   灰 まだ繋いでいない (既定。故障ではない)
+//   緑 繋がった
+//   赤 繋がらない / 切れた
+
+/** 機械にNICを挿し、網元へ結線する */
+function attachNet(m, url) {
+  m.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
+  m.netlink = new NetLink(url);
+  setNetLamp('wait');
+  m.netlink.onState = (s, reason) => {
+    setNetLamp(s);
+    if (s === 'up') setStatus(`ネットワーク: ${url} に繋がった`);
+    else if (s === 'down') setStatus(`ネットワーク: ${reason}`, true);
+    netDialogSync();
+  };
+  netDialogSync();
+}
+
+/** 灯りの3色に対応する名前。**装置の状態は装置の言葉で言う** —
+    ifconfig や ip link と同じ語彙にしておくと、ゲストの中で見る状態と繋がる */
+const NET_LABEL = {
+  up: 'Network: Connect',
+  down: 'Network: Disconnect',
+  wait: 'Network: Connecting',
+  off: 'Network: Disable',
+};
+
+function setNetLamp(state) {
+  const b = $('net');
+  if (state) b.dataset.net = state;
+  else delete b.dataset.net;
+  b.title = NET_LABEL[state] ?? NET_LABEL.off;
+}
+
+/** 今の結線 (機械が居なければ null) */
+function netlink() {
+  return machine?.netlink ?? null;
+}
+
+/** ダイアログの中身を今の状態に合わせる */
+function netDialogSync() {
+  const link = netlink();
+  const msg = $('netMsg');
+  const byQuery = !!netFromQuery();
+  msg.className = 'msg';
+  if (!link) {
+    msg.textContent = machine ? '' : '機械を起動すると繋げます';
+  } else if (link.state === 'up') {
+    msg.textContent = `${link.url} に繋がっています`;
+    msg.classList.add('ok');
+  } else if (link.state === 'down') {
+    msg.textContent = link.reason;
+    msg.classList.add('ng');
+  } else {
+    msg.textContent = '接続中…';
+    msg.classList.add('wait');
+  }
+  // ?net= が居るときは、この画面から設定を変えても意味がない (URLが勝つ)
+  for (const id of ['netUrl', 'netToken', 'netConnect']) $(id).disabled = byQuery;
+  $('netDisconnect').hidden = !link || link.state === 'down';
+  if (byQuery) {
+    msg.textContent += (msg.textContent ? ' — ' : '') + 'URLの ?net= で指定されています';
+  }
+}
+
+$('net').addEventListener('click', () => {
+  const saved = netSaved();
+  const q = netFromQuery();
+  $('netUrl').value = q ?? saved.url;
+  $('netToken').value = q ? '' : saved.token;
+  netDialogSync();
+  $('netDialog').showModal();
+});
+
+$('netForm').addEventListener('submit', e => {
+  // <form method="dialog"> は submitter の value が dialog.returnValue になる
+  const how = e.submitter?.value;
+  if (how === 'connect') {
+    const url = $('netUrl').value.trim();
+    const token = $('netToken').value.trim();
+    localStorage.setItem(NET_STORE, JSON.stringify({ url, token }));
+    netWanted = withToken(url, token);
+    if (machine) {
+      // **既に走っている機械には後から挿せない** (ELKSのカーネルは起動時にしか
+      // 装置を探さない)。実機と同じく、電源を入れ直してもらう
+      setStatus('ネットワーク: 次の起動から有効になります。「再起動」を押してください');
+      setNetLamp(null);
+    }
+  } else if (how === 'disconnect') {
+    netWanted = null;
+    netlink()?.close();
+    if (machine) machine.netlink = null;
+    setNetLamp(null);
+    setStatus('ネットワーク: 切りました (次の起動からNIC無し)');
+  }
 });
 
 $('debug').addEventListener('click', () => {
