@@ -286,6 +286,13 @@ export function mountLinux(canvas, opts = {}) {
         worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
       }
     },
+    /** ファイルから読んだ状態へ戻す (Tier 3g) */
+    loadStateBytes(bytes) {
+      if (worker && booted) {
+        const copy = bytes.slice();
+        worker.postMessage({ type: 'load', bytes: copy.buffer }, [copy.buffer]);
+      }
+    },
     get hasSaved() { return savedState !== null; },
     /** デバッガが覗くための代役 (各メソッドが Promise を返す)。起動前は null */
     get dbgEmu() { return worker && booted ? dbgEmu : null; },
