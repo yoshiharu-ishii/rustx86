@@ -52,6 +52,9 @@ fn main() {
                     d.fallbacks / 1_000_000
                 );
             }
+            if m.dcache.gen_bumps > 0 {
+                println!("世代bump: {}回 (コードページへの書き込み)", m.dcache.gen_bumps);
+            }
             // 従来経路落ちの理由 (opstats時のみ) — 語彙拡大の的はこの分解で決める
             let fr = &m.dcache.fb_reasons;
             if fr.iter().sum::<u64>() > 0 {

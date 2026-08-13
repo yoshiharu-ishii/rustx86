@@ -282,10 +282,11 @@ const F_CTL: u8 = 0x20;
 
 #[derive(Clone, Copy)]
 struct Entry {
-    /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
+    /// 命令先頭の物理アドレス (TAG_INVALID = 空き)。
+    /// 世代フィールドは持たない — 自己書き換えの失効は「書かれた瞬間に
+    /// そのページのスロット帯を無効化する」イベント駆動 (下のnote_write)。
+    /// 毎命令の照合から世代ロード+比較+page計算が消え、Entryも4B痩せる
     tag: u32,
-    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
-    gen: u32,
     /// 命令長 + 属性ビット (LEN_MASK/F_MEM/F_CTL)
     len_flags: u8,
     uop: Uop,
@@ -295,8 +296,6 @@ pub struct DecodeCache {
     /// 直接マップ。**最初の32bitデコードまで確保しない** —
     /// 16bit機やcosimの単発Machineに768KBずつ払わせない
     entries: Vec<Entry>,
-    /// 物理4Kページごとの世代。書き込みで進む
-    page_gen: Vec<u32>,
     /// そのページにデコード済みコードがあるか。
     /// データページへの書き込みをタダにするための1判定
     page_has_code: Vec<bool>,
@@ -308,6 +307,8 @@ pub struct DecodeCache {
     /// [0]=0x66 [1]=0x67 [2]=REP(F2/F3) [3]=LOCK [4]=ページ端(跨ぎ疑い)
     /// [5]=語彙外オペコード [6]=16bitモード (CS.D=0、fallbacksとは別口)
     pub fb_reasons: [u64; 7],
+    /// 世代bump回数 (opstats時のみ) — 「照合をイベント駆動に反転」の判断材料
+    pub gen_bumps: u64,
 }
 
 impl DecodeCache {
@@ -315,12 +316,12 @@ impl DecodeCache {
         let pages = ram_bytes.div_ceil(4096);
         DecodeCache {
             entries: Vec::new(),
-            page_gen: vec![0; pages],
             page_has_code: vec![false; pages],
             hits: 0,
             fills: 0,
             fallbacks: 0,
             fb_reasons: [0; 7],
+            gen_bumps: 0,
         }
     }
 
@@ -331,8 +332,25 @@ impl DecodeCache {
         if let Some(has) = self.page_has_code.get_mut(p) {
             if *has {
                 *has = false;
-                self.page_gen[p] = self.page_gen[p].wrapping_add(1);
+                self.invalidate_page(p);
+                if cfg!(feature = "opstats") {
+                    self.gen_bumps += 1;
+                }
             }
+        }
+    }
+
+    /// 自己書き換えの失効: そのページのスロット帯 (4096本、SLOTSは4096の
+    /// 倍数なので帯は連続) を空きに戻す。他ページの巻き添え退去は再fillで
+    /// 直る (正しさに影響なし)。実測ブート全体で~1,000回 = 合計~10ms —
+    /// 934M回の照合から世代ロード+比較を消す対価としてはタダ同然
+    fn invalidate_page(&mut self, p: usize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let start = (p << 12) & (SLOTS - 1);
+        for e in &mut self.entries[start..start + 4096] {
+            e.tag = TAG_INVALID;
         }
     }
 
@@ -347,7 +365,10 @@ impl DecodeCache {
             if let Some(has) = self.page_has_code.get_mut(p) {
                 if *has {
                     *has = false;
-                    self.page_gen[p] = self.page_gen[p].wrapping_add(1);
+                    self.invalidate_page(p);
+                    if cfg!(feature = "opstats") {
+                        self.gen_bumps += 1;
+                    }
                 }
             }
         }
@@ -514,15 +535,14 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         // 前の命令のページウォークが立てた A/D を表へ反映。
         // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
         m.flush_ad();
-        let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
-        // Entry照合 (gen一致 = 「この命令は現世代」の保証)
+        // 照合はタグ1本 — 自己書き換えの失効は書き込み側 (note_write) が
+        // イベント駆動で済ませている (毎命令の世代ロード+比較+page計算は消えた)
         let mut cached = None;
         if !m.dcache.entries.is_empty() {
-            let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
             let e = &m.dcache.entries[slot];
-            if e.tag == pa && e.gen == gen_now {
+            if e.tag == pa {
                 cached = Some((e.len_flags, e.uop));
                 // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
                 if cfg!(feature = "opstats") {
@@ -539,14 +559,12 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         m.dcache.entries = vec![
                             Entry {
                                 tag: TAG_INVALID,
-                                gen: 0,
                                 len_flags: 0,
                                 uop: Uop::Ret,
                             };
                             SLOTS
                         ];
                     }
-                    let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
                     // 分類はデコード時の一度だけ — 実行時はビットを見るだけ
                     let mut lf = len;
                     debug_assert!(len & !LEN_MASK == 0);
@@ -558,10 +576,10 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                     }
                     m.dcache.entries[slot] = Entry {
                         tag: pa,
-                        gen,
                         len_flags: lf,
                         uop,
                     };
+                    let page = (pa >> 12) as usize;
                     if let Some(h) = m.dcache.page_has_code.get_mut(page) {
                         *h = true;
                     }
