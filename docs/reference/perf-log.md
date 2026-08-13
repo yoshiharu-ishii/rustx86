@@ -599,3 +599,20 @@ cfg(wasm32)境界検査省略はwasm A/B 6勝0敗+8.4% (55.8→59.5 MIPS) の明
 (タグ exp/wasm-d3-bounds、ADR-0016追記)。coreの「読んだときに1つの形」
 という価値は、8%と交換しない。以後のwasm最適化はビルド層 (wasm-opt・
 target-feature) とJS層で取る。
+
+## 2026-08-13: wasmビルド層の3すくみ — 全部ワッシュ (台帳のみ)
+
+core不可侵ルール下の第一手。コード無変更で、ビルド層の蛇口を3つ同時にA/B (headless.mjs、5ラウンド交互)。
+
+| 変種 | 平均MIPS | 裁定 |
+|---|---|---|
+| base: wasm-pack既定のwasm-opt | 55.6 | 基準 |
+| wasm-opt -O4 追い掛け | 55.7 | ワッシュ (2勝2敗1分) |
+| RUSTFLAGS +bulk-memory,+simd128,+nontrapping-fptoint | 55.8 | ワッシュ (3勝2敗、分散大 53.2〜58.7) |
+
+副産物2つ:
+
+1. **binaryenを入れた瞬間、wasm-packが自動でwasm-optを掛け始める**。今までの全wasmビルドは実はwasm-opt無しだった。そして無し時代の同条件計測 (平均55.6) と今日のopt済みbaseが同値 — つまり**既定のwasm-optパス自体もワッシュ**。LLVMの出力にbinaryenが拾う残りは無い
+2. ローカルにbinaryenが有る/無いでビルド産物が変わる (CIランナーには無い)。ワッシュなので実害は無いが、ビルド層A/Bをやる者は先にwasm-packのログで確認せよ
+
+裁定: ビルド層は乾いた。次の蛇口はweb/JS層 (run_slice粒度・worker往復・シリアル取り出し頻度)。
