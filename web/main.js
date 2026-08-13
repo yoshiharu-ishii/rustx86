@@ -13,6 +13,7 @@ import { Terminal } from './terminal.js';
 import { MACHINES, byGroup } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
+import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -109,6 +110,7 @@ function syncControls() {
     $('pause').textContent = linux.paused ? '再開' : '一時停止';
     $('snap').disabled = !linux.booted;
     $('restore').disabled = !linux.hasSaved;
+    $('export').disabled = !linux.booted;
     return;
   }
   $('pause').disabled = !on;
@@ -116,6 +118,7 @@ function syncControls() {
   $('boot').disabled = !lastImage;
   $('snap').disabled = !on;
   $('restore').disabled = !on || !localStorage.getItem(snapKey());
+  $('export').disabled = !on;
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
@@ -306,6 +309,35 @@ $('snap').addEventListener('click', async () => {
   }
 });
 
+$('export').addEventListener('click', async () => {
+  // Tier 3g: バイナリのファイル書き出し (JSON+base64は廃止 — snapfile.js)
+  try {
+    let state, label;
+    if (linux) {
+      if (!linux.savedBytes) {
+        setStatus('先に「状態を保存」してから書き出してください', true);
+        return;
+      }
+      state = linux.savedBytes;
+      label = 'linux';
+    } else if (machine) {
+      state = machine.saveState();
+      label = (lastLabel || 'machine').replace(/\.\w+$/, '');
+    } else {
+      return;
+    }
+    const bytes = await packSnapshot(state, label);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+    a.download = `${label}${SNAP_EXT}`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus(`書き出した (${(bytes.length / 1024).toFixed(0)} KB、バイナリ形式)`);
+  } catch (e) {
+    setStatus(`書き出せない: ${e.message}`, true);
+  }
+});
+
 $('restore').addEventListener('click', async () => {
   if (linux) {
     linux.restoreState();
@@ -368,7 +400,30 @@ $('imageFile').addEventListener('change', () => {
 });
 
 async function insertMedia(f) {
-  // スナップショット (JSON) ならそこへ戻る。ディスクなら起動する
+  // スナップショットならそこへ戻る。ディスクなら起動する。
+  // 判定は拡張子でなく中身のmagic (Tier 3g、旧JSON形式も読める)
+  const head = new Uint8Array(await f.slice(0, 32).arrayBuffer());
+  if (isSnapshotFile(head)) {
+    try {
+      const o = await unpackSnapshot(new Uint8Array(await f.arrayBuffer()));
+      if (linux?.booted) {
+        linux.loadStateBytes(o.state);
+        setStatus(`${f.name} の状態に戻した (${o.label}、${o.created.toLocaleString()})`);
+        return;
+      }
+      if (!machine) {
+        setStatus('先にディスクイメージを起動してください', true);
+        return;
+      }
+      machine.loadState(o.state);
+      term.reset();
+      setStatus(`${f.name} の状態に戻した (${o.label}、${o.created.toLocaleString()})`);
+      $('screen').focus();
+    } catch (err) {
+      setStatus(`復元できない: ${err.message}`, true);
+    }
+    return;
+  }
   if (f.name.endsWith('.json')) {
     if (!machine) {
       setStatus('先にディスクイメージを起動してください', true);
