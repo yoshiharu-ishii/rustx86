@@ -320,6 +320,14 @@ impl Cpu {
         self.ip = self.ip.wrapping_add(n) & self.ip_mask();
     }
 
+    /// 32bit CS確定経路 (step_cached) 専用のIP更新。ip_mask()のセグメント幅
+    /// 判定 (loadと分岐) を払わない — CSの幅を変える命令は語彙外なので、
+    /// 入口の seg_is32 検査がブロック全体に効く
+    #[inline(always)]
+    pub(crate) fn advance_ip32(&mut self, n: u32) {
+        self.ip = self.ip.wrapping_add(n);
+    }
+
     /// セグメント適用後のリニアアドレス。
     /// リアルモードは1MBで折り返す (8086のアドレスバスが20本だったため)
     pub fn lin(&self, seg: usize, off: u32) -> u32 {
