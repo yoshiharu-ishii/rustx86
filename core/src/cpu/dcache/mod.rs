@@ -37,7 +37,7 @@ mod exec;
 
 /// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
 /// ホストのキャッシュに収まる小ささの折り合い (768KB)。要調整なら実測で
-const SLOTS: usize = 32 * 1024;
+const SLOTS: usize = 128 * 1024;
 
 const TAG_INVALID: u32 = 0xFFFF_FFFF;
 
