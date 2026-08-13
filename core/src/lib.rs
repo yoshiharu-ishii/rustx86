@@ -613,6 +613,23 @@ impl Machine {
         std::mem::replace(&mut self.vram_dirty, false)
     }
 
+    /// PCスピーカーが今出している音の周波数 (Hz)。無音なら None。
+    ///
+    /// 実機の配線そのまま: PIT カウンタ2の矩形波が、システム制御ポート
+    /// 0x61 の bit0 (ゲート) と bit1 (スピーカーへの通電) の**両方が立って
+    /// いるときだけ**スピーカーに届く。BIOSビープもDOSのゲームもこの2bitを
+    /// 立ててから分周値を書く。
+    ///
+    /// イベントやコールバックにはしない — 画面 (take_vram_dirty) と同じく
+    /// **描画側がスライス境界でポーリングする**流儀。coreは状態を返すだけで
+    /// 壁時計もオーディオAPIも知らないので、決定性に影響しない
+    pub fn speaker_tone(&self) -> Option<f64> {
+        if self.devices.sysctl & 0b11 != 0b11 {
+            return None;
+        }
+        self.devices.pit.speaker_freq()
+    }
+
     /// テキスト画面を文字列にする (属性を捨てて文字コードだけ拾う)。
     /// テストと確認用で、実際の描画は色も使う
     pub fn text_screen_string(&self) -> String {

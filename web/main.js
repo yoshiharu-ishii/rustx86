@@ -14,9 +14,16 @@ import { MACHINES, byGroup } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
+import { Speaker } from './speaker.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
+// PCスピーカー。全機械で1個 — 実機にもスピーカーは1個しか付いていない。
+// ブラウザの自動再生ポリシーがあるので、最初のキー/クリックで unlock する
+const speaker = new Speaker();
+for (const ev of ['keydown', 'pointerdown']) {
+  document.addEventListener(ev, () => speaker.unlock(), { once: false, capture: true });
+}
 
 let machine = null;
 /** 最後に起動したイメージ。再起動に使う */
@@ -67,6 +74,7 @@ function boot(image, label) {
   $('welcomePane').hidden = true;
   $('screen').hidden = false;
   machine?.stop();
+  speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
     linux.destroy();
@@ -93,6 +101,7 @@ function boot(image, label) {
     setStatus(`デバッガが止めた: ${why}`);
     syncControls();
   };
+  machine.onTone = hz => speaker.update(hz);
   // 物理キーはそのまま、貼り付けはASCIIとして送る
   term.onKey = (code, down) => machine.key(code, down);
   term.onChar = ch => machine.typeChar(ch);
@@ -208,6 +217,8 @@ $('debug').addEventListener('click', () => {
 });
 
 $('pause').addEventListener('click', () => {
+  // 止めた機械は音も止める — 鳴りっぱなしのオシレータだけが残ると不気味
+  speaker.mute();
   if (linux) {
     linux.setPaused(!linux.paused);
     syncControls();
@@ -528,6 +539,7 @@ async function select(m, { autoBoot = true } = {}) {
       onStatus: setStatus,
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
+      onTone: hz => speaker.update(hz),
     });
     dbg.reset();
     syncControls();

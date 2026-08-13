@@ -25,6 +25,7 @@ let emu = null;
 let running = false;
 let instrs = 0;
 let lastMeasure = 0;
+let lastTone = 0;
 
 await init();
 postMessage({ type: 'ready' });
@@ -168,6 +169,14 @@ function loop() {
   if (out.length) {
     // Uint8Array を transferable で渡す (コピーを避ける)
     postMessage({ type: 'serial', bytes: out.buffer }, [out.buffer]);
+  }
+
+  // PCスピーカー。値はスライスごとにポーリングし、**変わったときだけ**報告する
+  // (WebAudioはワーカーから触れないのでメインが鳴らす)
+  const hz = emu.speaker_tone();
+  if (hz !== lastTone) {
+    lastTone = hz;
+    postMessage({ type: 'tone', hz });
   }
 
   const trap = emu.trap_reason();

@@ -220,6 +220,9 @@ export class Machine {
     const skipped = this.emu.take_idle_skipped();
     this.idle = skipped > budget / 2;
 
+    // PCスピーカー (画面と同じポーリングの分業。鳴らすのは main.js)
+    this.onTone?.(this.emu.speaker_tone());
+
     // 描かせるのは1フレームに1回だけ
     if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
     this.#schedule();
