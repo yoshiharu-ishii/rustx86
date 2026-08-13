@@ -92,6 +92,18 @@
     font: inherit; font-size: .8rem; padding: .15rem .3rem; border-radius: .3rem;
     border: 1px solid #3d3d3d; background: #1e1e1e; color: #e0e0e0;
   }
+  /* 上段 (机の上の備品) は下段より控えめに。**主役は機械の操作**である */
+  .toolbar.rig { background: #101010; padding-top: .4rem; padding-bottom: .4rem; }
+  .toolbar.box { border-bottom: 1px solid #2a2a2a; }
+
+  /* 電源。押した先が「入」か「切」かはボタンの色で言う */
+  .toolbar .power { display: inline-flex; align-items: center; gap: .35rem; }
+  .power svg {
+    width: 1.05em; height: 1.05em; fill: none; stroke: currentColor;
+    stroke-width: 1.6; stroke-linecap: round; color: #8a8a8a;
+  }
+  .power[data-on] svg { color: #5dbb5d; }
+
   /* ネットワークボタン。**状態は色で言う** — 文字を読ませない。
      既定 (灰) は「まだ繋いでいない」で、故障ではない */
   .toolbar .netbtn { display: inline-flex; align-items: center; gap: .35rem; }
@@ -180,15 +192,10 @@
   <nav class="machines" id="machines" aria-label="マシン"></nav>
   <div>
   <div class="console" id="console">
-    <div class="toolbar">
-      <button id="boot" disabled>再起動</button>
-      <button id="pause" disabled>一時停止</button>
-      <button id="snapExport" disabled>スナップショット書出</button>
-      <button id="snapImport">スナップショット復元</button>
-      <input id="snapFile" type="file" accept=".rx86snap" hidden>
-      <button id="save">ログを保存</button>
-      <button id="debug" disabled>デバッガ</button>
-      <!-- ネットワーク。**LANポートの絵**そのもの (RJ45の爪つき) を灯りにする。
+    <!-- 上段は**機械の外側にあるもの**。どの機械を選んでも同じで、
+         機械を選ぶ前から触れる (LANケーブルもキーボードも、机の上の備品) -->
+    <div class="toolbar rig">
+      <!-- NIC。**LANポートの絵**そのもの (RJ45の爪つき) を灯りにする。
            灰=繋いでいない / 緑=繋がった / 赤=繋がらない -->
       <button id="net" class="netbtn" title="Network:Disable">
         <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -198,7 +205,7 @@
           <rect class="pin" x="8.4" y="7.5" width="1.2" height="2.4" />
           <rect class="pin" x="10.5" y="7.5" width="1.2" height="2.4" />
         </svg>
-        ネット
+        NIC
       </button>
       <label class="sel">配列
         <select id="layout">
@@ -206,6 +213,23 @@
           <option value="us">US</option>
         </select>
       </label>
+    </div>
+    <!-- 下段は**この機械の操作**。機械を選んでいないときは丸ごと伏せる -->
+    <div class="toolbar box">
+      <button id="power" class="power" disabled title="電源">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 1.6v6.2" />
+          <path d="M12.2 3.4a5.6 5.6 0 1 1-8.4 0" />
+        </svg>
+        電源
+      </button>
+      <button id="boot" disabled>再起動</button>
+      <button id="pause" disabled>一時停止</button>
+      <button id="snapExport" disabled>スナップショット書出</button>
+      <button id="snapImport">スナップショット復元</button>
+      <input id="snapFile" type="file" accept=".rx86snap" hidden>
+      <button id="save">ログを保存</button>
+      <button id="debug" disabled>デバッガ</button>
       <span class="spacer"></span>
       <span class="gauge" id="gauge"></span>
     </div>

@@ -99,13 +99,16 @@ function syncControls() {
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
-  // **ネットワークだけはスタート画面にも残す。** ケーブルは機械の部品では
-  // ないので、どの機械を机に置くか決める前から挿しておける (先に挿しておけば
-  // 最初の起動からNICが載る)
-  for (const el of document.querySelector('.toolbar').children) {
-    el.hidden = onWelcome && el.id !== 'net';
-  }
+  // 上段 (机の上の備品) は常に居る。**NICは機械の部品ではない**ので、
+  // どの機械を置くか決める前から挿しておける (先に挿せば最初の起動からNICが載る)。
+  // 下段 (この機械の操作) だけを伏せる
+  document.querySelector('.toolbar.box').hidden = onWelcome;
   if (onWelcome) return;
+  // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
+  const powered = !!machine || !!linux?.booted;
+  $('power').toggleAttribute('data-on', powered);
+  $('power').title = powered ? '電源を切る' : '電源を入れる';
+  $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').closest('.sel').hidden = !!linux;
@@ -405,6 +408,31 @@ $('netForm').addEventListener('submit', e => {
     netDisconnect();
     setStatus(NET_LABEL.off);
   }
+});
+
+// 電源。**入っていれば切り、切れていれば入れる** — 実機のスイッチと同じ1個。
+// 電源を切った機械は消えるが、入れていたイメージは机の上に残るので、
+// もう一度押せば同じものが立ち上がる
+$('power').addEventListener('click', async () => {
+  speaker.mute();
+  if (linux) {
+    if (linux.booted) linux.destroy(), (linux = null), $('linuxScreen').setAttribute('hidden', '');
+    else await linux.boot();
+    syncControls();
+    return;
+  }
+  if (machine) {
+    machine.stop();
+    machine.netlink = null; // ケーブルは机に残る。機械から抜けるだけ
+    machine = null;
+    term.reset();
+    term.draw();
+    setStatus('電源を切りました。もう一度押すと同じイメージで立ち上がります');
+  } else if (lastImage) {
+    boot(lastImage, lastLabel);
+    startScript(scriptFor(current));
+  }
+  syncControls();
 });
 
 $('debug').addEventListener('click', () => {
