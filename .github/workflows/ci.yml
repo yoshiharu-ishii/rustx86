@@ -320,6 +320,84 @@ jobs:
       - name: 合否判定
         run: test "${{ steps.t386.outcome }}" = "success"
 
+  wasmboot:
+    name: wasm起動
+    # 機械層のwasm版: 「普段ネイティブ検証・Webの時だけwasm」運用の唯一の
+    # 欠点 = wasmだけで壊れる変化が日常ループで見えない (タブ税・タイマ
+    # クランプの前例、今後はcfg(wasm32)の道)。ここで毎push起動まで見る。
+    # コードチェックはwasmを「ビルド」するだけで「起動」はしていなかった
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' }}
+    needs: [check, cosim, compat386]
+    runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v1-${{ hashFiles('tools/fetch-images.sh', 'tools/extract-vmlinux.sh', 'tools/make-mini-initramfs.sh', 'tools/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/fetch-images.sh linux
+          tools/extract-vmlinux.sh
+          tools/make-mini-initramfs.sh
+
+      - name: wasm-pack の用意
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      - name: wasm を焼いて起動 (headless — banner+snakeまで)
+        id: wasmboot
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## wasm起動 — `node tools/webtest/headless.mjs`'
+            echo '```'
+            bash tools/build-web.sh 2>&1 | tail -2
+            node tools/webtest/headless.mjs 2>&1 | tee /dev/stderr
+            echo '```'
+          } > wasmboot-report.md
+          grep -q 'banner=true' wasmboot-report.md
+          grep -q 'snake_board=true' wasmboot-report.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat wasmboot-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: wasm起動
+          title: ${{ steps.wasmboot.outcome == 'success' && 'ブラウザ版もLinuxが起動する' || 'wasmで起動しない' }}
+          outcome: ${{ steps.wasmboot.outcome }}
+          report-file: wasmboot-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: test "${{ steps.wasmboot.outcome }}" = "success"
+
   snapshot:
     name: スナップショット
     # 保存/復元のIntegration: 往復ビット不変 + 復元の透明性 (K命令後の全状態一致)。
@@ -496,7 +574,7 @@ jobs:
   ok:
     name: OK
     if: always()
-    needs: [check, cosim, compat386, regress, snapshot]
+    needs: [check, cosim, compat386, regress, wasmboot, snapshot]
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
@@ -511,4 +589,6 @@ jobs:
             && { test "${{ needs.regress.result }}" = "success" \
                  || test "${{ needs.regress.result }}" = "skipped"; } \
             && { test "${{ needs.snapshot.result }}" = "success" \
-                 || test "${{ needs.snapshot.result }}" = "skipped"; }
+                 || test "${{ needs.snapshot.result }}" = "skipped"; } \
+            && { test "${{ needs.wasmboot.result }}" = "success" \
+                 || test "${{ needs.wasmboot.result }}" = "skipped"; }
