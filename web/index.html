@@ -66,6 +66,11 @@
   .brand .ico svg { width: 1.2rem; height: 1.2rem; }
   .brand .t { font-size: .95rem; font-weight: 600; line-height: 1.25; }
   .brand .s { font-size: .75rem; color: var(--dim); }
+  /* 今のVM。**アプリ名のすぐ下に置く** — 一覧のどれを選んだかではなく、
+     何が動いているかが知りたいことなので */
+  .vm { display: flex; align-items: center; gap: .55rem; padding: .65rem .75rem; }
+  .vm .t { font-size: .82rem; font-weight: 600; line-height: 1.3; }
+  .vm .s { font-size: .74rem; color: var(--dim); display: block; }
 
   /* --- 左: 一覧 (状態・デバイス・情報) --- */
   .rows { display: grid; gap: .1rem; }
@@ -143,6 +148,14 @@
   .console { overflow: hidden; }
   .console > h2 .right { margin-left: auto; display: flex; gap: .4rem; }
   .console > h2 button.op { padding: .25rem .55rem; font-size: .74rem; }
+  /* 起動元の帯。端末の上に置いて、**画面と地続きの情報**として読ませる */
+  .origin { display: flex; flex-wrap: wrap; gap: .4rem; padding: .5rem .75rem 0; }
+  .origin .chip {
+    display: inline-flex; align-items: center; gap: .35rem;
+    font-size: .74rem; color: #a8b2a8; padding: .22rem .55rem;
+    border: 1px solid var(--line); border-radius: .4rem; background: #0d100d;
+  }
+  .origin .chip svg { width: .9rem; height: .9rem; color: var(--dim); }
   .stage { background: #000; padding: .5rem; }
   /* **文字の大きさは端末が決める。** canvasを引き伸ばすと80桁が滲むので、
      等倍 (730px) を上限にして、画面が狭いときだけ縮める */
@@ -240,20 +253,24 @@
         </svg>
       </span>
       <span>
-        <span class="t" id="brandName">rustx86</span>
-        <span class="s" id="brandSub">ブラウザの中の1台のPC</span>
+        <span class="t">rustx86</span>
+        <span class="s">ブラウザの中の1台のPC</span>
+      </span>
+    </div>
+
+    <!-- **アプリ名の下は「今どのVMが動いているか」。**
+         起動すると左上が「スタート」のままで、画面を見ているのか機械が
+         動いているのか分からなかった。ここが状態を持つと、一覧の「スタート」は
+         画面名ではなく**操作**に格下げできる -->
+    <div class="card vm" id="vmCard">
+      <span class="dot" id="vmDot"></span>
+      <span>
+        <span class="t" id="vmState">停止中</span>
+        <span class="s" id="vmName">マシンを選んでください</span>
       </span>
     </div>
 
     <nav class="card machines" id="machines" aria-label="マシン"></nav>
-
-    <section class="card" id="stateCard" hidden>
-      <h2><span class="dot ok" id="stateDot"></span>システム状態</h2>
-      <div class="body rows">
-        <div class="r"><span class="k">状態</span><span class="v" id="stateRun">—</span></div>
-        <div class="r"><span class="k">履歴</span><span class="v" id="stateHist">0 行</span></div>
-      </div>
-    </section>
 
     <section class="card" id="devCard" hidden>
       <h2>
@@ -402,6 +419,16 @@
           <p>OSイメージをこのページと同じ場所に置くと、左のOSライブラリから起動できます
             (取得先は各OSを選ぶと出ます)。</p>
         </div>
+      </div>
+
+      <!-- 左のカードより細かい話。**何を食わせて動いているVMなのか**まで言う -->
+      <div class="origin" id="originRow" hidden>
+        <span class="chip" id="originKind">起動元：ライブラリ</span>
+        <span class="chip">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+               aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4"/></svg>
+          <span id="originName">—</span>
+        </span>
       </div>
 
       <div class="stage" id="stage" hidden>
