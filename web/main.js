@@ -104,6 +104,9 @@ function syncControls() {
   for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'stateCard', 'devCard', 'infoCard']) {
     $(id).hidden = onWelcome;
   }
+  // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か
+  $('footGuide').hidden = !onWelcome;
+  $('footDisk').hidden = onWelcome;
   if (onWelcome) {
     $('brandName').textContent = 'rustx86';
     $('brandSub').textContent = 'ブラウザの中の1台のPC';

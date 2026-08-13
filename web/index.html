@@ -169,22 +169,30 @@
   #status.warn { color: var(--amber); }
 
   /* --- オープニング --- */
-  #welcomePane { padding: 2.2rem 2rem 1.8rem; }
-  #welcomePane h2 { margin: 0 0 .5rem; font-size: 1.3rem; font-weight: 650; color: #eef2ee; }
-  #welcomePane .lead { margin: 0 0 1.5rem; font-size: .92rem; color: #98a198; max-width: 34rem; }
-  #welcomePane .oscards {
-    display: grid; gap: .7rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-    max-width: 40rem;
+  /* --- オープニング。**他の面と同じカードの言葉で書く** --- */
+  #welcomePane { padding: 1.8rem 1.8rem 1.6rem; }
+  #welcomePane h2 { margin: 0 0 .6rem; font-size: 1.45rem; font-weight: 650; color: #eef2ee; }
+  #welcomePane .lead { margin: 0 0 1.4rem; font-size: .92rem; color: #98a198; max-width: 38rem; }
+  /* メディア投入口。**画面のいちばん大きい面積を持たせる** — ここに
+     ドロップすれば動く、が最初に伝わるべきことなので */
+  #welcomePane .slot {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: .5rem; width: 100%; min-height: 13rem; padding: 2rem 1rem;
+    font: inherit; color: inherit; cursor: pointer; text-align: center;
+    background: transparent; border: 1px dashed var(--line-lit); border-radius: .7rem;
   }
-  #welcomePane .oscards button {
-    font: inherit; text-align: left; cursor: pointer; color: inherit;
-    background: transparent; border: 1px dashed var(--line-lit); border-radius: .55rem;
-    padding: .85rem .95rem; display: flex; flex-direction: column; gap: .3rem;
+  #welcomePane .slot:hover { border-color: var(--green); background: #0e140e; }
+  #welcomePane .slot svg { width: 2.6rem; height: 2.6rem; color: var(--green); }
+  #welcomePane .slot .os { font-weight: 600; font-size: 1rem; color: #e7ece7; }
+  #welcomePane .slot .d { font-size: .82rem; color: #98a198; line-height: 1.7; }
+  /* 補足はカードに入れる。地の文で足すと本文と同じ重さに見える */
+  #welcomePane .help { margin: 1rem 0 0; padding: .85rem 1rem; }
+  #welcomePane .help .t {
+    display: flex; align-items: center; gap: .45rem;
+    font-size: .84rem; font-weight: 600; color: #c3ccc3; margin-bottom: .3rem;
   }
-  #welcomePane .oscards button:hover { border-color: var(--green); background: #101710; }
-  #welcomePane .oscards .os { font-weight: 600; font-size: .92rem; color: #e7ece7; }
-  #welcomePane .oscards .d { font-size: .78rem; color: #98a198; line-height: 1.5; }
-  #welcomePane .fine { margin: 1.5rem 0 0; font-size: .78rem; color: #6d756d; }
+  #welcomePane .help .t svg { width: 1rem; height: 1rem; color: var(--green); }
+  #welcomePane .help p { margin: 0; font-size: .8rem; color: #8f988f; line-height: 1.7; }
   #machineNote { font-size: .78rem; color: var(--dim); margin: 0; padding: .6rem .2rem 0; }
 
   /* --- 設定ダイアログ --- */
@@ -367,15 +375,25 @@
         <h2>rustx86 — ブラウザの中の1台のPC</h2>
         <p class="lead">Rustで書いたx86エミュレータです。実物のOSに手を加えず
           そのまま実行します。フロッピーのOSも現代のLinuxも、同じ1台で起動します。</p>
-        <div class="oscards">
-          <button data-open>
-            <span class="os">イメージを開く…</span>
-            <span class="d">フロッピー/ディスクイメージ (.img) を選ぶ。
-              この枠へのドロップでも起動します</span>
-          </button>
+        <button class="slot" data-open>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+            <path d="M14 3v5h5" />
+          </svg>
+          <span class="os">イメージを開く…</span>
+          <span class="d">フロッピー/ディスクイメージ (.img) を選ぶ、<br>
+            この枠へのドラッグでも起動します</span>
+        </button>
+        <div class="card help">
+          <p class="t">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                 aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+            使い方
+          </p>
+          <p>OSイメージをこのページと同じ場所に置くと、左のOSライブラリから起動できます
+            (取得先は各OSを選ぶと出ます)。</p>
         </div>
-        <p class="fine">OSイメージをこのページと同じ場所に置くと、
-          左のOSライブラリから起動できます (取得先は各OSを選ぶと出ます)。</p>
       </div>
 
       <div class="stage" id="stage" hidden>
@@ -386,8 +404,11 @@
       </div>
 
       <div class="foot">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-             aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4"/></svg>
+        <!-- まだ機械が無いうちは案内 (本)、動き出したら媒体 (フロッピー) -->
+        <svg id="footGuide" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h5v18H6a2 2 0 0 1-2-2z"/><path d="M20 5a2 2 0 0 0-2-2h-5v18h5a2 2 0 0 0 2-2z"/></svg>
+        <svg id="footDisk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             aria-hidden="true" hidden><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4"/></svg>
         <p id="status">読み込み中…</p>
       </div>
     </section>
