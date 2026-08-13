@@ -405,6 +405,40 @@ impl Machine {
         }
     }
 
+    /// fast_read32 の8bit版 (1バイトは跨げない)
+    #[inline]
+    pub(crate) fn fast_read8(&mut self, seg: usize, off: u32) -> Option<u8> {
+        if !self.cpu.pe() || self.cpu.vm86() || !self.cpu.hidden[seg].flat_rw() {
+            return None;
+        }
+        match self.translate_for(off, false) {
+            Ok(pa) => Some(self.read_phys8(pa)),
+            Err(_) => None,
+        }
+    }
+
+    /// fast_read32 の16bit版
+    #[inline]
+    pub(crate) fn fast_read16(&mut self, seg: usize, off: u32) -> Option<u16> {
+        if !self.cpu.pe() || self.cpu.vm86() || !self.cpu.hidden[seg].flat_rw() {
+            return None;
+        }
+        if off & 0xFFF > 0xFFE {
+            return None;
+        }
+        match self.translate_for(off, false) {
+            Ok(pa) => {
+                let a = pa as usize;
+                if a + 2 <= self.mem.len() {
+                    Some(self.mem[a] as u16 | (self.mem[a + 1] as u16) << 8)
+                } else {
+                    Some(0xFFFF) // read16と同じ器
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
     /// fast_read32 の書き込み版。Some(()) = 書き終えた (RAM超えの捨ても含む —
     /// write_wideと同じ意味)。None = 従来経路へ (VRAM窓・デバッガ含む)
     #[inline]
