@@ -452,8 +452,6 @@ impl Machine {
     /// フォールトに備えてCPUを控える (要るときだけ呼ばれる)。
     /// 控えの使い道は #PF・セグメント例外 (#GP/#SS) の巻き戻しと CPL=3 の
     /// #UD 巻き戻し — どれも保護モードでしか起きないので、条件は PE ひとつ。
-    /// Boxの器は使い回して確保を避ける
-    #[inline]
     /// 控えが要る状況か。使い道は #PF の巻き戻し (ページング有効時しか
     /// 起きない) と、ユーザー空間 (CPL=3、v86含む) の #UD 巻き戻しの2つ —
     /// どちらも起き得ない「ページングOFFかつリング0」(bzImage解凍ステブ等)
@@ -464,6 +462,8 @@ impl Machine {
         self.cpu.pe() && (self.cpu.pg() || self.cpu.cpl() == 3 || self.cpu.vm86())
     }
 
+    /// Boxの器は使い回して確保を避ける
+    #[inline]
     pub(crate) fn guard_save(&mut self) {
         if self.guard_needed() {
             self.fault_save = self.cpu.clone();
