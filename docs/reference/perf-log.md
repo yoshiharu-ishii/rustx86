@@ -604,15 +604,21 @@ target-feature) とJS層で取る。
 
 core不可侵ルール下の第一手。コード無変更で、ビルド層の蛇口を3つ同時にA/B (headless.mjs、5ラウンド交互)。
 
-| 変種 | 平均MIPS | 裁定 |
+**尺度はネイティブと同じ「時間」で記録する** (以後のwasm計測も同様)。命令数は決定的に
+毎回同一 (headlessのコースは1000M命令、50M刻みの量子化込み) なので、変数は時間だけ。
+MIPSは分子が固定の割り算にすぎず、9.5秒のネイティブ記録と尺度が揃わないため主役から降ろす。
+注意: ネイティブの100m走 (970M命令コース、9.3〜9.4s) とはコースが違うので秒の直接比較はしない。
+比べるのは同コース内の差だけ。
+
+| 変種 | 平均 (1000Mコース) | 裁定 |
 |---|---|---|
-| base: wasm-pack既定のwasm-opt | 55.6 | 基準 |
-| wasm-opt -O4 追い掛け | 55.7 | ワッシュ (2勝2敗1分) |
-| RUSTFLAGS +bulk-memory,+simd128,+nontrapping-fptoint | 55.8 | ワッシュ (3勝2敗、分散大 53.2〜58.7) |
+| base: wasm-pack既定のwasm-opt | 18.0s | 基準 |
+| wasm-opt -O4 追い掛け | 17.9s | ワッシュ (2勝2敗1分) |
+| RUSTFLAGS +bulk-memory,+simd128,+nontrapping-fptoint | 17.9s | ワッシュ (3勝2敗、分散大 17.0〜18.8s) |
 
 副産物2つ:
 
-1. **binaryenを入れた瞬間、wasm-packが自動でwasm-optを掛け始める**。今までの全wasmビルドは実はwasm-opt無しだった。そして無し時代の同条件計測 (平均55.6) と今日のopt済みbaseが同値 — つまり**既定のwasm-optパス自体もワッシュ**。LLVMの出力にbinaryenが拾う残りは無い
+1. **binaryenを入れた瞬間、wasm-packが自動でwasm-optを掛け始める**。今までの全wasmビルドは実はwasm-opt無しだった。そして無し時代の同条件計測 (平均18.0s) と今日のopt済みbaseが同値 — つまり**既定のwasm-optパス自体もワッシュ**。LLVMの出力にbinaryenが拾う残りは無い
 2. ローカルにbinaryenが有る/無いでビルド産物が変わる (CIランナーには無い)。ワッシュなので実害は無いが、ビルド層A/Bをやる者は先にwasm-packのログで確認せよ
 
 裁定: ビルド層は乾いた。次の蛇口はweb/JS層 (run_slice粒度・worker往復・シリアル取り出し頻度)。
