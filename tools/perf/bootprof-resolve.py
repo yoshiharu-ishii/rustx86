@@ -1,7 +1,7 @@
 # bootprof のサンプルをカーネルのSystem.mapで関数名に解決してヒストグラムを出す。
 # (Alpineの配布vmlinuxはシンボルが剥がされているのでELF symtabは使えない —
-#  netbootディレクトリの System.map を使う。tools/fetch-images.sh 参照)
-#   python3 tools/bootprof-resolve.py /tmp/bootprof.txt images/System.map-lts
+#  netbootディレクトリの System.map を使う。tools/images/fetch-images.sh 参照)
+#   python3 tools/perf/bootprof-resolve.py /tmp/bootprof.txt images/System.map-lts
 import sys
 from bisect import bisect_right
 

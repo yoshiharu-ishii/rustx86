@@ -1,17 +1,17 @@
 # チートシート — よく打つコマンド
 
-増えてきたコマンドの早見表。**まず `tools/fetch-images.sh` でイメージを揃える**
+増えてきたコマンドの早見表。**まず `tools/images/fetch-images.sh` でイメージを揃える**
 (GPL配布物はリポジトリに置かない方針 — 入手経路はこのスクリプト一つ)。
 詳しい背景はリンク先へ。ここは「手が覚える前に引く表」。
 
 ## イメージを揃える (最初に一度)
 
 ```bash
-tools/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
-tools/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
-tools/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
-tools/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
-tools/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
+tools/images/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
+tools/images/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
+tools/images/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
+tools/images/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
+tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
 ```
 
 ## 走らせる
@@ -33,7 +33,7 @@ tools/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
 | 命令毎秒 (CPUだけ、ラッパー無し) | `cargo run --release --example bench_raw -- asm/bench.bin` |
 | 起動のどの区間に命令を使うか | `cargo run --release --example bootphase` |
 | どのカーネル関数で燃えているか (ipサンプル) | `cargo run --release --example bootprof -- images/vmlinux > /tmp/p.txt` |
-| ↑を関数名に解決 | `uv run --with pyelftools python3 tools/bootprof-resolve.py /tmp/p.txt images/System.map-lts` |
+| ↑を関数名に解決 | `uv run --with pyelftools python3 tools/perf/bootprof-resolve.py /tmp/p.txt images/System.map-lts` |
 | v86と同一カーネルでMIPS比較 | `node tools/webtest/v86-bench.mjs` |
 
 速度は**交互A/B**で判定する (単発の速さは熱ダレの運)。詳細は
@@ -62,7 +62,7 @@ TEST386_TRACE=1 cargo run --release --example test386
 ```
 
 番号→内容は test386 の README、命令→番地は `test386.lst`
-(`tools/fetch-images.sh test386` が作業ディレクトリに残す) で引く。
+(`tools/images/fetch-images.sh test386` が作業ディレクトリに残す) で引く。
 
 ## コード検査 (CIと同じもの、手元で)
 
@@ -79,7 +79,7 @@ CIはこれらを段構えで回す ([ci.md](../reference/ci.md))。PRのChecks�
 ## ブラウザ版を焼く・配る
 
 ```bash
-bash tools/build-web.sh          # wasmを焼いて web/ へ (wasm-pack + wasm-opt)
+bash tools/build/build-web.sh          # wasmを焼いて web/ へ (wasm-pack + wasm-opt)
 python3 web/serve.py             # 手元配信 (Cache-Control: no-store 付き)
 python3 web/serve.py 8001        # 検証用は別ポートで (ユーザーの8000と衝突させない)
 ```

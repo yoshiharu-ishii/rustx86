@@ -102,7 +102,7 @@ fn main() {
         ok &= check("Linux (bzImage、保存点200M)", m, 200_000_000, 20_000_000);
         ran += 1;
     } else {
-        println!("- Linux: イメージが無いのでスキップ (tools/fetch-images.sh linux)");
+        println!("- Linux: イメージが無いのでスキップ (tools/images/fetch-images.sh linux)");
     }
 
     // ELKS (16bit・リアルモード。50Mはログイン到達後)
@@ -112,7 +112,7 @@ fn main() {
         ok &= check("ELKS (16bit、保存点50M)", m, 50_000_000, 10_000_000);
         ran += 1;
     } else {
-        println!("- ELKS: イメージが無いのでスキップ (tools/fetch-images.sh elks)");
+        println!("- ELKS: イメージが無いのでスキップ (tools/images/fetch-images.sh elks)");
     }
 
     if ran == 0 {
