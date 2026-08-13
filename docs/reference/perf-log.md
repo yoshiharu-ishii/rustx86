@@ -521,3 +521,11 @@ save_slim_at(命令頭) で解決。「フォールトした命令は何も起�
 
 残りの増分: RMW族 (AluRmR/Grp1/Shift/Grp3 — 書き込み権限を先に変換する
 jit_try_rmw32の技) と8/16bit mov族・moffs・Leave。
+
+## 2026-08-13 translate-first増分3 (RMW/8/16bit/Leave) — 負け (+17%、タグ保全)
+
+RMW armにfast+slowを二重内蔵したらexec matchが肥大し、0勝8敗+17%悪化。
+**B3 (+24%) と同族の「足した機構の分だけ払う」** — #106が勝てたのは
+armが小さかったから。門番は全緑 (意味論は正しい) なので、再訪時は
+低速路を #[cold] 関数へ追い出してホットmatchを痩せさせる形で。
+タグ exp/translate-first-rmw。**armの嵩は3倍が損益分岐の外**という実測値を得た。
