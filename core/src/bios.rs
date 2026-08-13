@@ -382,11 +382,29 @@ impl Machine {
             // BDAのティックカウンタを進め、INT 1Ch (利用者用フック) を呼び、
             // PICにEOIを打つ。**EOIを忘れると以後の割り込みが二度と来なくなる**
             0x08 => {
+                // 2周目 (ゲストの1CハンドラがIRETで戻ってきた) は締めだけ
+                if self.tick_chain {
+                    self.tick_chain = false;
+                    return true;
+                }
                 let ticks = self.read16(0x46C) as u32 | (self.read16(0x46E) as u32) << 16;
                 let next = ticks.wrapping_add(1);
                 self.write16(0x46C, next as u16);
                 self.write16(0x46E, (next >> 16) as u16);
                 self.devices.pic[0].write_command(0x20); // 非特定EOI
+                                                         // INT 1Ch がフックされていたら**本当にゲストへ配送する**。
+                                                         // mTCPのようなTSRは1Chで自前の時計を進めるので、呼ばないと
+                                                         // タイムアウトが永遠に来ない (DHCPがここで無限に待った)。
+                                                         // 未フック (BIOS_SEGのまま) なら空なので飛ばす — 既存ゲストの
+                                                         // 命令数を1つも変えないための分岐である
+                let hooked = self.read16(0x1C * 4 + 2) != BIOS_SEG;
+                if hooked {
+                    self.tick_chain = true;
+                    // 戻り先は今の CS:IP = F000:0008。ゲストの IRET でここへ
+                    // 帰ってくると、上の2周目分岐が元の割り込みを締める
+                    cpu::interrupt::interrupt(self, 0x1C);
+                    return false; // まだIRETしない
+                }
             }
 
             // --- INT 09h: キーボード割り込み (IRQ1) ---
