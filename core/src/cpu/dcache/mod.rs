@@ -311,21 +311,6 @@ pub struct DecodeCache {
 }
 
 impl DecodeCache {
-    /// 照合エントリの読み。wasmだけ境界検査を省く (D3、ADR-0016) —
-    /// entriesは初回fillでSLOTS本固定・slotはSLOTS-1でマスク済み。
-    /// nativeは検査が分岐予測でタダ (exp/hotpath-batch2で実測) なので素のまま
-    #[cfg(target_arch = "wasm32")]
-    #[inline(always)]
-    fn probe(&self, slot: usize) -> &Entry {
-        debug_assert_eq!(self.entries.len(), SLOTS);
-        unsafe { self.entries.get_unchecked(slot) }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline(always)]
-    fn probe(&self, slot: usize) -> &Entry {
-        &self.entries[slot]
-    }
-
     pub fn new(ram_bytes: usize) -> Self {
         let pages = ram_bytes.div_ceil(4096);
         DecodeCache {
@@ -536,7 +521,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let mut cached = None;
         if !m.dcache.entries.is_empty() {
             let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            let e = m.dcache.probe(slot);
+            let e = &m.dcache.entries[slot];
             if e.tag == pa && e.gen == gen_now {
                 cached = Some((e.len_flags, e.uop));
                 // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
