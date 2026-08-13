@@ -15,6 +15,7 @@ import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
 import { Speaker } from './speaker.js';
+import { NetLink } from './netlink.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -28,6 +29,22 @@ for (const ev of ['keydown', 'pointerdown']) {
 let machine = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
+
+/** ネットワーク設定 (?net= で opt-in)。無指定なら null = NIC無し */
+function netUrl() {
+  const q = new URLSearchParams(location.search);
+  const net = q.get('net');
+  if (!net) return null;
+  const base = net === '1' ? 'ws://127.0.0.1:8087/net' : net;
+  const token = q.get('nettoken');
+  return token ? `${base}${base.includes('?') ? '&' : '?'}token=${token}` : base;
+}
+
+/** 起動スクリプト。ネット有効なマシンは netScript の続きも流す */
+function scriptFor(m) {
+  if (!m?.script) return m?.script;
+  return netUrl() && m.netScript ? [...m.script, ...m.netScript] : m.script;
+}
 
 // ---------- スナップショット ----------
 //
@@ -75,6 +92,7 @@ function boot(image, label) {
   $('screen').hidden = false;
   machine?.stop();
   speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
+  machine?.netlink?.close(); // 前の機械のネットワークも道連れにしない
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
   if (linux) {
     linux.destroy();
@@ -102,10 +120,27 @@ function boot(image, label) {
     syncControls();
   };
   machine.onTone = hz => speaker.update(hz);
-  // 物理キーはそのまま、貼り付けはASCIIとして送る
+  // ネットワーク (opt-in)。URLに ?net=1 を付けると NE2000 が挿さり、
+  // ローカルの wsslirpd (ws://127.0.0.1:8087/net) へ繋がる。
+  // ?net=<wsのURL> なら任意の網元 (値はencodeURIComponentしておく)。
+  // ?nettoken=<共有トークン> も付けられる。無指定なら従来どおりNIC無し —
+  // 起動のビット同一 (ADR-0017) は既定の姿で守る
+  {
+    const url = netUrl();
+    if (url) {
+      machine.emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
+      machine.netlink = new NetLink(url);
+      machine.netlink.onState = s =>
+        setStatus(s === 'up' ? 'ネットワーク: 接続した' : s === 'down' ? 'ネットワーク: 切断 (wsslirpdは動いているか)' : 'ネットワーク: 接続中…');
+    }
+  }
+  // 物理キーはそのまま、貼り付けはASCIIとして送る。
+  // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
+  // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
+  // ¥キーで A:\> のパスが打てるのは、歴史的にはむしろ正しい姿である
   term.onKey = (code, down) => machine.key(code, down);
-  term.onChar = ch => machine.typeChar(ch);
-  term.onPaste = text => machine.paste(text);
+  term.onChar = ch => machine.typeChar(ch === '¥' ? '\\' : ch);
+  term.onPaste = text => machine.paste(text.replaceAll('¥', '\\'));
 
   // 動作確認用の窓口。手元で開いているときだけ出す
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
@@ -207,7 +242,7 @@ const dbg = new Debugger({
     }
     if (!current) return;
     await bootFromUrl(current);
-    startScript(current.script);
+    startScript(scriptFor(current));
   },
 });
 
@@ -551,7 +586,7 @@ async function select(m, { autoBoot = true } = {}) {
   }
 
   await bootFromUrl(m);
-  startScript(m.script);
+  startScript(scriptFor(m));
   dbg.reset();
 }
 

@@ -13,7 +13,7 @@
 //! 2バイトずつ・CXカウントで回り、再配置コピーが途中で尽きて墜落した。
 
 use super::alu::{alu16, alu32, alu8};
-use super::{Cpu, Decoder, AX, CX, DF, DI, DS, ES, SI, ZF};
+use super::{Cpu, Decoder, AX, CX, DF, DI, DS, DX, ES, SI, ZF};
 use crate::Machine;
 
 /// メモリを幅ぶん読む (1/2/4バイト)
@@ -234,6 +234,48 @@ pub fn exec(m: &mut Machine, d: &Decoder, op: u8) {
                     1 => m.cpu.set_reg8(0, v as u8),
                     2 => m.cpu.set_reg16(AX, v as u16),
                     _ => m.cpu.set_reg32(AX, v),
+                }
+                advance(&mut m.cpu, SI, a32, width);
+            }
+            // --- INS/OUTS: ストリングI/O。ポートは常にDX ---
+            //
+            // NE2000のようなデータポート装置は `rep insw`/`rep outsw` で
+            // 一気に読み書きするのが定石で、DOSのパケットドライバ (Crynwr)
+            // の送受信はこれ無しでは1バイトも動かない。
+            // I/O特権の検査は IN/OUT と同じ (V86/保護モードではTSSのビットマップ)
+            0x6C | 0x6D => {
+                // INS: ポート → ES:DI。**セグメント上書きは効かない** (仕様)
+                let port = m.cpu.regs[DX] as u16;
+                if !super::interrupt::io_permitted(m, port, width) {
+                    super::interrupt::gp_fault(m, m.trap_ip, 0);
+                    break;
+                }
+                let v = match width {
+                    1 => m.io_read8(port) as u32,
+                    2 => m.io_read16(port) as u32,
+                    _ => m.io_read32(port),
+                };
+                write_w(m, m.cpu.lin(ES, di), v, width);
+                if m.pending_fault.get().is_some() {
+                    break;
+                }
+                advance(&mut m.cpu, DI, a32, width);
+            }
+            0x6E | 0x6F => {
+                // OUTS: DS:SI (上書き可) → ポート
+                let port = m.cpu.regs[DX] as u16;
+                if !super::interrupt::io_permitted(m, port, width) {
+                    super::interrupt::gp_fault(m, m.trap_ip, 0);
+                    break;
+                }
+                let v = read_w(m, m.cpu.lin(src_seg, si), width);
+                if m.pending_fault.get().is_some() {
+                    break;
+                }
+                match width {
+                    1 => m.io_write8(port, v as u8),
+                    2 => m.io_write16(port, v as u16),
+                    _ => m.io_write32(port, v),
                 }
                 advance(&mut m.cpu, SI, a32, width);
             }

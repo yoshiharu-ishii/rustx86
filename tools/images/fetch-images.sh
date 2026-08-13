@@ -53,6 +53,7 @@ ELKS_URL=https://github.com/ghaerr/elks/releases/download/v0.9.1/fd1440.img
 FREEDOS_URL=https://download.freedos.org/1.4/FD14-FloppyEdition.zip
 GAMES_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/games
 DEVEL_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/devel
+NET_BASE=http://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/repositories/1.4/net
 # Alpine の netboot 配布物 (32bit x86)。カーネルと initramfs の2つで起動できる
 # 版は固定する (latest-stableは中身が動き、System.mapとカーネルの版ズレで
 # プロファイルが全部ゴミになる — 2026-08-12に踏んだ)。上げるときは3点セットで
@@ -169,9 +170,28 @@ build_freedos() {
     files+=("$WORK/DEBUG.COM")
   fi
 
+  # ネットワーク道具 (ADR-0017)。仮想NE2000 + wsslirp で16bitからpingを打つ:
+  #   A:\> NE2000 0x60 3 0x300        (パケットドライバ: INT 60h, IRQ3, 0x300)
+  #   A:\> SET MTCPCFG=A:\MTCP.CFG
+  #   A:\> DHCP                        (wsslirpから 10.0.2.15 をもらう)
+  #   A:\> PING 1.1.1.1
+  say "ネットワーク道具 (Crynwrパケットドライバ + mTCP) を載せる"
+  fetch "$NET_BASE/crynwr.zip" "$WORK/crynwr.zip"
+  unzip_one "$WORK/crynwr.zip" "DRIVERS/CRYNWR/NE2000.COM" "$WORK"
+  files+=("$WORK/NE2000.COM")
+  fetch "$NET_BASE/mtcp.zip" "$WORK/mtcp.zip"
+  for exe in ping.exe dhcp.exe htget.exe; do
+    unzip_one "$WORK/mtcp.zip" "NET/mTCP/$exe" "$WORK"
+    files+=("$WORK/$exe")
+  done
+  # mTCPの設定ファイル。PACKETINTだけ書いておけば、残り (IP/DNS/GW) は
+  # DHCP.EXE が wsslirp からもらってこのファイルに書き足す
+  printf 'PACKETINT 0x60\r\nHOSTNAME RUSTX86\r\n' > "$WORK/MTCP.CFG"
+  files+=("$WORK/MTCP.CFG")
+
   cp "$IMAGES/fd14boot.img" "$IMAGES/fd14games.img"
   copy_into_image "$IMAGES/fd14games.img" "${files[@]}"
-  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman + AIR / DEBUG)"
+  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman + AIR / DEBUG + mTCP)"
 }
 
 publish_to_web() {

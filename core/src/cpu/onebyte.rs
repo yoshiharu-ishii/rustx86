@@ -931,6 +931,9 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             string::exec(m, d, op)
         }
 
+        // --- INS/OUTS (186): ストリングI/O。実装はREPの機構ごとstringに間借り ---
+        0x6C..=0x6F => string::exec(m, d, op),
+
         // --- 二バイト命令空間 (386〜) ---
         //
         // 8086では `POP CS` だった 0x0F が、186以降で**逃げ道**になった。

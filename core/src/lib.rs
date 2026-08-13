@@ -180,6 +180,11 @@ pub struct Machine {
     /// なので、`boot_rom` がこれを下ろして素通しにする。
     /// スナップショットには入れない (ROM実行は使い切りのテスト走行)
     pub bios_hle: bool,
+    /// HLEのINT 08hがINT 1Ch (利用者タイマフック) をゲストへ配送中の印。
+    /// 1Chから戻ってきた2周目のINT 08hは締め (IRET) だけを行う。
+    /// スナップショットには入れない — 復元がチェーンの最中に当たっても、
+    /// 起きるのは「ティックが1つ余分に進む」だけで自然に回復する
+    tick_chain: bool,
     /// POST診断ポート (0x190) に書かれた進行コードの足跡。
     /// テストROM (test386) がテスト番号を書く — どこまで進んで死んだかの証跡
     pub post_trail: Vec<u8>,
@@ -322,6 +327,7 @@ impl Machine {
             trap: None,
             halted: false,
             bios_hle: true,
+            tick_chain: false,
             post_trail: Vec::new(),
             fault_save: Cpu::new(),
             fault_slim: cpu::SlimSave::default(),
