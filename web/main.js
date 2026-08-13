@@ -113,12 +113,12 @@ function boot(image, label) {
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
 setInterval(() => {
   if (linux) {
+    const parts = [];
+    // 起動の定規 (時間で統一、2026-08-13)。headless.mjs と同じ定義の秒数
+    if (linux.bootSecs != null) parts.push(`起動 ${linux.bootSecs.toFixed(1)}s`);
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
-    $('gauge').textContent = linux.idle
-      ? 'アイドル'
-      : linux.mips
-        ? `${linux.mips.toFixed(0)} MIPS`
-        : '';
+    parts.push(linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '');
+    $('gauge').textContent = parts.filter(Boolean).join('   ');
     return;
   }
   if (!machine) return;
