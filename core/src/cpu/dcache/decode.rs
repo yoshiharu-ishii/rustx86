@@ -104,8 +104,11 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
     let b = &m.mem[start..start + n];
     let mut i = 0usize;
     let mut seg_override: Option<u8> = None;
+    let mut o16 = false;
 
-    // プレフィクス。0x66/0x67/REPが来たら対象外 (従来経路が観測ごと面倒を見る)
+    // プレフィクス。0x67/REPが来たら対象外 (従来経路が観測ごと面倒を見る)。
+    // 0x66 (16bitオペランド) は受ける — 従来経路落ちの74%が0x66だった
+    // (census 2026-08-13)。ただし語彙に入れるのはmovだけ (下のo16検査)
     let op = loop {
         let x = *b.get(i)?;
         i += 1;
@@ -116,16 +119,21 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             0x3E => seg_override = Some(DS as u8),
             0x64 => seg_override = Some(super::super::FS as u8),
             0x65 => seg_override = Some(super::super::GS as u8),
+            0x66 => o16 = true,
             // LOCK: 実行の意味は持たない (シングルコア) が、付けてよい命令かの
             // #UD検査があるので従来経路に任せる (稀なので速さの損は無い)
             0xF0 => return None,
-            0x66 | 0x67 | 0xF2 | 0xF3 => return None,
+            0x67 | 0xF2 | 0xF3 => return None,
             _ => break x,
         }
         if i >= 15 {
             return None;
         }
     };
+    // 0x66つきで語彙に居るのは mov r16 (89/8B) だけ。他は従来経路へ
+    if o16 && op != 0x89 && op != 0x8B {
+        return None;
+    }
 
     let uop = match op {
         // --- ALUグリッド (プレフィクスは上で消化済みなので 26/2E/36/3E は来ない) ---
@@ -213,7 +221,11 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
         }
         0x89 => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
-            Uop::MovRmR { rm, reg }
+            if o16 {
+                Uop::Mov16RmR { rm, reg }
+            } else {
+                Uop::MovRmR { rm, reg }
+            }
         }
         0x8A => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
@@ -221,7 +233,11 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
         }
         0x8B => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
-            Uop::MovRRm { reg, rm }
+            if o16 {
+                Uop::Mov16RRm { reg, rm }
+            } else {
+                Uop::MovRRm { reg, rm }
+            }
         }
         0x90..=0x97 => Uop::XchgAR { reg: op & 7 },
         0xA0..=0xA3 => {

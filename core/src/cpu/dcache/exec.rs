@@ -34,6 +34,8 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::MovRRm { rm, .. }
         | Uop::Mov8RmR { rm, .. }
         | Uop::Mov8RRm { rm, .. }
+        | Uop::Mov16RmR { rm, .. }
+        | Uop::Mov16RRm { rm, .. }
         | Uop::AluRmR { rm, .. }
         | Uop::AluRRm { rm, .. }
         | Uop::Alu8RmR { rm, .. }
@@ -116,6 +118,23 @@ pub(super) fn exec(m: &mut Machine, u: Uop) {
                     m.write8(a, v);
                 }
             }
+        }
+        Uop::Mov16RmR { rm, reg } => {
+            let v = m.cpu.reg16(reg as usize);
+            match rm {
+                Rm::Reg(r) => m.cpu.set_reg16(r as usize, v),
+                Rm::Mem(mr) => {
+                    let a = addr_of(m, &mr, 2, true);
+                    m.write16(a, v);
+                }
+            }
+        }
+        Uop::Mov16RRm { reg, rm } => {
+            let v = match rm {
+                Rm::Reg(r) => m.cpu.reg16(r as usize),
+                Rm::Mem(mr) => m.read16(addr_of(m, &mr, 2, false)),
+            };
+            m.cpu.set_reg16(reg as usize, v);
         }
         Uop::Mov8RRm { reg, rm } => {
             let v = match rm {
