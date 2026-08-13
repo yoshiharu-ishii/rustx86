@@ -6,10 +6,11 @@
 //
 //   +0   "RX86SNPF"      (8B  ファイルのmagic。中身のRX86SNAPとは別の層)
 //   +8   版 = 1          (u8)
-//   +9   ラベル長        (u16 LE)
-//   +11  ラベル          (UTF-8。起動イメージ名)
-//   +11+L 作成時刻       (f64 LE、Date.now()のms)
-//   +19+L gzip(state)    (stateはcoreのsave_state = RX86SNAP v8、RLE済み)
+//   +9   機種            (u8 ASCII: 'V'=VGA機 / 'L'=Linux機 — 復元先の選定用)
+//   +10  ラベル長        (u16 LE)
+//   +12  ラベル          (UTF-8。起動イメージ名)
+//   +12+L 作成時刻       (f64 LE、Date.now()のms)
+//   +20+L gzip(state)    (stateはcoreのsave_state = RX86SNAP v8、RLE済み)
 //
 // 中身の意味 (レジスタ・装置・メモリの解釈) はcore側 (snapshot.rs) が
 // MAGICと版で守る。この層はあくまで「ファイルの包み方」だけを持つ。
@@ -28,16 +29,17 @@ async function gunzip(bytes) {
 }
 
 /** state (save_stateの生バイト列) をファイル用のバイト列に包む */
-export async function packSnapshot(state, label) {
+export async function packSnapshot(state, label, kind = 'V') {
   const packed = await gzip(state);
   const name = new TextEncoder().encode(label ?? 'unknown');
-  const head = new Uint8Array(8 + 1 + 2 + name.length + 8);
+  const head = new Uint8Array(8 + 1 + 1 + 2 + name.length + 8);
   head.set(MAGIC, 0);
   const dv = new DataView(head.buffer);
   dv.setUint8(8, 1);
-  dv.setUint16(9, name.length, true);
-  head.set(name, 11);
-  dv.setFloat64(11 + name.length, Date.now(), true);
+  dv.setUint8(9, kind.charCodeAt(0));
+  dv.setUint16(10, name.length, true);
+  head.set(name, 12);
+  dv.setFloat64(12 + name.length, Date.now(), true);
   const out = new Uint8Array(head.length + packed.length);
   out.set(head, 0);
   out.set(packed, head.length);
@@ -60,9 +62,10 @@ export async function unpackSnapshot(bytes) {
   if (ver !== 1) {
     throw new Error(`知らない版のスナップショット: v${ver}`);
   }
-  const len = dv.getUint16(9, true);
-  const label = new TextDecoder().decode(bytes.subarray(11, 11 + len));
-  const created = new Date(dv.getFloat64(11 + len, true));
-  const state = await gunzip(bytes.subarray(11 + len + 8));
-  return { label, created, state };
+  const kind = String.fromCharCode(dv.getUint8(9));
+  const len = dv.getUint16(10, true);
+  const label = new TextDecoder().decode(bytes.subarray(12, 12 + len));
+  const created = new Date(dv.getFloat64(12 + len, true));
+  const state = await gunzip(bytes.subarray(12 + len + 8));
+  return { kind, label, created, state };
 }
