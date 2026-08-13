@@ -551,7 +551,14 @@ $('boot').addEventListener('click', () => {
     linux.boot();
     return;
   }
-  if (lastImage) boot(lastImage, 'ディスク');
+  // **再起動でも自動起動スクリプトを流し直す。** 電源を入れ直したのだから
+  // F5もドライバ常駐もやり直しになる — 流さないと FreeDOS が言語選択で
+  // 止まったまま「ネットに繋がらない」ように見える。
+  // ラベルも保つ (ここで 'ディスク' に潰すと、左のディスク欄が化ける)
+  if (lastImage) {
+    boot(lastImage, lastLabel || 'ディスク');
+    startScript(scriptFor(current));
+  }
 });
 
 $('snapExport').addEventListener('click', async () => {
