@@ -482,6 +482,14 @@ impl Machine {
         }
     }
 
+    /// guard_save_slim の「巻き戻し先ip指定」版 — exec内 (advance_ip後) 用
+    pub(crate) fn guard_save_slim_at(&mut self, ip: u32) {
+        if self.guard_needed() {
+            self.cpu.save_slim_at(&mut self.fault_slim, ip);
+            self.fault_save_kind = FaultSaveKind::Slim;
+        }
+    }
+
     /// 控えからCPUを命令前の姿へ戻す。控えが無ければ false
     fn guard_restore(&mut self) -> bool {
         match self.fault_save_kind {
