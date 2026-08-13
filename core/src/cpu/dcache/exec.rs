@@ -16,6 +16,21 @@ use crate::Machine;
 /// **#PF巻き戻しの控え (guard_save) を省いてよいかの判定**なので、
 /// 迷ったら true に倒す (保守的に正しく)。フェッチは対象外 —
 /// キャッシュ済み命令はページ内で完結し、番地は実行前に変換済み。
+/// IPを直線以外へ動かし得るuopか (Entryメタデータ用)。真なら実行後に
+/// 「IPが直線のままか」を実測で確かめる。偽なら直線が確定していて、
+/// 毎命令の ip==ip_linear 比較を省ける
+pub(super) fn is_control(u: &Uop) -> bool {
+    matches!(
+        u,
+        Uop::Jcc { .. }
+            | Uop::JmpRel { .. }
+            | Uop::CallRel { .. }
+            | Uop::Ret
+            | Uop::Grp5 { kind: 2, .. }
+            | Uop::Grp5 { kind: 4, .. }
+    )
+}
+
 pub(super) fn may_touch_memory(u: &Uop) -> bool {
     let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
     match u {
