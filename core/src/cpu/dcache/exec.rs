@@ -44,10 +44,10 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::XchgAR { .. }
         | Uop::AluAImm { .. }
         | Uop::Alu8AImm { .. } => false,
+        // translate-first済み (F1c-d5): 低速路に落ちるときだけ自前で控える
+        Uop::MovRmR { .. } | Uop::MovRRm { .. } => false,
         // r/m形: メモリオペランドのときだけ
-        Uop::MovRmR { rm, .. }
-        | Uop::MovRRm { rm, .. }
-        | Uop::Mov8RmR { rm, .. }
+        Uop::Mov8RmR { rm, .. }
         | Uop::Mov8RRm { rm, .. }
         | Uop::Mov16RmR { rm, .. }
         | Uop::Mov16RRm { rm, .. }
@@ -105,22 +105,39 @@ fn off_of(m: &Machine, r: &MemRef) -> u32 {
     off
 }
 
-pub(super) fn exec(m: &mut Machine, u: Uop) {
+pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
     match u {
         Uop::MovRmR { rm, reg } => {
             let v = m.cpu.regs[reg as usize];
             match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize] = v,
                 Rm::Mem(mr) => {
-                    let a = addr_of(m, &mr, 4, true);
-                    m.write32(a, v);
+                    // translate-first (F1c-d5): 成功が確定するまで状態を変えない
+                    // ので、成功路はguard控えが要らない。ダメなら控えて従来経路
+                    let off = off_of(m, &mr);
+                    if m.fast_write32(mr.seg as usize, off, v).is_none() {
+                        // 低速路: 控えの巻き戻し先は**命令頭** (prev_ip) —
+                        // ここはadvance_ip後なので素のsave_slimではダメ
+                        m.guard_save_slim_at(prev_ip);
+                        let a = addr_of(m, &mr, 4, true);
+                        m.write32(a, v);
+                    }
                 }
             }
         }
         Uop::MovRRm { reg, rm } => {
             let v = match rm {
                 Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
+                Rm::Mem(mr) => {
+                    let off = off_of(m, &mr);
+                    match m.fast_read32(mr.seg as usize, off) {
+                        Some(v) => v,
+                        None => {
+                            m.guard_save_slim_at(prev_ip);
+                            m.read32(addr_of(m, &mr, 4, false))
+                        }
+                    }
+                }
             };
             m.cpu.regs[reg as usize] = v;
         }

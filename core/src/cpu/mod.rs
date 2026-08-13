@@ -532,6 +532,14 @@ impl Cpu {
     /// Cpu丸ごと (xmm 128B + hidden 72B + …) を毎回複写するのをやめ、
     /// 書き得る ~76B だけ控える。フォールバック経路は何でも起こせるので
     /// 従来どおり丸ごとcloneを使う (控えの種類は Machine 側が覚える)
+    /// save_slim の「ipだけ指定値」版 (translate-first F1c-d5)。
+    /// exec内 (advance_ip後) から控えるとき、巻き戻し先は**命令頭**でなければ
+    /// ならない — #PF後の再実行が次の命令へ飛ぶバグの教訓 (2026-08-13)
+    pub(crate) fn save_slim_at(&self, s: &mut SlimSave, ip: u32) {
+        self.save_slim(s);
+        s.ip = ip;
+    }
+
     pub(crate) fn save_slim(&self, s: &mut SlimSave) {
         s.regs = self.regs;
         s.ip = self.ip;

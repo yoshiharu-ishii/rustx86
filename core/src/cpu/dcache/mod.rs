@@ -590,9 +590,10 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         if lf & F_MEM != 0 {
             m.guard_save_slim();
         }
+        let prev_ip = m.cpu.ip; // 巻き戻し先 (exec内で控えるarm用)
         m.cpu.advance_ip32(len);
         let ip_linear = m.cpu.ip; // 直線ならexec後もこのまま
-        exec::exec(m, uop);
+        exec::exec(m, uop, prev_ip);
 
         // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
         if extra == 0 {
