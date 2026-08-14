@@ -762,8 +762,27 @@ async function insertMedia(f) {
     await linux.boot({ kernel: bytes, kernelName: f.name });
     return;
   }
+  // ディスクとして通す前に**印を確かめる**。拡張子で絞るのをやめた以上、
+  // 何を落とされてもおかしくない — 分からないものは分からないと言う
+  if (!isBootable(bytes)) {
+    setStatus(
+      `${f.name} は起動できる形に見えません ` +
+        '(ブートセクタの印 0x55AA が無く、Linuxカーネルでもスナップショットでもない)',
+      true,
+    );
+    return;
+  }
   bootOrigin = 'image';
   boot(bytes, f.name);
+}
+
+/**
+ * 起動できるディスクか。**先頭512バイトの末尾にある 0x55AA** が、
+ * 1981年から変わっていない「ここから起動してよい」の印である
+ * (core側も同じ検査をする。ここで見るのは、日本語で理由を言うため)
+ */
+function isBootable(b) {
+  return b.length >= 512 && b[510] === 0x55 && b[511] === 0xaa;
 }
 
 /**
