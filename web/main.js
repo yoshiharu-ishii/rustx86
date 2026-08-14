@@ -115,6 +115,11 @@ function syncControls() {
   // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か
   $('footGuide').hidden = !onWelcome;
   $('footDisk').hidden = onWelcome;
+  // **「スタート」は起動したら消す。** 戻る先は画面ではなく「電源を切る」で、
+  // 一度機械が立ち上がれば行き先としての意味を失う (左上のVMカードが
+  // 「今どこに居るか」を引き受けたので、なおさら要らない)
+  const start = $('machines').querySelector('[data-id="start"]');
+  if (start) start.hidden = !onWelcome;
   syncVmCard();
   if (onWelcome) return;
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
