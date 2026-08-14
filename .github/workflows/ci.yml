@@ -376,7 +376,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -384,7 +384,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
           tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos-boot
+          tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -485,7 +485,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -493,7 +493,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
           tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos-boot
+          tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -560,7 +560,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -568,7 +568,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
           tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos-boot
+          tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -636,12 +636,105 @@ jobs:
         run: |
           test "${{ steps.regress.outcome }}" = "success"
 
+  network:
+    name: 4 機能層 — ネットワーク
+    # ゲストが線に出るIntegration: NICが見える → DHCP → ICMP往復 → TCPでHTTP。
+    #
+    # **外には出ない。** ping先は 10.0.2.2 (SLiRPのゲートウェイ = wsslirpの
+    # netstackが自分で答える)、HTTPはこのジョブが立てたサーバ。相手のサイトの
+    # 都合で赤くならず、ICMPの権限も要らず、誰かの本番にも当たらない。
+    # ゲスト側が通る道 (NE2000/RTL8029 → WS → netstack) は実物と同じ。
+    #
+    # 位置は**機能層** — 動く機械の上の機能で、起動回帰の合格の上に建つ。
+    # 2026-08-14、フロッピー機がPCI付きになって16bitからNICが消えた
+    # デグレは、この関門があれば当日捕まっていた (docs/explanation/pitfalls 12)。
+    #
+    # TLS (https) はここでは見ない — 閉じた世界に信頼できる証明書は無い。
+    # 実インターネット向けの手動E2E (tools/webtest/netlinux.mjs 既定) が持つ
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.cosim.result != 'failure' && needs.compat386.result != 'failure' && needs.regress.result != 'failure' }}
+    needs: [check, cosim, compat386, regress]
+    runs-on: ubuntu-latest
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # SLiRP backend (wsslirp) はGoで書かれた別リポジトリ。ここで建てる
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: イメージのキャッシュ
+        id: img-cache
+        uses: actions/cache@v4
+        with:
+          path: images
+          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+
+      - name: イメージの取得と組み立て
+        if: steps.img-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpio unzip
+          tools/images/fetch-images.sh elks
+          tools/images/fetch-images.sh freedos
+          tools/images/fetch-images.sh linux
+          tools/images/extract-vmlinux.sh
+          tools/images/make-mini-initramfs.sh
+
+      - name: wasm-pack の用意
+        run: |
+          rustup target add wasm32-unknown-unknown
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      - name: wasm を焼く
+        run: bash tools/build/build-web.sh 2>&1 | tail -2
+
+      - name: ゲストを線に繋ぐ (16bit + 32bit、閉じた宛先)
+        id: nettest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## ネットワーク — `bash tools/webtest/net-e2e.sh`'
+            echo '```'
+            bash tools/webtest/net-e2e.sh 2>&1 | tee /dev/stderr
+            echo '```'
+          } > net-report.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat net-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 4 機能層 — ネットワーク
+          title: ${{ steps.nettest.outcome == 'success' && '16bitと32bitが線に出た (DHCP→ICMP→HTTP)' || 'ゲストが線に出られない' }}
+          outcome: ${{ steps.nettest.outcome }}
+          report-file: net-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: test "${{ steps.nettest.outcome }}" = "success"
+
   # ---- 合流点。全部通って初めて OK ----
 
   ok:
     name: OK (全層)
     if: always()
-    needs: [check, cosim, compat386, regress, wasmboot, snapshot]
+    needs: [check, cosim, compat386, regress, wasmboot, snapshot, network]
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
@@ -658,4 +751,6 @@ jobs:
             && { test "${{ needs.snapshot.result }}" = "success" \
                  || test "${{ needs.snapshot.result }}" = "skipped"; } \
             && { test "${{ needs.wasmboot.result }}" = "success" \
-                 || test "${{ needs.wasmboot.result }}" = "skipped"; }
+                 || test "${{ needs.wasmboot.result }}" = "skipped"; } \
+            && { test "${{ needs.network.result }}" = "success" \
+                 || test "${{ needs.network.result }}" = "skipped"; }
