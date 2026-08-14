@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
-  THEMES, nextTheme, resolveTheme, menuAbility,
+  THEMES, nextTheme, resolveTheme, menuAbility, pasteChunk,
 } from '../../web/decide.js';
 
 /** 先頭512バイトの末尾に 0x55AA を置いた、最小の起動できるディスク */
@@ -130,4 +130,21 @@ test('右クリックのメニューは今できることだけ出す', () => {
   // 選んでいればコピーできる。走っていなくても構わない (画面に残った字を取れる)
   assert.equal(menuAbility(true, true, false).copy, true);
   assert.equal(menuAbility(false, true, true).copy, true);
+});
+
+test('貼り付けは環の空きの分だけ一度に渡す', () => {
+  // 空の環 (16枠) には、1枠残して15文字まで渡す。
+  // **1文字ずつに絞らない** — 絞るとタイプライターのように見える
+  assert.equal(pasteChunk(16, 0, 100), 15);
+  // 配送中の分も席を取る (8042に4バイト = 2文字が居る)
+  assert.equal(pasteChunk(16, 2, 100), 13);
+  // 残りが少なければ残りだけ
+  assert.equal(pasteChunk(16, 0, 3), 3);
+  // **席が無ければ渡さない。** 溢れさせると実機と同じく捨てられる
+  assert.equal(pasteChunk(1, 0, 100), 0);
+  assert.equal(pasteChunk(0, 0, 100), 0);
+  assert.equal(pasteChunk(8, 8, 100), 0, '配送中の分で埋まっていれば待つ');
+  assert.equal(pasteChunk(4, 9, 100), 0, '見積もりが過剰でも負にならない');
+  // 貼るものが無ければ0
+  assert.equal(pasteChunk(16, 0, 0), 0);
 });

@@ -20,7 +20,7 @@ import { NetLink } from './netlink.js';
 // ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
 import {
   isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
-  THEMES, nextTheme, resolveTheme, menuAbility,
+  THEMES, nextTheme, resolveTheme, menuAbility, pasteChunk,
 } from './decide.js';
 
 const $ = id => document.getElementById(id);
@@ -501,20 +501,11 @@ function startPaste(text) {
       setStatus('貼り付けました');
       return;
     }
-    // **空いた席は毎回いっぱいまで埋める。**
-    //
-    // 詰まりは2段ある。8042の行列 (まだゲストへ配っていないスキャンコード) と、
-    // BIOSの環 (16枠、ゲストが読むまで空かない)。**律速は環の方**で、
-    // 8042は64命令ごとに1バイト出せるから、実質そこは詰まらない。
-    //
-    // 以前は「8042の行列が空になるまで待つ」ようにしていたので、
-    // 出しては止まりを繰り返した。1文字ずつに絞ったらタイプライターになった。
-    // 正しいのは**環の空きだけを見て、その分を一度に渡す**こと。
-    // ゲストが読むのが遅ければ席が空かないので、自然に待つ形になる
+    // **空いた席は毎回いっぱいまで埋める。** 配分の理由は decide.js の
+    // pasteChunk (ここを2度外しているので、判断はテストのある側に置く)
     const inflight = Math.ceil(machine.emu.key_backlog() / 2); // 1文字 = 押す/離すの2バイト
-    const room = biosKeyRoom() - inflight; // 配送中の分も席を取る
-    if (room < 2) return; // 席が無い。ゲストが読むまで待つ
-    const n = Math.min(room - 1, pasteQueue.length);
+    const n = pasteChunk(biosKeyRoom(), inflight, pasteQueue.length);
+    if (!n) return; // 席が無い。ゲストが読むまで待つ
     machine.paste(pasteQueue.slice(0, n));
     pasteQueue = pasteQueue.slice(n);
     if (pasteQueue) setStatus(`貼り付け中… 残り ${pasteQueue.length} 文字`);
