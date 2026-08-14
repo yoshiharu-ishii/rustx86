@@ -271,6 +271,11 @@ impl Emulator {
         self.m.devices.keyboard.type_ascii(s);
     }
 
+    /// まだゲストへ配っていないキーの数 (貼り付けの流量を決めるのに使う)
+    pub fn key_backlog(&self) -> usize {
+        self.m.devices.keyboard.backlog()
+    }
+
     /// 生のスキャンコードを流す
     pub fn send_scancode(&mut self, code: u8) {
         self.m.devices.keyboard.feed(&[code]);

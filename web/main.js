@@ -180,6 +180,7 @@ function boot(image, label) {
   $('screen').hidden = false;
   machine?.stop();
   speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
+  stopPaste(); // 貼りかけの文字も道連れにしない (前の機械宛だったもの)
   // **ケーブルは抜かない。** 機械を替えてもスイッチとの結線は生きたままで、
   // 灯りも点きっぱなし — 実機で床のLANケーブルを抜かないのと同じである
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
@@ -215,7 +216,10 @@ function boot(image, label) {
   // 物理キーはそのまま、貼り付けはASCIIとして送る (¥→\ の理由は decide.js)
   term.onKey = (code, down) => machine.key(code, down);
   term.onChar = ch => machine.typeChar(guestChar(ch));
-  term.onPaste = text => machine.paste(text.replaceAll('¥', '\\'));
+  // 貼り付けは**必ず流量制御を通す** (一度に流すと消える。下の startPaste)
+  term.onPaste = text => startPaste(text.replaceAll('¥', '\\'));
+  // Ctrl+Shift+V は paste 事象が飛ばないので、こちらから読みにいく
+  term.onPasteRequest = () => pasteFromClipboard();
 
   // 動作確認用の窓口。手元で開いているときだけ出す
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
@@ -300,6 +304,27 @@ for (const bar of document.querySelectorAll('.bar')) {
 // ゲストへ流し込む — 画面を消す「クリア」より、長いコマンドを持ち込める
 // こちらの方が要る (DOSのパスやURLは打つのが面倒なので)
 $('paste').addEventListener('click', async () => {
+  // **貼りかけを止められるようにする。** 間違って大きなものを貼ると
+  // コマンドが延々と流れ込むので、もう一度押したら取り消せる
+  if (pasteQueue) {
+    const left = pasteQueue.length;
+    stopPaste();
+    setStatus(`貼り付けを止めました (残り ${left} 文字は捨てました)`);
+    return;
+  }
+  pasteFromClipboard();
+});
+
+// ボタンにも組みを添える。**その環境の組みだけ出す** —
+// Macに Ctrl+Shift+C と書いても、押す人は居ない
+{
+  const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
+  $('copy').title = `選んだ範囲をコピー (${mac ? '⌘C' : 'Ctrl+Shift+C'})`;
+  $('paste').title = `クリップボードをゲストへ打ち込む (${mac ? '⌘V' : 'Ctrl+Shift+V'})`;
+}
+
+/** クリップボードを読んでゲストへ流す (ボタンと Ctrl+Shift+V の共通の道) */
+async function pasteFromClipboard() {
   let text = '';
   try {
     text = await navigator.clipboard.readText();
@@ -308,16 +333,81 @@ $('paste').addEventListener('click', async () => {
     return;
   }
   if (!text) return;
+  // シリアル (Linux) は受け側の行列が深いので一息に流せる。
+  // VGA機は**キーボードとして打つ**ので、少しずつ流す (下記)
   if (linux) term.onData?.(text);
-  else machine?.paste(text.replaceAll('¥', '\\'));
+  else startPaste(text.replaceAll('¥', '\\'));
   focusScreen();
-});
+}
+
+// ---------- 貼り付け ----------
+//
+// **一度に流し込むと消える。** キーボードから来た文字は BIOS の待ち行列に
+// 積まれるが、これは**16個しかない環**で、溢れた分は実機と同じく捨てられる。
+// 画面全文 (1558文字) を貼ったら数十文字しか届かなかったのはこれである。
+// 行列の空きを見ながら、空いた分だけ流す。
+
+/** 貼り付け待ちの残り */
+let pasteQueue = '';
+let pasteTimer = null;
+
+function startPaste(text) {
+  pasteQueue += text;
+  if (pasteTimer) return;
+  pasteTimer = setInterval(() => {
+    if (!machine || machine.paused) return; // 止まっている間は待つ (再開すれば続く)
+    if (!pasteQueue) {
+      clearInterval(pasteTimer);
+      pasteTimer = null;
+      setStatus('貼り付けました');
+      return;
+    }
+    // **配りきるまで次を渡さない。** 8042は1タイマー刻みに1バイトしか
+    // 配らないので、空きだけを見て流すと行列に積み上がるだけになる
+    if (machine.emu.key_backlog() > 0) return;
+    const room = biosKeyRoom();
+    if (room <= 0) return; // BIOSの行列が埋まっている。ゲストが読むまで待つ
+    const chunk = pasteQueue.slice(0, room);
+    pasteQueue = pasteQueue.slice(chunk.length);
+    machine.paste(chunk);
+    if (pasteQueue) setStatus(`貼り付け中… 残り ${pasteQueue.length} 文字`);
+  }, 16);
+}
+
+function stopPaste() {
+  pasteQueue = '';
+  if (pasteTimer) clearInterval(pasteTimer);
+  pasteTimer = null;
+}
+
+/**
+ * BIOSのキー待ち行列の空き。BDAに頭 (0x41A) と尻尾 (0x41C) があり、
+ * 環は 0x1E〜0x3E の16個。**BIOSを使わないゲスト (ELKSは8042を直に読む) では
+ * 頭も尻尾も動かない**ので、常に空きありと見える — そちらは受け側の行列が
+ * 際限なく伸びるので、それで困らない
+ */
+function biosKeyRoom() {
+  const b = machine.emu.read_mem(0x41a, 4);
+  const head = b[0] | (b[1] << 8);
+  const tail = b[2] | (b[3] << 8);
+  const span = 0x3e - 0x1e; // 環の大きさ (バイト)
+  const used = (((tail - head) % span) + span) % span / 2;
+  return Math.max(0, 16 - 1 - used);
+}
 
 $('copy').addEventListener('click', async () => {
-  const text = linux ? linux.logText : term.allLines().join('\n');
+  // **選んでいればそこだけ。** 何も選んでいないときも「今見えている画面」まで
+  // で、履歴の全文は取らない — 全文をコピーしてそのまま貼ると、起動ログが
+  // 丸ごとコマンドとして流れ込む (実際にELKSがそうなった)。
+  // 全部が欲しいときは「ログを保存」が受け持つ
+  const text = linux ? linux.logText : term.selectedText() || term.screenText();
   try {
     await navigator.clipboard.writeText(text);
-    setStatus('コンソールの内容をコピーしました');
+    setStatus(
+      term.selectedText()
+        ? `選んだ ${text.length} 文字をコピーしました`
+        : `画面 (${text.split('\n').length} 行) をコピーしました`,
+    );
   } catch {
     setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
   }
