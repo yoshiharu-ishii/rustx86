@@ -82,13 +82,24 @@ echo
 echo "  rustx86 mini initramfs — busybox shell"
 echo "  ゲーム: snake   エディタ: vi"
 echo
-# **シェルに制御端末を持たせる。** initから直接execすると制御端末が無く、
-# ^C のSIGINTを配る相手が居ない — pingが止められなかった (実話)。
-# /dev/console は制御端末になれないので、実体の /dev/ttyS0 を
-# セッションリーダー (setsidの子) が開き直す。cttyhackはAlpineのbusyboxに
-# 入っていないため、リダイレクトで同じことをする
-exec /bin/busybox setsid /bin/busybox sh -c \
-  'exec /bin/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'
+# **シェルはexecせずforkで起こす。** 2つ理由がある:
+#
+# 1. 制御端末: initから直接execすると制御端末が無く、^CのSIGINTを配る
+#    相手が居ない (pingが止められなかった)。setsidで新セッションを起こし、
+#    そのリーダーに実体の /dev/ttyS0 を開かせて制御端末にする
+#    (/dev/console は制御端末になれない。cttyhackはAlpineのbusyboxに無い)
+# 2. **シェルがPID 1のままだと ^Z が永久に効かない。** カーネルの孤児
+#    プロセスグループ判定は「親が global init のメンバーは数えない」
+#    (is_global_init(p->real_parent)) ので、シェル=PID1だと全ジョブが
+#    孤児扱いになり、TSTP/TTIN/TTOU は仕様で捨てられる (SIGSTOPだけ効く
+#    という奇妙な姿になる — 実際になった)。forkすれば親はPID1でなくなる
+#
+# シェルが死んだら起こし直す (getty代わり)。孤児の回収はPID1のashが
+# 子待ちのついでにやる
+while :; do
+  /bin/busybox setsid /bin/busybox sh -c \
+    'exec /bin/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'
+done
 INIT
 chmod 755 "$work/root/init"
 # cpioは自前で書く (tools/images/mkcpio.py) — /dev/console ノードを非rootで
