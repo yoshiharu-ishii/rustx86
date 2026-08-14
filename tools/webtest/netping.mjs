@@ -7,7 +7,16 @@
 //   (wsslirpリポジトリで) go run ./cmd/wsslirpd -listen 127.0.0.1:8098 -token test
 //   RUSTX86_NET_E2E_URL='ws://127.0.0.1:8098/net?token=test' node tools/webtest/netping.mjs
 //
-// exit 0 = DHCPでアドレスを取り、1.1.1.1 からecho応答が返った。
+// exit 0 = DHCPでアドレスを取り、ping先からecho応答が返った。
+//
+// ## ping先は差し替えられる (CI用)
+//
+// 既定は 1.1.1.1 = **本物のインターネット**。`RUSTX86_NET_E2E_PING` に
+// ゲートウェイ (10.0.2.2) を渡すと、応答するのは wsslirp のnetstack自身に
+// なり、**外の世界にもICMPの権限にも依存しない**閉じた検査になる。
+// 通る道 (NE2000 → WS → netstack → 折り返し) は同じなので、
+// 「16bitのゲストからNICが見えてDHCPが通り、ICMPが往復する」という
+// 回帰の値打ちはそのまま残る。CIはこちらを使う。
 import { readFileSync } from 'node:fs';
 import { setImmediate as yieldLoop } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -106,9 +115,10 @@ await step(100);
 await typeSlow('DHCP\n');
 await waitFor('10.0.2.15', 12000, 'DHCPのアドレス取得');
 console.log('dhcp: 10.0.2.15 を取得');
-await typeSlow('PING 1.1.1.1\n');
-// mTCPのpingは応答ごとに "received from 1.1.1.1" を1行出す
-await waitFor('received from 1.1.1.1', 24000, 'pingの応答');
+const pingTarget = process.env.RUSTX86_NET_E2E_PING || '1.1.1.1';
+await typeSlow(`PING ${pingTarget}\n`);
+// mTCPのpingは応答ごとに "received from <IP>" を1行出す
+await waitFor(`received from ${pingTarget}`, 24000, 'pingの応答');
 await step(2000); // 残りの応答も流す
 console.log('--- 画面 (下12行) ---');
 console.log(
@@ -118,6 +128,7 @@ console.log(
     .slice(-12)
     .join('\n'),
 );
-console.log('\nping: 1.1.1.1 から応答が返った — 16bitが本物のインターネットに届いた');
+const where = pingTarget === '1.1.1.1' ? '本物のインターネット' : `${pingTarget} (SLiRPのゲートウェイ)`;
+console.log(`\nping: ${pingTarget} から応答が返った — 16bitが${where}に届いた`);
 ws.close();
 process.exit(0);
