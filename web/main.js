@@ -148,6 +148,9 @@ function syncControls() {
   const nic = nicFor(!!linux);
   $('netSel').querySelector('option[value="on"]').textContent = nic.label;
   $('netSel').title = NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off;
+  // 左のデバイス欄も同じ判断で書き直す — ランプの状態変化しか見ていないと、
+  // マシンを切り替えた瞬間だけ前のNICの名前が残る (実際に残った)
+  setNetLamp(link?.state);
   syncSidebar();
   if (linux) {
     $('boot').disabled = linux.busy;
