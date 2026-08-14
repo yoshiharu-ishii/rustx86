@@ -221,6 +221,17 @@ export class Terminal {
   }
 
   /** 選択されている文字列 (無ければ空) */
+  /**
+   * 何か選ばれているか。**中身は組み立てない。**
+   * ドラッグ中は動かすたびに呼ばれるので、ここで文字列を作ると
+   * 16bit機 (エミュレータが同じスレッドで回る) の足を引っ張る
+   */
+  hasSelection() {
+    if (!this.selection) return false;
+    const { a, b } = this.selection;
+    return a.row !== b.row || a.col !== b.col;
+  }
+
   selectedText() {
     if (!this.selection) return '';
     const { a, b } = this.#orderedSelection();

@@ -471,6 +471,13 @@ export class AnsiTerminal {
     return back ? { a: b, b: a } : { a, b };
   }
 
+  /** 何か選ばれているか (中身は組み立てない — ドラッグ中に毎回呼ばれる) */
+  hasSelection() {
+    if (!this.selection) return false;
+    const { a, b } = this.selection;
+    return a.row !== b.row || a.col !== b.col;
+  }
+
   /** 選んだ文字列 (何も選んでいなければ空) */
   selectedText() {
     if (!this.selection) return '';
