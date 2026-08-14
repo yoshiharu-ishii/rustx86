@@ -340,6 +340,10 @@ export function mountLinux(canvas, opts = {}) {
     send(text) {
       term.onData?.(text);
     },
+    /** 何か選ばれているか (中身は組み立てない) */
+    hasSelection() {
+      return term.hasSelection();
+    },
     /** ドラッグで選んだ文字列 (何も選んでいなければ空) */
     selectedText() {
       return term.selectedText();

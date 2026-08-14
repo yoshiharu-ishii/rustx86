@@ -369,13 +369,13 @@ function openMenu(x, y) {
 }
 
 function closeMenu() {
-  menu.hidden = true;
+  if (!menu.hidden) menu.hidden = true; // 閉じているものを閉じ直さない
 }
 
 // consoleBox はこの下で定義されるので、ここでは要素を直に引く
 $('console').addEventListener('contextmenu', e => {
   e.preventDefault();
-  const can = menuAbility(!!(machine || linux), !!selectedText(), acceptsDrop());
+  const can = menuAbility(!!(machine || linux), hasSelection(), acceptsDrop());
   $('mCopy').disabled = !can.copy;
   $('mPaste').disabled = !can.paste;
   $('mOpen').disabled = !can.open;
@@ -407,6 +407,11 @@ function selectedText() {
   return (linux ? linux.selectedText() : term.selectedText()) || '';
 }
 
+/** 何か選ばれているか。**可否を出し分けるだけならこちらを使う** (中身を作らない) */
+function hasSelection() {
+  return linux ? linux.hasSelection() : term.hasSelection();
+}
+
 /**
  * コピー。**選んだところだけを取る** — どこのアプリでもそうであるように。
  *
@@ -424,9 +429,12 @@ async function doCopy() {
   else setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
 }
 
-/** 選んでいなければコピーは押せない (ボタンも右クリックも同じ判断) */
+/** 選んでいなければコピーは押せない (ボタンも右クリックも同じ判断)。
+    **変わったときだけ触る** — ドラッグ中は動かすたびに呼ばれるので、
+    毎回DOMへ書くと見た目の計算をやり直させることになる */
 function syncCopyable() {
-  $('copy').disabled = !selectedText();
+  const off = !hasSelection();
+  if ($('copy').disabled !== off) $('copy').disabled = off;
 }
 
 /**
