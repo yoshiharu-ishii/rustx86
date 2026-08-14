@@ -35,6 +35,7 @@ export function mountLinux(canvas, opts = {}) {
   term.onPaste = (text) => opts.onPaste?.(text);
   term.onPasteRequest = () => opts.onPasteRequest?.();
   term.onCopyRequest = () => opts.onCopyRequest?.();
+  term.onSelect = () => opts.onSelect?.();
   const status = (msg, err = false) => opts.onStatus?.(msg, err);
 
   let worker = null;
@@ -338,6 +339,10 @@ export function mountLinux(canvas, opts = {}) {
     /** 文字列をゲストへ流す (貼り付け)。シリアルは受け側の行列が深いので一息でよい */
     send(text) {
       term.onData?.(text);
+    },
+    /** ドラッグで選んだ文字列 (何も選んでいなければ空) */
+    selectedText() {
+      return term.selectedText();
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {

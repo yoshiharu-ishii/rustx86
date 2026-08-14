@@ -124,8 +124,10 @@ test('見た目の好みは3つを回り、system だけがOSに従う', () => {
 test('右クリックのメニューは今できることだけ出す', () => {
   // 起動前: 貼るゲストが居ない。イメージは受け付ける
   assert.deepEqual(menuAbility(false, false, true), { copy: false, paste: false, open: true });
-  // 走行中: コピーも貼り付けもできるが、**ディスクは差し替えない** (ドロップと同じ)
-  assert.deepEqual(menuAbility(true, false, false), { copy: true, paste: true, open: false });
-  // 起動前でも、選んだ字があればコピーはできる
+  // **走っていてもコピーは選んでいなければ押せない** (普通のアプリと同じ作法)。
+  // ディスクも差し替えない (ドロップと同じ)
+  assert.deepEqual(menuAbility(true, false, false), { copy: false, paste: true, open: false });
+  // 選んでいればコピーできる。走っていなくても構わない (画面に残った字を取れる)
+  assert.equal(menuAbility(true, true, false).copy, true);
   assert.equal(menuAbility(false, true, true).copy, true);
 });
