@@ -407,7 +407,7 @@
             <path d="M14 3v5h5" />
           </svg>
           <span class="os">イメージを開く…</span>
-          <span class="d">フロッピー/ディスクイメージ (.img) を選ぶ、<br>
+          <span class="d">ディスクイメージ・Linuxカーネル・スナップショットを選ぶ、<br>
             この枠へのドラッグでも起動します</span>
         </button>
         <div class="card help">
@@ -477,7 +477,9 @@
   </form>
 </dialog>
 
-<input type="file" id="imageFile" accept=".img,.ima,.bin,.json" hidden>
+<!-- **拡張子で絞らない。** vmlinux-lts のように拡張子を持たないものがあり、
+     絞ると選ぶことすらできなくなる。何であるかは中身を見て決める (insertMedia) -->
+<input type="file" id="imageFile" hidden>
 <script type="module" src="./main.js"></script>
 </body>
 </html>
