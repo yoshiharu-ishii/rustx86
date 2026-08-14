@@ -588,7 +588,8 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             // プレフィクス付き (66/F2/F3 = memcpyの主戦場) はMMXであり得ない
             // ので、判定ごと素通しする。どちらの管轄でもなければtrap
             let plain = d.rep.is_none() && !d.p66;
-            let took = (plain && super::mmx::step_mmx(m, d, op2)) || super::sse::step_sse(m, d, op2);
+            let took =
+                (plain && super::mmx::step_mmx(m, d, op2)) || super::sse::step_sse(m, d, op2);
             if !took {
                 m.cpu.ip = start_ip;
                 m.trap(format!("unimplemented opcode 0f {op2:#04x}"));

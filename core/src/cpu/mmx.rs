@@ -25,7 +25,6 @@
 //! ## 割り切り
 //!
 //! - CR0.EM/TS の検査はしない (x87本体と同じ割り切り)
-//! - maskmovq (0F F7) は使い手が現れたら実装する — trapで止まるので分かる
 
 use super::operand::{fetch8, modrm, Operand};
 use super::sse::{pfx, read_m64, write_m64, Pfx};
@@ -232,6 +231,28 @@ pub(crate) fn step_mmx(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
             let sat = |v: u32| (v as i32).clamp(-32768, 32767) as i16 as u16;
             from16([sat(x[0]), sat(x[1]), sat(y[0]), sat(y[1])])
         }),
+        // pinsrw mm, r32/m16, imm8 — 指定wordだけ差し替える (ghash-x86が使う)
+        0xC4 => {
+            let (reg, rm) = modrm(m, d);
+            let v = match rm {
+                Operand::Reg(r) => m.cpu.regs[r] as u16,
+                Operand::Mem { addr, .. } => m.read16(addr),
+            };
+            let imm = (fetch8(m) & 3) as usize;
+            let mut s = to16(m.cpu.fpu.mm(reg));
+            s[imm] = v;
+            m.cpu.fpu.set_mm(reg, from16(s));
+        }
+        // pextrw r32, mm, imm8 — 指定wordをゼロ拡張で取り出す (レジスタ専用)
+        0xC5 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false;
+            };
+            let imm = (fetch8(m) & 3) as usize;
+            m.cpu.regs[reg] = to16(m.cpu.fpu.mm(r))[imm] as u32;
+            m.cpu.fpu.mmx_touch();
+        }
         // pshufw mm, mm/m64, imm8 (SSEがMMXレジスタに足した並べ替え)
         0x70 => {
             let (reg, rm) = modrm(m, d);
@@ -422,6 +443,25 @@ pub(crate) fn step_mmx(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 _ => return false,
             };
             m.cpu.fpu.set_mm(r, out);
+        }
+
+        // maskmovq: 各バイトのマスクMSBが立つ所だけ [EDI] へ書く
+        // (メモリオペランドはModRMではなく**暗黙のDS:EDI**。上書きは有効)
+        0xF7 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false;
+            };
+            let data = m.cpu.fpu.mm(reg).to_le_bytes();
+            let mask = m.cpu.fpu.mm(r).to_le_bytes();
+            let seg = d.seg_override.unwrap_or(crate::cpu::DS);
+            let di = m.cpu.regs[crate::cpu::DI];
+            for (i, (&b, &mk)) in data.iter().zip(mask.iter()).enumerate() {
+                if mk & 0x80 != 0 {
+                    let a = m.cpu.lin(seg, di.wrapping_add(i as u32));
+                    m.write8(a, b);
+                }
+            }
         }
 
         // EMMS: MMXの世界からx87へ返す (ModRM無し)

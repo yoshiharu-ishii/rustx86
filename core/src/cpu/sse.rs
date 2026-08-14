@@ -301,6 +301,29 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 write_m64(m, addr, v);
             }
         }
+        // unpcklps/unpcklpd (14) と unpckhps/unpckhpd (15): 2本の下位/上位を互い違いに
+        0x14 => {
+            let (reg, rm) = modrm(m, d);
+            let b = rm128(m, &rm);
+            let a = m.cpu.xmm[reg];
+            m.cpu.xmm[reg] = if p == Pfx::P66 {
+                from64([to64(a)[0], to64(b)[0]])
+            } else {
+                let (x, y) = (to32(a), to32(b));
+                from32([x[0], y[0], x[1], y[1]])
+            };
+        }
+        0x15 => {
+            let (reg, rm) = modrm(m, d);
+            let b = rm128(m, &rm);
+            let a = m.cpu.xmm[reg];
+            m.cpu.xmm[reg] = if p == Pfx::P66 {
+                from64([to64(a)[1], to64(b)[1]])
+            } else {
+                let (x, y) = (to32(a), to32(b));
+                from32([x[2], y[2], x[3], y[3]])
+            };
+        }
         // movaps/movapd (28/29)。アラインメント検査はしない (冒頭のdoc参照)
         0x28 => {
             let (reg, rm) = modrm(m, d);
@@ -367,6 +390,77 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 Operand::Reg(r) => m.cpu.xmm[r] = v as u128,
             }
         }
+        // F3 0F D6: movq2dq xmm ← mm / F2 0F D6: movdq2q mm ← xmm下位。
+        // MMXとXMMの世界を渡る橋 (どちらもレジスタ専用)
+        0xD6 if p == Pfx::F3 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false;
+            };
+            m.cpu.xmm[reg] = m.cpu.fpu.mm(r) as u128;
+            m.cpu.fpu.mmx_touch();
+        }
+        0xD6 if p == Pfx::F2 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false;
+            };
+            m.cpu.fpu.set_mm(reg, m.cpu.xmm[r] as u64);
+            m.cpu.fpu.mmx_touch();
+        }
+        // E6: dq↔pd の変換三兄弟
+        0xE6 => {
+            let (reg, rm) = modrm(m, d);
+            match p {
+                // cvtdq2pd: 下位2×i32 → 2×f64
+                Pfx::F3 => {
+                    let s = rm64(m, &rm);
+                    m.cpu.xmm[reg] =
+                        fromf64([(s as u32 as i32) as f64, ((s >> 32) as u32 as i32) as f64]);
+                }
+                // cvttpd2dq (66) / cvtpd2dq (F2): 2×f64 → 下位2×i32 (上位ゼロ)。
+                // 丸めは2C/2Dと同じtrunc代用
+                Pfx::P66 | Pfx::F2 => {
+                    let s = tof64(rm128(m, &rm));
+                    let cv = |v: f64| -> u32 {
+                        if v.is_nan() {
+                            i32::MIN as u32
+                        } else {
+                            v.trunc().clamp(i32::MIN as f64, i32::MAX as f64) as i32 as u32
+                        }
+                    };
+                    m.cpu.xmm[reg] = from32([cv(s[0]), cv(s[1]), 0, 0]);
+                }
+                Pfx::None => return false,
+            }
+        }
+        // movnti m32 ← r32 (SSE2、プレフィクス無し)。キャッシュが無いのでただの書き込み
+        0xC3 if p == Pfx::None => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Mem { addr, .. } = rm else {
+                return false;
+            };
+            let v = m.cpu.regs[reg];
+            m.write32(addr, v);
+        }
+        // maskmovdqu (66 0F F7): 各バイトのマスクMSBが立つ所だけ [EDI] へ書く。
+        // メモリオペランドはModRMではなく**暗黙のDS:EDI** (上書きは有効)
+        0xF7 if p == Pfx::P66 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false;
+            };
+            let data = to8(m.cpu.xmm[reg]);
+            let mask = to8(m.cpu.xmm[r]);
+            let seg = d.seg_override.unwrap_or(crate::cpu::DS);
+            let di = m.cpu.regs[crate::cpu::DI];
+            for (i, (&b, &mk)) in data.iter().zip(mask.iter()).enumerate() {
+                if mk & 0x80 != 0 {
+                    let a = m.cpu.lin(seg, di.wrapping_add(i as u32));
+                    m.write8(a, b);
+                }
+            }
+        }
 
         // ---- ビット演算 (ps/pd/整数で同じ動き) ----
         0x54 => int_binop(m, d, |a, b| a & b), // andps/pand相当
@@ -418,6 +512,66 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 }
             }),
         ),
+        // ---- 整数乗算・飽和加減算・min/max・平均 (libcryptoの暗号asmが踏む) ----
+        0xD5 => int_binop(
+            m,
+            d,
+            lanes16(|a, b| (a as i16 as i32).wrapping_mul(b as i16 as i32) as u16),
+        ),
+        0xE5 => int_binop(
+            m,
+            d,
+            lanes16(|a, b| ((a as i16 as i32 * b as i16 as i32) >> 16) as u16),
+        ),
+        0xE4 => int_binop(m, d, lanes16(|a, b| ((a as u32 * b as u32) >> 16) as u16)),
+        // pmuludq: 偶数dword同士のフル積 → 64bitレーンへ (bn/montの心臓部)
+        0xF4 => int_binop(m, d, |a, b| {
+            let (x, y) = (to64(a), to64(b));
+            from64([
+                (x[0] as u32 as u64) * (y[0] as u32 as u64),
+                (x[1] as u32 as u64) * (y[1] as u32 as u64),
+            ])
+        }),
+        // pmaddwd: 隣り合うword積の対和
+        0xF5 => int_binop(m, d, |a, b| {
+            let (x, y) = (to16(a), to16(b));
+            let p32 = |i: usize| x[i] as i16 as i32 * (y[i] as i16 as i32);
+            from32(core::array::from_fn(|i| {
+                p32(i * 2).wrapping_add(p32(i * 2 + 1)) as u32
+            }))
+        }),
+        0xEC => int_binop(m, d, lanes8(|a, b| (a as i8).saturating_add(b as i8) as u8)),
+        0xED => int_binop(
+            m,
+            d,
+            lanes16(|a, b| (a as i16).saturating_add(b as i16) as u16),
+        ),
+        0xE8 => int_binop(m, d, lanes8(|a, b| (a as i8).saturating_sub(b as i8) as u8)),
+        0xE9 => int_binop(
+            m,
+            d,
+            lanes16(|a, b| (a as i16).saturating_sub(b as i16) as u16),
+        ),
+        0xDD => int_binop(m, d, lanes16(u16::saturating_add)),
+        0xD9 => int_binop(m, d, lanes16(u16::saturating_sub)),
+        0xEA => int_binop(m, d, lanes16(|a, b| (a as i16).min(b as i16) as u16)),
+        0xEE => int_binop(m, d, lanes16(|a, b| (a as i16).max(b as i16) as u16)),
+        0xE0 => int_binop(m, d, lanes8(|a, b| ((a as u16 + b as u16 + 1) >> 1) as u8)),
+        0xE3 => int_binop(
+            m,
+            d,
+            lanes16(|a, b| ((a as u32 + b as u32 + 1) >> 1) as u16),
+        ),
+        // psraw/psrad (レジスタ形: 下位64bitがカウント、幅-1に飽和)
+        0xE1 => int_binop(m, d, |a, b| {
+            let n = (b as u64).min(15) as u32;
+            from16(to16(a).map(|x| ((x as i16) >> n) as u16))
+        }),
+        0xE2 => int_binop(m, d, |a, b| {
+            let n = (b as u64).min(31) as u32;
+            from32(to32(a).map(|x| ((x as i32) >> n) as u32))
+        }),
+
         // pmovmskb: 各バイトの符号ビットを16bitに束ねて汎用レジスタへ。
         // 「どのレーンが一致したか」を分岐で使える形にする、比較の相棒
         0xD7 if p == Pfx::P66 => {
@@ -530,6 +684,26 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                 }
                 Pfx::None => return false, // pshufw はMMX (未対応)
             };
+        }
+        // pinsrw xmm, r32/m16, imm8 / pextrw r32, xmm, imm8
+        0xC4 if p == Pfx::P66 => {
+            let (reg, rm) = modrm(m, d);
+            let v = match rm {
+                Operand::Reg(r) => m.cpu.regs[r] as u16,
+                Operand::Mem { addr, .. } => m.read16(addr),
+            };
+            let imm = (fetch8(m) & 7) as usize;
+            let mut s = to16(m.cpu.xmm[reg]);
+            s[imm] = v;
+            m.cpu.xmm[reg] = from16(s);
+        }
+        0xC5 if p == Pfx::P66 => {
+            let (reg, rm) = modrm(m, d);
+            let Operand::Reg(r) = rm else {
+                return false; // レジスタ専用
+            };
+            let imm = (fetch8(m) & 7) as usize;
+            m.cpu.regs[reg] = to16(m.cpu.xmm[r])[imm] as u32;
         }
         // shufps (C6 + imm8)
         0xC6 if p == Pfx::None => {
@@ -676,6 +850,10 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
 
         // ---- 浮動小数点 ----
         0x51 => fp_binop(m, d, |_, b| b.sqrt(), |_, b| b.sqrt()),
+        // rsqrt/rcp (52/53): f32専用の粗い逆数近似。厳密なNewton補正は
+        // 使い手側の作法なので、ここは正確な逆数で代用する
+        0x52 => fp_binop(m, d, |_, b| 1.0 / b.sqrt(), |_, b| 1.0 / b.sqrt()),
+        0x53 => fp_binop(m, d, |_, b| 1.0 / b, |_, b| 1.0 / b),
         0x58 => fp_binop(m, d, |a, b| a + b, |a, b| a + b),
         0x59 => fp_binop(m, d, |a, b| a * b, |a, b| a * b),
         0x5C => fp_binop(m, d, |a, b| a - b, |a, b| a - b),
@@ -684,7 +862,28 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
         0x5F => fp_binop(m, d, f32::max, f64::max),
         // 変換: 整数 → 浮動 (2A)、浮動 → 整数 (2C=切り捨て, 2D=丸め)
         0x2A => {
+            // None/66 はソースがmm/m64 (cvtpi2ps/pd)、F3/F2 は r/m32 (cvtsi2ss/sd)
             let (reg, rm) = modrm(m, d);
+            if matches!(p, Pfx::None | Pfx::P66) {
+                let s = match rm {
+                    Operand::Reg(r) => {
+                        let v = m.cpu.fpu.mm(r);
+                        m.cpu.fpu.mmx_touch();
+                        v
+                    }
+                    Operand::Mem { addr, .. } => read_m64(m, addr),
+                };
+                let (lo, hi) = (s as u32 as i32, (s >> 32) as u32 as i32);
+                m.cpu.xmm[reg] = if p == Pfx::P66 {
+                    // cvtpi2pd: 2×i32 → 2×f64
+                    fromf64([lo as f64, hi as f64])
+                } else {
+                    // cvtpi2ps: 2×i32 → 下位2×f32 (上位は素通し)
+                    (m.cpu.xmm[reg] & !0xFFFF_FFFF_FFFF_FFFF)
+                        | (fromf32([lo as f32, hi as f32, 0.0, 0.0]) & 0xFFFF_FFFF_FFFF_FFFF)
+                };
+                return true;
+            }
             let v = match rm {
                 Operand::Reg(r) => m.cpu.regs[r] as i32,
                 Operand::Mem { addr, .. } => m.read32(addr) as i32,
@@ -697,24 +896,45 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
                     m.cpu.xmm[reg] =
                         (m.cpu.xmm[reg] & !0xFFFF_FFFF_FFFF_FFFF) | (v as f64).to_bits() as u128
                 }
-                _ => return false, // cvtpi2ps はMMX絡み (未対応)
+                _ => unreachable!(),
             }
         }
         0x2C | 0x2D => {
             let (reg, rm) = modrm(m, d);
-            let val = match p {
-                Pfx::F3 => f32::from_bits(rm32(m, &rm)) as f64,
-                Pfx::F2 => f64::from_bits(rm64(m, &rm)),
-                _ => return false,
-            };
             // 2C (cvtt〜) は0方向へ切り捨て。2D は丸め — どちらもtruncで代用
             // (MXCSRの丸めモードは既定の最近接だが、libcの主用途はtrunc)
-            let out = if val.is_nan() {
-                i32::MIN
-            } else {
-                val.trunc().clamp(i32::MIN as f64, i32::MAX as f64) as i32
+            let to_i32 = |val: f64| -> i32 {
+                if val.is_nan() {
+                    i32::MIN
+                } else {
+                    val.trunc().clamp(i32::MIN as f64, i32::MAX as f64) as i32
+                }
             };
-            m.cpu.regs[reg] = out as u32;
+            match p {
+                // スカラ → 汎用レジスタ
+                Pfx::F3 => {
+                    let v = f32::from_bits(rm32(m, &rm)) as f64;
+                    m.cpu.regs[reg] = to_i32(v) as u32;
+                }
+                Pfx::F2 => {
+                    let v = f64::from_bits(rm64(m, &rm));
+                    m.cpu.regs[reg] = to_i32(v) as u32;
+                }
+                // パックド → mm (cvt(t)ps2pi / cvt(t)pd2pi)
+                Pfx::None => {
+                    let s = rm64(m, &rm);
+                    let a = to_i32(f32::from_bits(s as u32) as f64) as u32;
+                    let b = to_i32(f32::from_bits((s >> 32) as u32) as f64) as u32;
+                    m.cpu.fpu.set_mm(reg, a as u64 | (b as u64) << 32);
+                    m.cpu.fpu.mmx_touch();
+                }
+                Pfx::P66 => {
+                    let s = tof64(rm128(m, &rm));
+                    let (a, b) = (to_i32(s[0]) as u32, to_i32(s[1]) as u32);
+                    m.cpu.fpu.set_mm(reg, a as u64 | (b as u64) << 32);
+                    m.cpu.fpu.mmx_touch();
+                }
+            }
         }
         // cvtss2sd / cvtsd2ss / cvtps2pd / cvtpd2ps (5A)
         0x5A => {
