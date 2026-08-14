@@ -17,7 +17,8 @@ Rust製のx86エミュレータ。リアルモード8086から始めて、プロ
 2. **16bit UNIX ([ELKS](https://github.com/ghaerr/elks)) のシェルがブラウザで叩ける** ✅
 3. **FreeDOS が `A:\>` まで起動し、DOSアプリが動く** ✅
 4. **32bit Linux が起動し、busyboxシェルが操作できる** ✅ ← 当初の完成ライン
-5. そのLinuxから本物のホストに `ping` が届く
+5. **そのLinuxから本物のホストに `ping` が届く** ✅ — さらに `wget https://` で
+   実物のファイルまで引ける (2026-08-14)。1993年のFreeDOSからも ping が返る
 
 ネットワークを最後に置いたのは、**タブの中で完結するものを先にやる**と決めたため
 ([ADR-0005](docs/adr/0005-local-first-roadmap.md))。ネットワークだけは踏み台の
