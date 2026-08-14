@@ -116,6 +116,31 @@ fn pshufw_and_pmaddwd() {
     assert_eq!(read64(&m, DATA + 0x10), 0x0000_000A_0000_000A);
 }
 
+/// pinsrw で1ワードだけ差し替え、pextrw で取り出す — ghash-x86 (libcrypto)
+/// が踏む対 (0F C4 / 0F C5)
+#[test]
+fn pinsrw_and_pextrw() {
+    let mut m = mach();
+    write64(&mut m, DATA, 0x4444_3333_2222_1111);
+    run(
+        &mut m,
+        &[
+            0x0F, 0x6F, 0x06, 0x00, 0x07, // movq mm0, [0x700]
+            0xBB, 0xBE, 0xBA, // mov bx, 0xBABE
+            0x0F, 0xC4, 0xC3, 0x02, // pinsrw mm0, ebx, 2
+            0x0F, 0x7F, 0x06, 0x08, 0x07, // movq [0x708], mm0
+            0x0F, 0xC5, 0xC8, 0x03, // pextrw ecx, mm0, 3
+            0x66, 0x89, 0x0E, 0x10, 0x07, // mov [0x710], ecx (32bit)
+        ],
+    );
+    assert_eq!(
+        read64(&m, DATA + 8),
+        0x4444_BABE_2222_1111,
+        "word2だけ差し替え"
+    );
+    assert_eq!(m.read32(DATA + 0x10), 0x4444, "word3をゼロ拡張で取得");
+}
+
 /// FXSAVE のST0スロットにMMX値が**指数全1・仮数そのまま**で現れ、
 /// FXRSTOR で**ビット同一**に戻ること。カーネルのコンテキストスイッチが
 /// この経路なので、ここが崩れるとMMXの計算はスライスをまたぐたびに壊れる
@@ -205,6 +230,44 @@ fn snapshot_carries_mmx_state() {
         ],
     );
     assert_eq!(read64(&m2, DATA + 8), 0x0123_4567_89AB_CDEF);
+}
+
+/// maskmovq: マスクのMSBが立つバイトだけが [EDI] に書かれること
+#[test]
+fn maskmovq_writes_only_masked_bytes() {
+    let mut m = mach();
+    write64(&mut m, DATA, 0x8877_6655_4433_2211); // データ
+    write64(&mut m, DATA + 8, 0x0080_0080_0080_0080); // マスク: LE並びで [80,00,80,00,…]
+    write64(&mut m, DATA + 0x10, 0xEEEE_EEEE_EEEE_EEEE); // 書き込み先の下地
+    run(
+        &mut m,
+        &[
+            0x0F, 0x6F, 0x06, 0x00, 0x07, // movq mm0, [0x700]
+            0x0F, 0x6F, 0x0E, 0x08, 0x07, // movq mm1, [0x708]
+            0xBF, 0x10, 0x07, // mov di, 0x710
+            0x0F, 0xF7, 0xC1, // maskmovq mm0, mm1
+        ],
+    );
+    // マスクのMSBが立つのはバイト0,2,4,6 → そこだけデータ [11,33,55,77] が
+    // 書かれ、間の 0xEE は残る
+    assert_eq!(read64(&m, DATA + 0x10), 0xEE77_EE55_EE33_EE11);
+}
+
+/// movq2dq / movdq2q — MMXとXMMの橋が値を運ぶこと
+#[test]
+fn movq2dq_bridges_mm_and_xmm() {
+    let mut m = mach();
+    write64(&mut m, DATA, 0xFEED_FACE_DEAD_BEEF);
+    run(
+        &mut m,
+        &[
+            0x0F, 0x6F, 0x06, 0x00, 0x07, // movq mm0, [0x700]
+            0xF3, 0x0F, 0xD6, 0xD0, // movq2dq xmm2, mm0
+            0xF2, 0x0F, 0xD6, 0xDA, // movdq2q mm3, xmm2
+            0x0F, 0x7F, 0x1E, 0x08, 0x07, // movq [0x708], mm3
+        ],
+    );
+    assert_eq!(read64(&m, DATA + 8), 0xFEED_FACE_DEAD_BEEF);
 }
 
 /// FLD m80 → FSTP m80 がビット同一で往復すること。f64に落ちない下位11bitを
