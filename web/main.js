@@ -52,11 +52,14 @@ const ORIGIN_LABEL = { library: 'ライブラリ', image: 'イメージ', snapsh
 const NET_DEFAULT_URL = 'ws://127.0.0.1:8087/net';
 const NET_STORE = 'rustx86.net';
 
-/** ?net= の指定 (無ければ null)。?net=1 は手元のwsslirpdの意味 */
+/**
+ * ?net= の繋ぎ先 (無指定と ?net=off は null)。
+ * ?net=1 は手元のSLiRP backend、?net=off は「挿さずに起動する」
+ */
 function netFromQuery() {
   const q = new URLSearchParams(location.search);
   const net = q.get('net');
-  if (!net) return null;
+  if (!net || net === 'off') return null;
   const base = net === '1' ? NET_DEFAULT_URL : net;
   const token = q.get('nettoken');
   return token ? withToken(base, token) : base;
@@ -86,10 +89,14 @@ function netSaved() {
  */
 let link = null;
 
-/** 起動スクリプト。ネットが繋がっている機械は netScript の続きも流す */
+/**
+ * 起動スクリプト。**線が生きているときだけ** netScript の続きも流す。
+ * リンクが死んでいるのにDHCPを打たせると、30秒待って諦めるのを
+ * 黙って見せることになる (カードはあるがケーブルが繋がっていない状態)
+ */
 function scriptFor(m) {
   if (!m?.script) return m?.script;
-  return link && m.netScript ? [...m.script, ...m.netScript] : m.script;
+  return link?.state === 'up' && m.netScript ? [...m.script, ...m.netScript] : m.script;
 }
 
 // ---------- スナップショット ----------
@@ -138,10 +145,13 @@ function syncControls() {
   $('layout').previousElementSibling.hidden = !!linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
-  // ネットワーク。**Linuxからは今のNE2000が見えない** — ltsカーネルは
-  // ISAバスを知らず、PCI越しにしか装置を探さない (ADR-0017 5c で RTL8029 を作る)
-  $('netSel').disabled = !!linux;
-  if (linux) $('netSel').title = 'ネットワーク: Linuxは未対応 (PCI + RTL8029 待ち)';
+  // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
+  // 16bit (ELKS/DOS) はISAのNE2000。32bitのLinuxはISAを知らないので
+  // PCIのRTL8029になる — こちらはまだ無い (ADR-0017 5c)
+  const nic = nicFor();
+  $('netSel').querySelector('option[value="on"]').textContent = nic.label;
+  $('netSel').disabled = !nic.usable;
+  $('netSel').title = nic.usable ? NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off : nic.why;
   syncSidebar();
   if (linux) {
     $('boot').disabled = linux.busy;
@@ -483,6 +493,16 @@ function netDialogSync() {
   if (byQuery) {
     msg.textContent += (msg.textContent ? ' — ' : '') + 'URLの ?net= で指定されています';
   }
+}
+
+/**
+ * この機械に挿さるNIC。**バスがOSの世代を決める** —
+ * ISAを知らないOSにISAのカードを挿しても見えない (逆も同じ)
+ */
+function nicFor() {
+  return linux
+    ? { label: 'RTL8029 (PCI) — 未実装', usable: false, why: 'PCIバスとRTL8029はこれから (ADR-0017 5c)' }
+    : { label: 'NE2000 (ISA 0x300)', usable: true };
 }
 
 /** ネットワークの設定画面を開く (今の設定を入れてから) */
@@ -1060,10 +1080,19 @@ try {
   }
   setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
   syncControls();
-  // ?net= があれば、機械を選ぶより先にケーブルを挿しておく。
-  // E2Eも「開いたら既に繋がっている」方が扱いやすい
+  // **既定で繋いでおく。** 机の裏でLANケーブルが刺さっているのが普通の姿で、
+  // 使うたびに挿し直させる理由がない。相手 (SLiRP backend) が居なければ
+  // 赤が点くだけで、機械は「リンクの無いNIC」を積んで普通に起動する。
+  // 切っておきたいときは ?net=off
   const q = netFromQuery();
-  if (q) netConnect(q);
+  if (new URLSearchParams(location.search).get('net') === 'off') {
+    setNetLamp(null);
+  } else if (q) {
+    netConnect(q);
+  } else {
+    const saved = netSaved();
+    netConnect(withToken(saved.url, saved.token));
+  }
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
 }
