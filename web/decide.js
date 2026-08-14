@@ -138,3 +138,4 @@ export function resolveTheme(pref, systemLight) {
 export function menuAbility(hasGuest, hasSelection, canOpen) {
   return { copy: hasGuest || hasSelection, paste: hasGuest, open: canOpen };
 }
+

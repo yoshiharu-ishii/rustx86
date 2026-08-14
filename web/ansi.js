@@ -23,6 +23,8 @@
 //   - SGR (色・太字・反転)  ・ カーソル表示/非表示 `\x1b[?25l/h`
 //   - `\r` `\n` `\b` `\t` と、80桁での折り返し
 
+import { IS_MAC, isClipboardCombo } from './terminal.js';
+
 const CELL_W = 9;
 const CELL_H = 16;
 const SCROLLBAR_W = 10;
@@ -70,14 +72,39 @@ export class AnsiTerminal {
 
     // 入力: キーが来たら onData(str) を呼ぶ (端末→ゲスト)
     this.onData = null;
+    // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
+    // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
+    /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
+    this.onPaste = null;
+    /** 貼り付けの組みが押されたときに呼ばれる (クリップボードは呼び手が読む) */
+    this.onPasteRequest = null;
+    /** コピーの組みが押されたときに呼ばれる (何をコピーするかは呼び手が決める) */
+    this.onCopyRequest = null;
     this._utf8 = []; // 受信UTF-8の途中バイト
 
     canvas.tabIndex = 0;
     canvas.style.outline = 'none';
-    canvas.addEventListener('keydown', (e) => this._key(e));
+    canvas.addEventListener('keydown', (e) => {
+      // **コピー/ペーストの組みはゲストへ渡さない** (VGA端末と同じ判断を使う)。
+      // 素の Ctrl+C はゲストのもの — シリアルでも SIGINT の鍵である
+      if (isClipboardCombo(e, 'KeyC')) {
+        e.preventDefault();
+        this.onCopyRequest?.();
+        return;
+      }
+      if (isClipboardCombo(e, 'KeyV')) {
+        // ⌘V はブラウザが paste 事象をくれるので、そちらに任せる
+        if (!IS_MAC) {
+          e.preventDefault();
+          this.onPasteRequest?.();
+        }
+        return;
+      }
+      this._key(e);
+    });
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
-      if (t) this.onData?.(t);
+      if (t) this.onPaste?.(t);
       e.preventDefault();
     });
 
