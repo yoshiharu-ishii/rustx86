@@ -5,15 +5,18 @@
 // 60fpsで更新でき、キー入力も届く。wasm はここで初期化して抱える。
 //
 // メインとの約束 (postMessage):
-//   受信: {type:'boot', kernel, initrd, cmdline, ramMb}  カーネルから起動する
+//   受信: {type:'boot', kernel, initrd, cmdline, ramMb, mac?}  カーネルから起動する
+//                                                  (macがあればRTL8029を挿す)
 //         {type:'boot', snapshot}                        起動済み控えから復元する
 //         {type:'save'}                                  今の状態を丸ごと控えて返す
 //         {type:'load', bytes}                           控えた状態へ戻す
 //         {type:'input', bytes}                          シリアルへ流す
+//         {type:'net-rx', frames}                        届いたEthernetフレーム
 //         {type:'pause'} / {type:'resume'}
 //         {type:'dbg', id, method, args}                 デバッガの覗き見RPC (下記)
 //   送信: {type:'ready'}                     wasm初期化完了
 //         {type:'serial', bytes}             コンソール出力 (差分)
+//         {type:'net-tx', frames}            ゲストが送ったEthernetフレーム
 //         {type:'status', booted, mips, trap} 状態 (定期)
 //         {type:'trap', reason}              未実装で停止
 //         {type:'dbg-result', id, result}    RPCの返事
@@ -23,6 +26,15 @@ import init, { Emulator } from './pkg/rustx86_wasm.js';
 
 let emu = null;
 let running = false;
+/** ゲストの時計 (仮想ミリ秒) と、その基準になった実時刻。
+    **仮想時間は実時間を追い越してはいけない** — 追い越すと、ゲストの
+    「1秒に1回」(pingやTCPの再送) が実時間では毎秒何百回にもなる。
+    実際に ping 1.1.1.1 が本物のインターネットへ洪水になった */
+let virtualMs = 0;
+let clockT0 = 0;
+/** 外から届いたフレーム。**スライス境界でまとめて注入する** —
+    ネットワークの非決定さ (いつ届くか) をここで止める (netlink.jsと同じ理屈) */
+let netInbox = [];
 let instrs = 0;
 let lastMeasure = 0;
 let lastTone = 0;
@@ -48,15 +60,24 @@ self.onmessage = (e) => {
           msg.cmdline ?? 'console=ttyS0',
           msg.ramMb ?? 128,
         );
+        // NICを挿すのは電源を入れるこの瞬間だけ (VGA機と同じ)。
+        // Linuxは起動時にしかPCIを数えないので、後から挿しても見えない
+        if (msg.mac) emu.net_attach(new Uint8Array(msg.mac));
       }
+      netInbox = [];
       running = true;
       instrs = 0;
       lastMeasure = performance.now();
+      virtualMs = 0;
+      clockT0 = lastMeasure;
       loop();
       break;
     }
     case 'input':
       if (emu) emu.serial_in(new Uint8Array(msg.bytes));
+      break;
+    case 'net-rx':
+      for (const f of msg.frames) netInbox.push(new Uint8Array(f));
       break;
     case 'save': {
       if (!emu) break;
@@ -155,6 +176,13 @@ function loop() {
   if (!running || !emu) return;
   const t0 = performance.now();
 
+  // 届いたフレームをスライス境界で注入する (受信リングが詰まっていたら
+  // 落ちるが、それは実機でも同じ)
+  if (netInbox.length) {
+    for (const f of netInbox) emu.net_inject_frame(f);
+    netInbox = [];
+  }
+
   try {
     emu.run_slice(sliceSize);
   } catch (err) {
@@ -163,6 +191,17 @@ function loop() {
     return;
   }
   instrs += sliceSize;
+
+  // ゲストが送ったフレームを外へ (1メッセージにまとめ、中身は移送する)
+  {
+    const frames = [];
+    for (;;) {
+      const f = emu.net_take_frame();
+      if (!f.length) break;
+      frames.push(f.buffer);
+    }
+    if (frames.length) postMessage({ type: 'net-tx', frames }, frames);
+  }
 
   // 出力を流す (差分)
   const out = emu.serial_out();
@@ -200,6 +239,21 @@ function loop() {
   const skippedMs = emu.take_idle_skipped() / INSTR_PER_GUEST_MS;
   const idle = skippedMs > dt;
 
+  // --- ゲストの時計を実時間に繋ぎ止める ---
+  //
+  // 仮想時間 = 実行した命令ぶん + 早送りが飛ばしたぶん。起動中 (全力で忙しい)
+  // は実測が想定 (~76 MIPS) より遅いので先行せず、**起動の速さは落ちない**。
+  // 先行するのはHLTの早送りが利くアイドル時で、以前は「50msだけ寝て残りの
+  // 借りは忘れる」だったため、ゲストの1秒が実時間の数十msになっていた。
+  // 溜まった先行ぶんは下の待ちで実時間に返す。
+  //
+  // 逆向き (実時間が先行) は放置でよいが、**上限を置く** — 一時停止や重い
+  // ホストで実時間が何分も先行した後、その分をまとめて回すと結局洪水になる
+  virtualMs += sliceSize / INSTR_PER_GUEST_MS + skippedMs;
+  const realMs = now - clockT0;
+  if (virtualMs < realMs - 100) virtualMs = realMs - 100;
+  const aheadMs = virtualMs - realMs;
+
   // 定期的に状態を報告 (MIPS)。アイドル中の数字は「時計を流しただけ」なので
   // idle を添えて、見せ方は画面側に任せる
   if (now - lastMeasure >= 500) {
@@ -210,11 +264,18 @@ function loop() {
   }
 
   if (idle) {
-    // アイドル: 飛ばした時間から実際に使った時間を引いた分だけ実時間で待つ。
-    // CPUはこの間まったく回らない (キーはワーカーのメッセージで届く)。
+    // アイドル: 時計の先行ぶんを実時間で返す。50msずつ寝るのは応答性のため
+    // (キーはワーカーのメッセージで届き、寝ている間も割り込める)。
+    // 返しきるまでは次のループでもここへ来るので、借りは消えない。
     // 次のスライスは短く戻す — 5Mのまま寝ると65ms待ちになり打鍵が鈍る
     sliceSize = Math.round(INSTR_PER_GUEST_MS * 16);
-    setTimeout(loop, Math.min(50, skippedMs - dt));
+    setTimeout(loop, Math.max(0, Math.min(50, aheadMs)));
+    return;
+  }
+
+  // 忙しくても時計が先行したら実時間に合わせる (wasmが想定より速いとき)
+  if (aheadMs > 8) {
+    setTimeout(loop, Math.min(50, aheadMs));
     return;
   }
 

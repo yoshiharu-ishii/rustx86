@@ -36,6 +36,25 @@ pkt=$(find -L "$work/lib" "$work/usr/lib" -name af_packet.ko 2>/dev/null | head 
 mkdir -p "$work/root/lib/modules"
 cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
 chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
+# udhcpc がリースを**実際に適用する**スクリプト。busybox の udhcpc は
+# 取ったリースを自分では適用せず、このスクリプトに渡すだけである
+# (無いと「取れたのにアドレスが付かない」になる)
+mkdir -p "$work/root/usr/share/udhcpc"
+cat > "$work/root/usr/share/udhcpc/default.script" <<'DHCP'
+#!/bin/busybox sh
+# $1: deconfig | bound | renew。変数は udhcpc が環境で渡す
+case "$1" in
+  deconfig) busybox ifconfig "$interface" 0.0.0.0 ;;
+  bound|renew)
+    busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}"
+    [ -n "$router" ] && busybox route add default gw "$router" dev "$interface"
+    [ -n "$dns" ] && echo "nameserver $dns" > /etc/resolv.conf
+    ;;
+esac
+DHCP
+chmod 755 "$work/root/usr/share/udhcpc/default.script"
+mkdir -p "$work/root/etc"
+
 cat > "$work/root/init" <<'INIT'
 #!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
@@ -52,6 +71,13 @@ export TERM=xterm
 /bin/busybox insmod /lib/modules/af_packet.ko 2>/dev/null
 /bin/busybox insmod /lib/modules/8390.ko 2>/dev/null
 /bin/busybox insmod /lib/modules/ne2k-pci.ko 2>/dev/null
+# カードが挿さっていればDHCPを裏で回す (ELKSの rc.sys が ktcp を上げるのと
+# 同じ作法)。**挿さっていなければ何もしない** — NIC無し起動は素のまま。
+# -b: リースが取れるまで裏で粘る (線が後から生きても拾える)
+if [ -e /sys/class/net/eth0 ]; then
+  /bin/busybox ifconfig eth0 up
+  /bin/busybox udhcpc -i eth0 -b -q -s /usr/share/udhcpc/default.script >/dev/null 2>&1
+fi
 echo
 echo "  rustx86 mini initramfs — busybox shell"
 echo "  ゲーム: snake   エディタ: vi"

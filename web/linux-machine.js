@@ -229,7 +229,16 @@ export function mountLinux(canvas, opts = {}) {
             bootSecs = null;
             bannerTail = '';
             worker.postMessage(
-              { type: 'boot', kernel: kernel.buffer, initrd: initrd?.buffer, cmdline: 'console=ttyS0', ramMb: 128 },
+              {
+                type: 'boot',
+                kernel: kernel.buffer,
+                initrd: initrd?.buffer,
+                cmdline: 'console=ttyS0',
+                ramMb: 128,
+                // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
+                // macの有無だけで伝える — 線の状態はメイン側の持ち物
+                mac: opts.mac?.(),
+              },
               initrd ? [kernel.buffer, initrd.buffer] : [kernel.buffer],
             );
           }
@@ -276,6 +285,10 @@ export function mountLinux(canvas, opts = {}) {
         case 'status':
           mips = msg.mips || 0;
           idle = !!msg.idle;
+          break;
+        case 'net-tx':
+          // ゲストが送ったフレーム。行き先 (WebSocket) はメインの持ち物
+          for (const f of msg.frames) opts.onNetTx?.(new Uint8Array(f));
           break;
         case 'tone':
           // PCスピーカー。鳴らすのはメイン (WebAudioはワーカーから触れない)
@@ -344,6 +357,10 @@ export function mountLinux(canvas, opts = {}) {
     /** 文字列をゲストへ流す (貼り付け)。シリアルは受け側の行列が深いので一息でよい */
     send(text) {
       term.onData?.(text);
+    },
+    /** 外から届いたEthernetフレームをゲストへ (注入はワーカーのスライス境界) */
+    netInject(frame) {
+      if (worker && booted) worker.postMessage({ type: 'net-rx', frames: [frame.buffer] }, [frame.buffer]);
     },
     /** 実際に読んだイメージの名前 (まだ読んでいなければ空) */
     get imageName() {

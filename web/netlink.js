@@ -22,6 +22,10 @@ export class NetLink {
   /** @type {NetState} */
   state = 'wait';
   onState = null;
+  /** 届いたフレームの届け先。**張ってあれば inbox を経由しない** —
+      Linux (ワーカー) はワーカー側に自分の受信箱があるので、
+      ここで溜めるとメッセージ1往復ぶん遅れるだけになる */
+  onFrame = null;
   /** 人に見せる最後の理由 (繋がらなかったときだけ中身がある) */
   reason = '';
 
@@ -38,7 +42,11 @@ export class NetLink {
     }
     this.#ws.binaryType = 'arraybuffer';
     this.#ws.onopen = () => this.#setState('up');
-    this.#ws.onmessage = e => this.#inbox.push(new Uint8Array(e.data));
+    this.#ws.onmessage = e => {
+      const f = new Uint8Array(e.data);
+      if (this.onFrame) this.onFrame(f);
+      else this.#inbox.push(f);
+    };
     // WebSocketは失敗の理由を教えてくれない (仕様。盗み見対策)。
     // 分かるのは「開く前に閉じた=繋がらなかった」か「開いた後に閉じた=切れた」かだけ
     this.#ws.onclose = () =>
@@ -58,6 +66,11 @@ export class NetLink {
     this.state = s;
     if (s === 'up') this.reason = '';
     this.onState?.(s, this.reason);
+  }
+
+  /** フレームを1枚送る (繋がっていなければ捨てる — ケーブルの抜けたNICと同じ顔) */
+  send(frame) {
+    if (this.state === 'up') this.#ws.send(frame);
   }
 
   /** スライス境界で呼ぶ: 出ていくフレームを送り、届いたフレームを注入する */
