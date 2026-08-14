@@ -35,8 +35,12 @@ cd "$(dirname "$0")/../.."
 PORT_WS=${PORT_WS:-8188}
 PORT_HTTP=${PORT_HTTP:-8199}
 TOKEN=ci-net-e2e
-# wsslirpのバージョンは固定する (@latestは再現しない)。上げるときはここ
-WSSLIRP_PKG=${WSSLIRP_PKG:-github.com/yoshiharu-ishii/wsslirp/cmd/wsslirpd@main}
+# SLiRP backend の在り処。**cloneして自分でビルドする** —
+# `go install …@main` はモジュールプロキシ (proxy.golang.org) の写しを見るので、
+# 向こうにpushした直後は**古いコミットを掴んだまま**になる (実際に踏んだ)。
+# cloneならその瞬間のmainが確実に手に入る。手元にリポジトリがあるなら
+# WSSLIRP_DIR で指せば、cloneも走らない
+WSSLIRP_REPO=${WSSLIRP_REPO:-https://github.com/yoshiharu-ishii/wsslirp}
 
 work=$(mktemp -d)
 pids=()
@@ -62,11 +66,12 @@ pids+=($!)
 # ---- SLiRP backend。先にバイナリへ焼いてから起動する ----
 # -allow-private: 既定は公開アドレスしか通さない (開いたリレーにしないための
 # 門番)。ここは自分で立てた自分宛なので開けてよい
-if [ -n "${WSSLIRP_DIR:-}" ]; then
-  (cd "$WSSLIRP_DIR" && go build -o "$work/wsslirpd" ./cmd/wsslirpd)
-else
-  GOBIN="$work" go install "$WSSLIRP_PKG"
+src=${WSSLIRP_DIR:-}
+if [ -z "$src" ]; then
+  git clone --depth 1 -q "$WSSLIRP_REPO" "$work/wsslirp"
+  src="$work/wsslirp"
 fi
+(cd "$src" && go build -o "$work/wsslirpd" ./cmd/wsslirpd)
 "$work/wsslirpd" -listen "127.0.0.1:$PORT_WS" -token "$TOKEN" -allow-private \
   >"$work/wsslirpd.log" 2>&1 &
 pids+=($!)
