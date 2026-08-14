@@ -138,6 +138,23 @@
   }
   button.op:hover:not(:disabled) { background: #1a201a; border-color: #3d4a3d; }
   button.op:disabled { opacity: .35; cursor: default; }
+  /* **押したら沈む。** 実物のボタンは押し込まれるので、指 (マウス) の
+     動きに対して画面が黙っていると「効いたのか?」と二度押しさせてしまう */
+  button.op:active:not(:disabled), .machines button:active:not(:disabled),
+  #welcomePane .slot:active {
+    transform: translateY(1px) scale(.985);
+    background: #0f140f;
+    box-shadow: inset 0 1px 2px #0008;
+  }
+  button.op, .machines button, #welcomePane .slot {
+    transition: transform .06s, background .12s, border-color .12s;
+  }
+  /* 動きを減らす設定の人には、沈み込みだけやめて色の変化で伝える */
+  @media (prefers-reduced-motion: reduce) {
+    button.op, .machines button, #welcomePane .slot { transition: background .12s; }
+    button.op:active:not(:disabled), .machines button:active:not(:disabled),
+    #welcomePane .slot:active { transform: none; }
+  }
   button.op svg { width: 1rem; height: 1rem; flex: none; }
   button.op.icon { padding: .45rem .5rem; }
   /* 電源が入っていれば緑。**押した先ではなく今の状態**を示す (実機のランプ) */
@@ -232,6 +249,7 @@
     border: 1px solid var(--line-lit); background: #0b0e0b; color: #9fd39f;
   }
   dialog.panel .row { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; }
+  dialog.panel button.op:active:not(:disabled) { transform: translateY(1px) scale(.985); }
   dialog.panel .spacer { flex: 1 }
   dialog.panel .msg { font-size: .8rem; min-height: 1.3em; margin-top: .7rem; }
   dialog.panel .msg.ok { color: var(--green); }
@@ -357,9 +375,12 @@
              stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4"/></svg>
         再起動
       </button>
+      <!-- **絵とラベルを分けて持つ。** ボタンの文字を textContent で
+           書き換えると、中のSVGごと消えてしまう (実際に消えていた) -->
       <button class="op" id="pause" disabled>
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-        一時停止
+        <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden><path d="M8 5.2v13.6a1 1 0 0 0 1.5.87l11-6.8a1 1 0 0 0 0-1.74l-11-6.8A1 1 0 0 0 8 5.2z"/></svg>
+        <span id="pauseLabel">一時停止</span>
       </button>
       <button class="op" id="snapExport" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"

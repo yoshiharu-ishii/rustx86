@@ -145,16 +145,27 @@ function syncControls() {
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
-    $('pause').textContent = linux.paused ? '再開' : '一時停止';
+    setPauseFace(!!linux.paused);
     $('snapExport').disabled = !linux.booted;
     $('snapImport').disabled = linux.busy;
     return;
   }
   $('pause').disabled = !on;
-  $('pause').textContent = machine?.paused ? '再開' : '一時停止';
+  setPauseFace(!!machine?.paused);
   $('boot').disabled = !lastImage;
   $('snapExport').disabled = !on;
   $('snapImport').disabled = false;
+}
+
+/**
+ * 一時停止ボタンの顔。**絵とラベルの両方を替える** —
+ * 止まっているときに ⏸ が出ていると、押した先が分からない。
+ * (textContent で書き換えると中のSVGごと消えるので、要素を分けてある)
+ */
+function setPauseFace(paused) {
+  $('pauseIcon').hidden = paused;
+  $('playIcon').hidden = !paused;
+  $('pauseLabel').textContent = paused ? '再開' : '一時停止';
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
