@@ -9,7 +9,21 @@
 //
 //   RUSTX86_NET_E2E_URL='ws://127.0.0.1:8087/net?token=…' node tools/webtest/netlinux.mjs
 //
-// exit 0 = DHCPでアドレスを取り、example.com のHTMLが画面に出た。
+// exit 0 = DHCPでアドレスを取り、HTTPの応答が画面に出た。
+//
+// ## 宛先は差し替えられる (CI用)
+//
+// 既定は 1.1.1.1 と example.com = **本物のインターネット**。CIでは
+//
+//   RUSTX86_NET_E2E_PING=10.0.2.2                 (SLiRPのゲートウェイ)
+//   RUSTX86_NET_E2E_HTTP=http://10.0.2.2:8099/    (CI内に立てたHTTPサーバ)
+//   RUSTX86_NET_E2E_EXPECT=rustx86-net-ok
+//
+// を渡して**外の世界に出ない**閉じた検査にする。ゲートウェイ宛のICMPは
+// netstackが自分で答え、HTTPはwsslirpdが `-allow-private` でホストの
+// ループバックへ繋ぐ。ゲスト側が通る道 (RTL8029 → WS → netstack → TCP) は
+// 同じなので、回帰の値打ちは変わらない。
+// httpsの段はインターネット宛のときだけ走る (CI内に信頼できる証明書は無い)。
 import { readFileSync } from 'node:fs';
 import { setImmediate as yieldLoop, setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -115,10 +129,11 @@ type('ifconfig eth0 | grep "inet addr"\n');
 await waitFor('inet addr:10.0.2.15', 200, 'DHCPでアドレス取得 (10.0.2.15)');
 // ping。**実時間の定規で数える** — 時計の轡が外れると1秒1発が洪水になる
 // (実際に洪水にした)。3発が実時間2秒未満で終わったら轡が外れている
+const pingTarget = process.env.RUSTX86_NET_E2E_PING || '1.1.1.1';
 {
   const t0 = performance.now();
-  type('ping -c 3 1.1.1.1\n');
-  await waitFor('3 packets transmitted', 600, 'ping 1.1.1.1 (3発)');
+  type(`ping -c 3 ${pingTarget}\n`);
+  await waitFor('3 packets transmitted', 600, `ping ${pingTarget} (3発)`);
   const secs = (performance.now() - t0) / 1000;
   if (secs < 1.8) {
     console.log(`✗ pingが速すぎる (3発 ${secs.toFixed(1)}s) — ゲストの時計が実時間を追い越している`);
@@ -126,8 +141,13 @@ await waitFor('inet addr:10.0.2.15', 200, 'DHCPでアドレス取得 (10.0.2.15)
   }
   console.log(`✓ pingの間隔は実時間 (3発 ${secs.toFixed(1)}s)`);
 }
-// 本物のインターネットからHTMLを引く (DNS → TCP → HTTP、全部wsslirp経由)
-type('wget -q -O - http://example.com/ | grep -o "<title>.*</title>"\n');
-await waitFor('<title>Example Domain</title>', 600, 'example.com からHTMLが引けた');
+// HTTPで中身を引く。既定は本物のインターネット (DNS → TCP → HTTP、
+// 全部wsslirp経由)。CIでは宛先がCI内のサーバになり、DNSは通らずIP直打ち
+const httpUrl = process.env.RUSTX86_NET_E2E_HTTP || 'http://example.com/';
+const httpExpect = process.env.RUSTX86_NET_E2E_EXPECT || '<title>Example Domain</title>';
+// grepの網は宛先で変える — 既定はHTMLのtitle、CIは既知の合言葉そのもの
+const pattern = process.env.RUSTX86_NET_E2E_HTTP ? httpExpect : '<title>.*</title>';
+type(`wget -q -O - ${httpUrl} | grep -o "${pattern}"\n`);
+await waitFor(httpExpect, 600, `${httpUrl} から中身が引けた`);
 ws.close();
 process.exit(0);
