@@ -48,7 +48,7 @@ env:
 
 jobs:
   check:
-    name: コードチェック
+    name: 1 土台 — コードチェック
     runs-on: ubuntu-latest
     env:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
@@ -153,13 +153,19 @@ jobs:
         if: always()
         run: |
           {
-            echo '| 関門 | 結果 |'
-            echo '|---|---|'
-            echo "| テスト | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |"
-            echo "| 画面の判断 | ${{ steps.uidecide.outcome == 'success' && '✅' || '❌' }} |"
-            echo "| wasmビルド | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
-            echo "| 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
-            echo "| lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
+            echo '### 1 土台 — このジョブが見ている関門'
+            echo ''
+            echo '| 種類 | 関門 | 結果 |'
+            echo '|---|---|---|'
+            echo "| 単体 | テスト (Rust) | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 単体 | 画面の判断 (JS) | ${{ steps.uidecide.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| ビルド | wasm | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 静的 | 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 静的 | lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
+            echo ''
+            echo '上の層は別ジョブが受け持つ: **2 CPU層** (照合・互換) →'
+            echo '**3 機械層** (OS起動回帰・wasm起動) → **4 機能層**'
+            echo '(スナップショット・貼り付け)。層の意味は docs/reference/ci.md'
             echo ''
             cat report-test.md report-uidecide.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
           } >> "$GITHUB_STEP_SUMMARY"
@@ -175,7 +181,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: テスト
+          name: 1 土台 — 単体テスト (Rust)
           title: ${{ steps.test.outcome == 'success' && 'cargo test 合格' || 'cargo test 失敗' }}
           outcome: ${{ steps.test.outcome }}
           report-file: report-test.md
@@ -183,7 +189,15 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: wasmビルド
+          name: 1 土台 — 単体テスト (画面の判断・JS)
+          title: ${{ steps.uidecide.outcome == 'success' && '画面の判断は合格' || '画面の判断が壊れている' }}
+          outcome: ${{ steps.uidecide.outcome }}
+          report-file: report-uidecide.md
+          token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 1 土台 — wasmビルド
           title: ${{ steps.wasm.outcome == 'success' && 'wasm32ビルド成功' || 'wasm32ビルド失敗' }}
           outcome: ${{ steps.wasm.outcome }}
           report-file: report-wasm.md
@@ -191,7 +205,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: 整形
+          name: 1 土台 — 整形 (静的)
           title: ${{ steps.fmt.outcome == 'success' && 'cargo fmt 整形済み' || '未整形 (cargo fmt --all で直る)' }}
           outcome: ${{ steps.fmt.outcome }}
           report-file: report-fmt.md
@@ -199,7 +213,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: lint
+          name: 1 土台 — lint (静的)
           title: ${{ steps.lint.outcome == 'success' && 'clippy 指摘なし' || 'clippy 指摘あり' }}
           outcome: ${{ steps.lint.outcome }}
           report-file: report-lint.md
@@ -217,7 +231,7 @@ jobs:
 
   cosim:
     # PRではCPUの意味論に触れたときだけ (L0)。mainへのpushでは常に回す
-    name: CPU照合
+    name: 2 CPU層 — CPU照合
     if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
     needs: check
     runs-on: ubuntu-latest
@@ -257,7 +271,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: CPU照合
+          name: 2 CPU層 — CPU照合
           title: ${{ steps.cosim.outcome == 'success' && 'Unicornと一致' || '不一致あり' }}
           outcome: ${{ steps.cosim.outcome }}
           report-file: cosim-report.md
@@ -270,7 +284,7 @@ jobs:
     # 互換ピラミッドL1 (test386.asm): POST 00〜FF完走 + EE出力44926行の
     # 期待値一致 (386SX実機で採った値)。未定義フラグまで含めた総合互換の門番。
     # 発火条件はCPU照合と同じ — CPUの意味論に触れたときだけ
-    name: CPU互換
+    name: 2 CPU層 — CPU互換
     if: github.event_name != 'pull_request' || needs.check.outputs.cpu == 'true'
     needs: check
     runs-on: ubuntu-latest
@@ -326,7 +340,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: CPU互換
+          name: 2 CPU層 — CPU互換
           title: ${{ steps.t386.outcome == 'success' && 'test386 全緑 (POST FF + EE一致)' || 'test386 不合格' }}
           outcome: ${{ steps.t386.outcome }}
           report-file: t386-report.md
@@ -336,7 +350,7 @@ jobs:
         run: test "${{ steps.t386.outcome }}" = "success"
 
   wasmboot:
-    name: wasm起動
+    name: 3 機械層 — wasm起動
     # 機械層のwasm版: 「普段ネイティブ検証・Webの時だけwasm」運用の唯一の
     # 欠点 = wasmだけで壊れる変化が日常ループで見えない (タブ税・タイマ
     # クランプの前例、今後はcfg(wasm32)の道)。ここで毎push起動まで見る。
@@ -366,6 +380,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
+          tools/images/fetch-images.sh elks
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -390,9 +405,25 @@ jobs:
           grep -q 'banner=true' wasmboot-report.md
           grep -q 'snake_board=true' wasmboot-report.md
 
+      # 貼り付けのIntegration。**配分の判断 (decide.js) と装置とゲストを
+      # 一続きで見る**唯一の場所で、単体テストは配分の算数しか押さえられない。
+      # wasmもイメージもこのジョブに揃っているので、ここに相乗りさせる
+      - name: 貼り付けが欠けずに届くか (ELKS)
+        id: pastetest
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## 貼り付け — `node tools/webtest/paste.mjs`'
+            echo '```'
+            node tools/webtest/paste.mjs 2>&1 | tee /dev/stderr
+            echo '```'
+          } > paste-report.md
+
       - name: Summaryへ掲示
         if: always()
-        run: cat wasmboot-report.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: cat wasmboot-report.md paste-report.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: 掲示板トークン
         id: app
@@ -404,17 +435,27 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: wasm起動
+          name: 3 機械層 — wasm起動
           title: ${{ steps.wasmboot.outcome == 'success' && 'ブラウザ版もLinuxが起動する' || 'wasmで起動しない' }}
           outcome: ${{ steps.wasmboot.outcome }}
           report-file: wasmboot-report.md
           token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 4 機能層 — 貼り付け
+          title: ${{ steps.pastetest.outcome == 'success' && '並びどおり届き、細切れでもない' || '貼り付けが壊れている' }}
+          outcome: ${{ steps.pastetest.outcome }}
+          report-file: paste-report.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
-        run: test "${{ steps.wasmboot.outcome }}" = "success"
+        run: |
+          test "${{ steps.wasmboot.outcome }}" = "success"
+          test "${{ steps.pastetest.outcome }}" = "success"
 
   snapshot:
-    name: スナップショット
+    name: 4 機能層 — スナップショット
     # 保存/復元のIntegration: 往復ビット不変 + 復元の透明性 (K命令後の全状態一致)。
     #
     # 位置は**機能層** — 互換ピラミッドの最上段 (docs/reference/ci.md):
@@ -475,7 +516,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: スナップショット
+          name: 4 機能層 — スナップショット
           title: ${{ steps.snaptest.outcome == 'success' && '往復ビット不変・復元は観測不能' || '保存/復元が壊れている' }}
           outcome: ${{ steps.snaptest.outcome }}
           report-file: snap-report.md
@@ -485,7 +526,7 @@ jobs:
         run: test "${{ steps.snaptest.outcome }}" = "success"
 
   regress:
-    name: OS起動回帰
+    name: 3 機械層 — OS起動回帰
     # PRでは回さない (ユーザー決定 2026-08-12): PRの門番はコードチェック+CPU層、
     # 機械層 (ここ+スナップショット) は**mainに載る瞬間**の門番。将来ここに
     # 4OSバイナリ互換スイート (docs/reference/ci.md の互換ピラミッド) が加わる。
@@ -574,7 +615,7 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: OS起動回帰
+          name: 3 機械層 — OS起動回帰
           title: ${{ steps.regress.outcome == 'success' && 'ELKS / FreeDOS / Linux 合格' || '失敗あり' }}
           outcome: ${{ steps.regress.outcome }}
           report-file: regress.md
@@ -587,7 +628,7 @@ jobs:
   # ---- 合流点。全部通って初めて OK ----
 
   ok:
-    name: OK
+    name: OK (全層)
     if: always()
     needs: [check, cosim, compat386, regress, wasmboot, snapshot]
     runs-on: ubuntu-latest
