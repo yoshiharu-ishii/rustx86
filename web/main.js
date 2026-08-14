@@ -16,6 +16,11 @@ import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
 import { Speaker } from './speaker.js';
 import { NetLink } from './netlink.js';
+// 画面の**判断**は decide.js に集めてある (node --test で押さえられる)。
+// ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
+import {
+  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar,
+} from './decide.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -40,9 +45,11 @@ const ORIGIN_LABEL = { library: 'ライブラリ', image: 'イメージ', snapsh
 
 // ---------- ネットワーク ----------
 //
-// **既定は繋がない。** 電源を入れた機械にLANケーブルが刺さっていないのと
-// 同じ、ごく普通の状態である (NIC無し起動のビット同一 = ADR-0017 の不変条件も
-// これで守られる)。繋ぎたくなったらツールバーのLANポートを押す。
+// **既定で繋いでおく。** 机の裏でLANケーブルが刺さっているのが普通の姿で、
+// 使うたびに挿し直させる理由がない。相手が居なければ赤が点くだけで、機械は
+// 「リンクの無いNIC」を積んで普通に起動する。挿さずに起動したいときは ?net=off
+// (NIC無し起動のビット同一 = ADR-0017 の不変条件は、CIのheadlessが
+//  NICを挿さないので今までどおり守られる)。
 //
 // 繋ぎ先は2通りの決まり方をする:
 //   1. URLの ?net= — E2Eや自動化のための**上書き**。これがあれば即座に試し、
@@ -52,22 +59,9 @@ const ORIGIN_LABEL = { library: 'ライブラリ', image: 'イメージ', snapsh
 const NET_DEFAULT_URL = 'ws://127.0.0.1:8087/net';
 const NET_STORE = 'rustx86.net';
 
-/**
- * ?net= の繋ぎ先 (無指定と ?net=off は null)。
- * ?net=1 は手元のSLiRP backend、?net=off は「挿さずに起動する」
- */
+/** ?net= の繋ぎ先 (無指定と ?net=off は null) */
 function netFromQuery() {
-  const q = new URLSearchParams(location.search);
-  const net = q.get('net');
-  if (!net || net === 'off') return null;
-  const base = net === '1' ? NET_DEFAULT_URL : net;
-  const token = q.get('nettoken');
-  return token ? withToken(base, token) : base;
-}
-
-function withToken(url, token) {
-  if (!token) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+  return netUrlFromQuery(location.search, NET_DEFAULT_URL);
 }
 
 /** ブラウザが覚えている設定。{url, token} */
@@ -89,14 +83,9 @@ function netSaved() {
  */
 let link = null;
 
-/**
- * 起動スクリプト。**線が生きているときだけ** netScript の続きも流す。
- * リンクが死んでいるのにDHCPを打たせると、30秒待って諦めるのを
- * 黙って見せることになる (カードはあるがケーブルが繋がっていない状態)
- */
-function scriptFor(m) {
-  if (!m?.script) return m?.script;
-  return link?.state === 'up' && m.netScript ? [...m.script, ...m.netScript] : m.script;
+/** 起動スクリプト (判断は decide.js。ここは今のリンク状態を渡すだけ) */
+function scriptOf(m) {
+  return scriptFor(m, link?.state === 'up');
 }
 
 // ---------- スナップショット ----------
@@ -148,7 +137,7 @@ function syncControls() {
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
   // 16bit (ELKS/DOS) はISAのNE2000。32bitのLinuxはISAを知らないので
   // PCIのRTL8029になる — こちらはまだ無い (ADR-0017 5c)
-  const nic = nicFor();
+  const nic = nicFor(!!linux);
   $('netSel').querySelector('option[value="on"]').textContent = nic.label;
   $('netSel').disabled = !nic.usable;
   $('netSel').title = nic.usable ? NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off : nic.why;
@@ -209,12 +198,9 @@ function boot(image, label) {
   // **NICを挿すのは電源を入れるこの瞬間だけ。** 起動時にしか装置を探さない
   // ゲスト (ELKSのカーネル) が居るので、後から挿しても見えない — 実機と同じ
   if (link) attachNet(machine);
-  // 物理キーはそのまま、貼り付けはASCIIとして送る。
-  // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
-  // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
-  // ¥キーで A:\> のパスが打てるのは、歴史的にはむしろ正しい姿である
+  // 物理キーはそのまま、貼り付けはASCIIとして送る (¥→\ の理由は decide.js)
   term.onKey = (code, down) => machine.key(code, down);
-  term.onChar = ch => machine.typeChar(ch === '¥' ? '\\' : ch);
+  term.onChar = ch => machine.typeChar(guestChar(ch));
   term.onPaste = text => machine.paste(text.replaceAll('¥', '\\'));
 
   // 動作確認用の窓口。手元で開いているときだけ出す
@@ -349,7 +335,7 @@ const dbg = new Debugger({
     }
     if (!current) return;
     await bootFromUrl(current);
-    startScript(scriptFor(current));
+    startScript(scriptOf(current));
   },
 });
 
@@ -495,16 +481,6 @@ function netDialogSync() {
   }
 }
 
-/**
- * この機械に挿さるNIC。**バスがOSの世代を決める** —
- * ISAを知らないOSにISAのカードを挿しても見えない (逆も同じ)
- */
-function nicFor() {
-  return linux
-    ? { label: 'RTL8029 (PCI) — 未実装', usable: false, why: 'PCIバスとRTL8029はこれから (ADR-0017 5c)' }
-    : { label: 'NE2000 (ISA 0x300)', usable: true };
-}
-
 /** ネットワークの設定画面を開く (今の設定を入れてから) */
 function openNetDialog() {
   const saved = netSaved();
@@ -578,7 +554,7 @@ $('power').addEventListener('click', async () => {
     setStatus('電源を切りました。もう一度押すと同じイメージで立ち上がります');
   } else if (lastImage) {
     boot(lastImage, lastLabel);
-    startScript(scriptFor(current));
+    startScript(scriptOf(current));
   }
   syncControls();
 });
@@ -616,7 +592,7 @@ $('boot').addEventListener('click', () => {
   // ラベルも保つ (ここで 'ディスク' に潰すと、左のディスク欄が化ける)
   if (lastImage) {
     boot(lastImage, lastLabel || 'ディスク');
-    startScript(scriptFor(current));
+    startScript(scriptOf(current));
   }
 });
 
@@ -801,26 +777,6 @@ async function insertMedia(f) {
   boot(bytes, f.name);
 }
 
-/**
- * 起動できるディスクか。**先頭512バイトの末尾にある 0x55AA** が、
- * 1981年から変わっていない「ここから起動してよい」の印である
- * (core側も同じ検査をする。ここで見るのは、日本語で理由を言うため)
- */
-function isBootable(b) {
-  return b.length >= 512 && b[510] === 0x55 && b[511] === 0xaa;
-}
-
-/**
- * Linuxカーネルか。**先頭のELF印**(vmlinux)か、
- * **setupヘッダの "HdrS"**(bzImage、0x202固定)で見分ける。
- * どちらもブートセクタとは形が違うので、取り違えようがない
- */
-function isKernel(b) {
-  const elf = b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46;
-  const hdrs =
-    b.length > 0x206 && b[0x202] === 0x48 && b[0x203] === 0x64 && b[0x204] === 0x72 && b[0x205] === 0x53;
-  return elf || hdrs;
-}
 
 // ---------- 起動シナリオ ----------
 //
@@ -1022,7 +978,7 @@ async function select(m, { autoBoot = true } = {}) {
 
   bootOrigin = 'library';
   await bootFromUrl(m);
-  startScript(scriptFor(m));
+  startScript(scriptOf(m));
   dbg.reset();
 }
 
