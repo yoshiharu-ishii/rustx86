@@ -89,6 +89,27 @@ impl Fpu {
         self.top = (self.top + 1) & 7;
     }
 
+    /// st(i) が空か (FXSAVEの簡約タグ用)
+    pub fn st_empty(&self, i: usize) -> bool {
+        self.empty & (1 << self.phys(i)) != 0
+    }
+
+    /// st(i) の生の値 (空でも読む — FXSAVEは8本全部書く)
+    pub fn st_raw(&self, i: usize) -> f64 {
+        self.regs[self.phys(i)]
+    }
+
+    /// st(i) へ書き戻す (FXRSTOR用)。valid=false なら空印を立てる
+    pub fn set_st_raw(&mut self, i: usize, v: f64, valid: bool) {
+        let p = self.phys(i);
+        self.regs[p] = v;
+        if valid {
+            self.empty &= !(1 << p);
+        } else {
+            self.empty |= 1 << p;
+        }
+    }
+
     /// タグワード (2bit×8、物理番号順)。00=有効 01=ゼロ 10=特殊 11=空
     fn tag_word(&self) -> u16 {
         let mut w = 0u16;
