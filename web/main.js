@@ -105,7 +105,6 @@ function setStatus(text, warn = false) {
 
 /** ツールバーの表示を実際の状態に合わせる */
 function syncControls() {
-  syncCopyable(); // 機械が替われば選択も消える (端末の reset が落とす)
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
@@ -301,17 +300,10 @@ for (const bar of document.querySelectorAll('.bar')) {
 
 // --- コンソールの見出しにある2つ: コピーとペースト ---
 //
-// **ペーストはキーを打つのと同じ。** クリップボードの中身を1文字ずつ
-// ゲストへ流し込む — 画面を消す「クリア」より、長いコマンドを持ち込める
-// こちらの方が要る (DOSのパスやURLは打つのが面倒なので)
-$('paste').addEventListener('click', () => requestPaste());
-
-// ボタンにも組みを添える。**その環境の組みだけ出す** —
+// 右クリックのメニューに組みを添える。**その環境の組みだけ出す** —
 // Macに Ctrl+Shift+C と書いても、押す人は居ない
 {
   const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
-  $('copy').title = `選んだ範囲をコピー (${mac ? '⌘C' : 'Ctrl+Shift+C'})`;
-  $('paste').title = `クリップボードをゲストへ打ち込む (${mac ? '⌘V' : 'Ctrl+Shift+V'})`;
   $('mCopyKey').textContent = mac ? '⌘C' : 'Ctrl+Shift+C';
   $('mPasteKey').textContent = mac ? '⌘V' : 'Ctrl+Shift+V';
 }
@@ -429,14 +421,6 @@ async function doCopy() {
   else setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
 }
 
-/** 選んでいなければコピーは押せない (ボタンも右クリックも同じ判断)。
-    **変わったときだけ触る** — ドラッグ中は動かすたびに呼ばれるので、
-    毎回DOMへ書くと見た目の計算をやり直させることになる */
-function syncCopyable() {
-  const off = !hasSelection();
-  if ($('copy').disabled !== off) $('copy').disabled = off;
-}
-
 /**
  * 貼り付けを頼まれたときの入口。
  *
@@ -485,6 +469,9 @@ function deliverPaste(text) {
 // 画面全文 (1558文字) を貼ったら数十文字しか届かなかったのはこれである。
 // 行列の空きを見ながら、空いた分だけ流す。
 
+/** 1刻み (16ms) に足す文字数の上限。**上げすぎると環を溢れさせる** */
+const PASTE_PER_TICK = 2;
+
 /** 貼り付け待ちの残り */
 let pasteQueue = '';
 let pasteTimer = null;
@@ -517,14 +504,21 @@ function startPaste(text) {
       setStatus('貼り付けました');
       return;
     }
-    // **配りきるまで次を渡さない。** 8042は1タイマー刻みに1バイトしか
-    // 配らないので、空きだけを見て流すと行列に積み上がるだけになる
-    if (machine.emu.key_backlog() > 0) return;
-    const room = biosKeyRoom();
-    if (room <= 0) return; // BIOSの行列が埋まっている。ゲストが読むまで待つ
-    const chunk = pasteQueue.slice(0, room);
-    pasteQueue = pasteQueue.slice(chunk.length);
-    machine.paste(chunk);
+    // **細く、途切れさせずに流す。**
+    //
+    // 以前は「行列が空になるまで待って、空いた分をまとめて投げる」作りだった。
+    // 15文字がどっと出て、はけるまで数百ミリ秒止まる、の繰り返しになるので、
+    // 見ていると出ては止まりのカクカクになる。
+    //
+    // 詰まりは2段ある。8042の行列 (まだゲストへ配っていないスキャンコード) と、
+    // BIOSの環 (16枠、ゲストが読むまで空かない)。どちらにも余裕がある分だけ
+    // 毎刻み少しずつ足せば、詰めずに流し続けられる
+    const inflight = Math.ceil(machine.emu.key_backlog() / 2); // 1文字 = 押す/離すの2バイト
+    const room = biosKeyRoom() - inflight; // 配送中の分も席を取る
+    if (room < 2) return; // 余裕が無い。ゲストが読むまで足さない
+    const n = Math.min(room - 1, PASTE_PER_TICK, pasteQueue.length);
+    machine.paste(pasteQueue.slice(0, n));
+    pasteQueue = pasteQueue.slice(n);
     if (pasteQueue) setStatus(`貼り付け中… 残り ${pasteQueue.length} 文字`);
   }, 16);
 }
@@ -550,8 +544,6 @@ function biosKeyRoom() {
   return Math.max(0, 16 - 1 - used);
 }
 
-$('copy').addEventListener('click', () => doCopy());
-
 // **クリップボードの取っ手は機械に依らないので、ここで一度だけ張る。**
 // boot() の中で張っていたときは、Linuxを直接起動した回では張られず、
 // 組みでの貼り付けが黙って効かなかった。行き先 (doCopy / requestPaste) が
@@ -561,8 +553,7 @@ $('copy').addEventListener('click', () => doCopy());
 term.onPaste = text => requestPaste(text);
 term.onPasteRequest = () => requestPaste();
 term.onCopyRequest = () => doCopy();
-term.onSelect = syncCopyable;
-syncCopyable();
+
 
 // --- デバッガの子ウインドウ ---
 //
@@ -683,14 +674,16 @@ function syncVmCard() {
   $('vmState').textContent = !live ? '停止中' : paused ? `一時停止中${via}` : `実行中${via}`;
   // **名前も素性に合わせる。** 落としたイメージで動いているのに一覧で
   // 選んだOS名が出ていると、別物を見ていることになる
-  const name = bootOrigin === 'library' ? current?.label : lastLabel || current?.label;
+  // Linuxは自分が読んだカーネル名を持っている。**前の機械のラベルを使わない**
+  const imageLabel = linux ? linux.imageName || lastLabel : lastLabel;
+  const name = bootOrigin === 'library' ? current?.label : imageLabel || current?.label;
   $('vmName').textContent = live || bootOrigin ? name ?? '—' : 'マシンを選んでください';
 
   const showOrigin = live && !!bootOrigin;
   $('originRow').hidden = !showOrigin;
   if (showOrigin) {
     $('originKind').textContent = `起動元：${ORIGIN_LABEL[bootOrigin]}`;
-    $('originName').textContent = lastLabel || current?.file || '—';
+    $('originName').textContent = imageLabel || current?.file || '—';
   }
 }
 
@@ -698,8 +691,10 @@ function syncVmCard() {
 function syncSidebar() {
   const conJp = $('layout').value === 'jp' ? 'JIS 配列' : 'US 配列';
   $('devCon').textContent = linux ? 'シリアル (ttyS0)' : conJp;
-  $('devDisk').textContent = lastLabel || (linux ? 'initramfs' : '—');
-  $('infoImage').textContent = lastLabel || '—';
+  // Linuxのときは自分が読んだ名前を使う (前の機械のラベルを引きずらない)
+  const imageLabel = linux ? linux.imageName : lastLabel;
+  $('devDisk').textContent = linux ? 'initramfs-mini' : lastLabel || '—';
+  $('infoImage').textContent = imageLabel || '—';
   // 機種とRAMは機械自身に聞く (デバッガと同じ出どころ)
   try {
     const j = JSON.parse(machine?.emu.cpu_json() ?? 'null');
@@ -1227,7 +1222,6 @@ async function select(m, { autoBoot = true } = {}) {
       onPaste: text => requestPaste(text),
       onPasteRequest: () => requestPaste(),
       onCopyRequest: () => doCopy(),
-      onSelect: syncCopyable,
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
       onTone: hz => speaker.update(hz),

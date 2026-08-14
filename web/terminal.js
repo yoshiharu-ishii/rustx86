@@ -107,8 +107,6 @@ export class Terminal {
     this.offset = 0;
     this.cursor = { row: 0, col: 0, visible: true };
     this.selection = null; // {a:{row,col}, b:{row,col}} — 表示上の座標
-    /** 選び直されたときに呼ばれる (コピーの可否を出し分けるため) */
-    this.onSelect = null;
 
     /** キーが押された/離されたときに呼ばれる。(code, down) => boolean */
     this.onKey = null;
@@ -482,7 +480,6 @@ export class Terminal {
         dragging = 'select';
         this.selection = { a: { row: p.row, col: p.col }, b: { row: p.row, col: p.col } };
         this.draw();
-        this.onSelect?.();
       }
       c.focus();
       e.preventDefault();
@@ -492,7 +489,6 @@ export class Terminal {
         const p = this.#cellAt(e);
         this.selection.b = { row: p.row, col: p.col };
         this.draw();
-        this.onSelect?.();
       } else if (dragging === 'scrollbar') {
         this.#scrollbarTo(e);
       }
