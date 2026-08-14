@@ -196,11 +196,14 @@ fn freedos() -> Outcome {
 /// 決定的な命令数も見張る (大きく増えたら意味の後退を疑う)
 fn linux() -> Outcome {
     let name = "32bit回帰: Linux 6.18 (Alpine)";
-    // vmlinux優先 (解凍ステブ無し)。上限は現測定+30%: vmlinux 580M → 750M
+    // vmlinux優先 (解凍ステブ無し)。上限は現測定+30%: vmlinux 770M → 1000M。
+    // 2026-08-14にinitramfsへTLS一式 (ssl_client + libssl/libcrypto + CA束) を
+    // 積んで 1.4→4.1MB になり、cpio展開のぶん 580M → 770M へ増えた。
+    // **積んだ荷物の重さであって意味の後退ではない** — 荷物を変えたら測り直す
     let (kernel, budget) = match std::fs::read(img("vmlinux-lts")) {
-        Ok(k) => (k, 750_000_000u64),
+        Ok(k) => (k, 1_000_000_000u64),
         Err(_) => match std::fs::read(img("vmlinuz-lts")) {
-            Ok(k) => (k, 1_300_000_000u64), // bzImage 971M → +30%
+            Ok(k) => (k, 1_500_000_000u64), // bzImage 1160M → +30%
             Err(_) => {
                 return Outcome {
                     name,
