@@ -651,17 +651,40 @@ $('save').addEventListener('click', () => {
 // --- ディスクイメージの受け取り ---
 
 const consoleBox = $('console');
+
+/**
+ * イメージを受け取れるのは**スタート画面だけ**。
+ *
+ * 走っている機械の画面に落とせてしまうと、電源の入ったPCにフロッピーを
+ * 差し込んだら勝手に再起動した、という乱暴な挙動になる。一度立ち上げたら
+ * まず電源を切る — 実機と同じ順序を守らせる。
+ * (別のイメージに移りたいときは、左のOSライブラリか「イメージを開く…」から)
+ */
+function acceptsDrop() {
+  return !$('welcomePane').hidden;
+}
+
 // **子要素をまたぐたびに dragleave が飛ぶ**ので、素直に付け外しすると
 // 枠が明滅する。入った回数を数えて、0になったときだけ消す
 let dragDepth = 0;
+// **どこに落ちてもブラウザには開かせない。** 既定の動作はファイルを開くこと
+// なので、素通しにするとページごと差し替わり、走っていた機械が消える
+for (const ev of ['dragover', 'drop']) {
+  document.addEventListener(ev, e => {
+    e.preventDefault();
+    if (e.type === 'dragover' && e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+  });
+}
+
 consoleBox.addEventListener('dragenter', e => {
   e.preventDefault();
-  if (++dragDepth === 1) consoleBox.classList.add('drop');
+  if (acceptsDrop() && ++dragDepth === 1) consoleBox.classList.add('drop');
 });
 consoleBox.addEventListener('dragover', e => {
   e.preventDefault();
+  e.stopPropagation(); // 上の「受け取らない」既定を、この枠の中だけ上書きする
   // 「コピーして取り込む」の意思表示。これが無いとカーソルが禁止マークになる
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  if (e.dataTransfer) e.dataTransfer.dropEffect = acceptsDrop() ? 'copy' : 'none';
 });
 consoleBox.addEventListener('dragleave', () => {
   if (--dragDepth <= 0) {
@@ -673,6 +696,12 @@ consoleBox.addEventListener('drop', async e => {
   e.preventDefault();
   dragDepth = 0;
   consoleBox.classList.remove('drop');
+  if (!acceptsDrop()) {
+    // 黙って捨てない。**なぜ入らないのかと、どうすれば入るのかを言う**。
+    // 電源を切っても机の上には機械が残っているので、入口は左のメディア口になる
+    setStatus('動いている機械にはイメージを入れられません。左の「イメージを開く…」から差し替えてください', true);
+    return;
+  }
   const f = e.dataTransfer?.files?.[0];
   if (f) insertMedia(f);
 });
