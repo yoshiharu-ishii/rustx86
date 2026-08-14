@@ -368,12 +368,15 @@ jobs:
         with:
           node-version: 22
 
+      # **同じキーなら同じ中身にする。** 3つのジョブが同じキーで別々の組を
+      # 入れていたため、先に走った方の中身が全員に配られていた。ELKSの無い
+      # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -381,6 +384,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
           tools/images/fetch-images.sh elks
+          tools/images/fetch-images.sh freedos-boot
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -473,12 +477,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
 
+      # **同じキーなら同じ中身にする。** 3つのジョブが同じキーで別々の組を
+      # 入れていたため、先に走った方の中身が全員に配られていた。ELKSの無い
+      # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -486,6 +493,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cpio unzip
           tools/images/fetch-images.sh elks
+          tools/images/fetch-images.sh freedos-boot
           tools/images/fetch-images.sh linux
           tools/images/extract-vmlinux.sh
           tools/images/make-mini-initramfs.sh
@@ -544,12 +552,15 @@ jobs:
       # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
       # 入手経路は tools/images/fetch-images.sh ただ一つ — CIだけの取り方を作ると
       # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
+      # **同じキーなら同じ中身にする。** 3つのジョブが同じキーで別々の組を
+      # 入れていたため、先に走った方の中身が全員に配られていた。ELKSの無い
+      # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
         uses: actions/cache@v4
         with:
           path: images
-          key: os-images-v1-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v2-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
