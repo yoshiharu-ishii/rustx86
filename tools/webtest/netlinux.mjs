@@ -90,7 +90,11 @@ async function step(slices, size = 10_000_000) {
       console.log(`[TRAP] ${tr}`);
       process.exit(1);
     }
-    virtualMs += size / INSTR_PER_GUEST_MS + emu.take_idle_skipped() / INSTR_PER_GUEST_MS;
+    // 早送りぶんは足さない — run_slice(n) は「TSCがn進むまで」の契約で、
+    // HLTの早送りもTSCを進めるので size に既に入っている (両方足すと
+    // ゲストの1秒が実時間2秒になる)。読むのはカウンタを空にするため
+    emu.take_idle_skipped();
+    virtualMs += size / INSTR_PER_GUEST_MS;
     const realMs = performance.now() - clockT0;
     // **借りの上限。** 起動中は実時間が先行する (wasmは想定76 MIPSより遅い)。
     // その貸しを後のアイドルでまとめて返させると、返している間の

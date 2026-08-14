@@ -252,7 +252,12 @@ function loop() {
   //
   // 逆向き (実時間が先行) は放置でよいが、**上限を置く** — 一時停止や重い
   // ホストで実時間が何分も先行した後、その分をまとめて回すと結局洪水になる
-  virtualMs += sliceSize / INSTR_PER_GUEST_MS + skippedMs;
+  // **早送りぶんを足してはいけない。** `run_slice(n)` は「TSCが n 進むまで」
+  // 回る契約で、HLTの早送りもTSCを進めるので、飛ばした時間は既に sliceSize の
+  // 中に入っている。両方足すと仮想時間が実際の倍のペースで溜まり、その借りを
+  // 実時間で返すので **ゲストの1秒が実時間2秒になる** (sleep 5 が10秒かかった)。
+  // skippedMs はアイドル判定 (上の idle) にだけ使う
+  virtualMs += sliceSize / INSTR_PER_GUEST_MS;
   const realMs = now - clockT0;
   if (virtualMs < realMs - 100) virtualMs = realMs - 100;
   const aheadMs = virtualMs - realMs;
