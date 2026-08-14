@@ -87,6 +87,19 @@ jobs:
             exit ${RC:-0}
           } > report-test.md
 
+      - name: 画面の判断
+        id: uidecide
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## 画面の判断 — `node --test tools/webtest/*.test.mjs`'
+            echo '```'
+            node --test "tools/webtest/*.test.mjs" 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > report-uidecide.md
+
       - name: wasmビルド
         id: wasm
         continue-on-error: true
@@ -143,11 +156,12 @@ jobs:
             echo '| 関門 | 結果 |'
             echo '|---|---|'
             echo "| テスト | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 画面の判断 | ${{ steps.uidecide.outcome == 'success' && '✅' || '❌' }} |"
             echo "| wasmビルド | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
             echo "| 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
             echo "| lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
             echo ''
-            cat report-test.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
+            cat report-test.md report-uidecide.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 合否掲示板への発行。1関門=1行、本文は右ペイン ----
@@ -194,6 +208,7 @@ jobs:
       - name: 合否判定
         run: |
           test "${{ steps.test.outcome }}" = "success" \
+            && test "${{ steps.uidecide.outcome }}" = "success" \
             && test "${{ steps.wasm.outcome }}" = "success" \
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"

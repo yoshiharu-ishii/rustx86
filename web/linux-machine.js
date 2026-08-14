@@ -30,9 +30,17 @@ let sharedTerm = null;
 export function mountLinux(canvas, opts = {}) {
   const term = (sharedTerm ??= new AnsiTerminal(canvas, { cols: 80, rows: 24 }));
   term.reset();
+  // クリップボードの行き先は**呼び手 (main.js) の一本道**。
+  // ここで onData へ直に流していたので、VGA機とは別の作法になっていた
+  term.onPaste = (text) => opts.onPaste?.(text);
+  term.onPasteRequest = () => opts.onPasteRequest?.();
+  term.onCopyRequest = () => opts.onCopyRequest?.();
   const status = (msg, err = false) => opts.onStatus?.(msg, err);
 
   let worker = null;
+  /** 実際に読んだイメージの名前。**画面の「起動元」に出す** —
+      前の機械のラベル (fd2880.img) が残ると、別物を見ていることになる */
+  let imageName = '';
   let booted = false;
   let paused = false;
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
@@ -127,7 +135,14 @@ export function mountLinux(canvas, opts = {}) {
    * やめた (2026-08-13)。復元はユーザーの明示操作 (.rx86snapの書出/復元、
    * Tier 3g) だけ — その場合は `{ snapshot }` でここへ入る
    */
-  async function boot({ snapshot: given = null } = {}) {
+  /**
+   * @param {object} [o]
+   * @param {Uint8Array} [o.snapshot] 起動済みの状態から戻す
+   * @param {Uint8Array} [o.kernel] **持ち込みのカーネル** (ドロップされた
+   *   vmlinux / bzImage)。指定があれば取りに行かず、これを起動する
+   * @param {string} [o.kernelName] 画面に出す名前
+   */
+  async function boot({ snapshot: given = null, kernel: givenKernel = null, kernelName = '' } = {}) {
     if (busy) return;
     busy = true;
     booted = false;
@@ -140,7 +155,18 @@ export function mountLinux(canvas, opts = {}) {
     let kernel = null;
     let initrd = null;
 
-    if (!snapshot) {
+    if (!snapshot && givenKernel) {
+      // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
+      // カーネルだけ落とされても、ルートFSが無ければシェルに着けないので
+      kernel = givenKernel;
+      imageName = kernelName || 'カーネル';
+      status(`${imageName} を起動します`);
+      try {
+        initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+      } catch {
+        initrd = null;
+      }
+    } else if (!snapshot) {
       // **既定は bzImage — 自己解凍ステブごと実行する本物のフル起動。**
       // 実機がやることを全部やるのがこのエミュレータの意味なので、
       // 速さのための近道 (vmlinux直接ロード) は ?kernel=vmlinux の
@@ -151,11 +177,13 @@ export function mountLinux(canvas, opts = {}) {
           if (!wantVmlinux) throw new Error('既定はbzImage');
           // vmlinux (非圧縮ELF): 自己解凍ステブをホスト側の展開で飛ばす近道
           const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
+          imageName = 'vmlinux-lts.gz';
           status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
           const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
           kernel = new Uint8Array(await new Response(ds).arrayBuffer());
         } catch {
           kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル (bzImage)');
+          imageName = 'vmlinuz-lts';
         }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
@@ -312,6 +340,22 @@ export function mountLinux(canvas, opts = {}) {
         スナップショット起動でも画面に見えている分は必ず入る */
     get logText() {
       return term.allText();
+    },
+    /** 文字列をゲストへ流す (貼り付け)。シリアルは受け側の行列が深いので一息でよい */
+    send(text) {
+      term.onData?.(text);
+    },
+    /** 実際に読んだイメージの名前 (まだ読んでいなければ空) */
+    get imageName() {
+      return imageName;
+    },
+    /** 何か選ばれているか (中身は組み立てない) */
+    hasSelection() {
+      return term.hasSelection();
+    },
+    /** ドラッグで選んだ文字列 (何も選んでいなければ空) */
+    selectedText() {
+      return term.selectedText();
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {

@@ -16,6 +16,12 @@ import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
 import { Speaker } from './speaker.js';
 import { NetLink } from './netlink.js';
+// 画面の**判断**は decide.js に集めてある (node --test で押さえられる)。
+// ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
+import {
+  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
+  THEMES, nextTheme, resolveTheme, menuAbility, pasteChunk,
+} from './decide.js';
 
 const $ = id => document.getElementById(id);
 const term = new Terminal($('screen'), { scrollback: 1000 });
@@ -27,14 +33,28 @@ for (const ev of ['keydown', 'pointerdown']) {
 }
 
 let machine = null;
+/** Linuxを選んでいるときの取っ手 (選んでいなければ null)。
+    **machine と並べて先に置く** — 画面の判断 (コピーの可否など) が
+    読み込みの早い段階で参照するので、宣言が後ろにあると触れない */
+let linux = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
 
+/**
+ * **何から起動したVMなのか。** 一覧のどれを選んだかとは別物で、
+ * 落としたイメージや復元した状態から動いていることもある
+ * @type {'library'|'image'|'snapshot'|null}
+ */
+let bootOrigin = null;
+const ORIGIN_LABEL = { library: 'ライブラリ', image: 'イメージ', snapshot: '状態復元' };
+
 // ---------- ネットワーク ----------
 //
-// **既定は繋がない。** 電源を入れた機械にLANケーブルが刺さっていないのと
-// 同じ、ごく普通の状態である (NIC無し起動のビット同一 = ADR-0017 の不変条件も
-// これで守られる)。繋ぎたくなったらツールバーのLANポートを押す。
+// **既定で繋いでおく。** 机の裏でLANケーブルが刺さっているのが普通の姿で、
+// 使うたびに挿し直させる理由がない。相手が居なければ赤が点くだけで、機械は
+// 「リンクの無いNIC」を積んで普通に起動する。挿さずに起動したいときは ?net=off
+// (NIC無し起動のビット同一 = ADR-0017 の不変条件は、CIのheadlessが
+//  NICを挿さないので今までどおり守られる)。
 //
 // 繋ぎ先は2通りの決まり方をする:
 //   1. URLの ?net= — E2Eや自動化のための**上書き**。これがあれば即座に試し、
@@ -44,19 +64,9 @@ let lastImage = null;
 const NET_DEFAULT_URL = 'ws://127.0.0.1:8087/net';
 const NET_STORE = 'rustx86.net';
 
-/** ?net= の指定 (無ければ null)。?net=1 は手元のwsslirpdの意味 */
+/** ?net= の繋ぎ先 (無指定と ?net=off は null) */
 function netFromQuery() {
-  const q = new URLSearchParams(location.search);
-  const net = q.get('net');
-  if (!net) return null;
-  const base = net === '1' ? NET_DEFAULT_URL : net;
-  const token = q.get('nettoken');
-  return token ? withToken(base, token) : base;
-}
-
-function withToken(url, token) {
-  if (!token) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+  return netUrlFromQuery(location.search, NET_DEFAULT_URL);
 }
 
 /** ブラウザが覚えている設定。{url, token} */
@@ -69,7 +79,7 @@ function netSaved() {
 }
 
 /**
- * 網元への結線。**これはケーブルであって、機械の部品ではない。**
+ * SLiRP backendへの結線。**これはケーブルであって、機械の部品ではない。**
  *
  * 実機でも、LANケーブルを生きたスイッチに挿せばリンクランプは点く —
  * その machine が起動しているかも、OSがドライバを持っているかも関係ない。
@@ -78,10 +88,9 @@ function netSaved() {
  */
 let link = null;
 
-/** 起動スクリプト。ネットが繋がっている機械は netScript の続きも流す */
-function scriptFor(m) {
-  if (!m?.script) return m?.script;
-  return link && m.netScript ? [...m.script, ...m.netScript] : m.script;
+/** 起動スクリプト (判断は decide.js。ここは今のリンク状態を渡すだけ) */
+function scriptOf(m) {
+  return scriptFor(m, link?.state === 'up');
 }
 
 // ---------- スナップショット ----------
@@ -99,9 +108,28 @@ function syncControls() {
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
-  // スタート画面では両段とも伏せる。**まだ机に何も置いていないのだから、
-  // 机の備品も操作列も出す意味がない** — 選ぶことに集中させる
-  for (const t of document.querySelectorAll('.toolbar')) t.hidden = onWelcome;
+  // スタート画面では機械まわりを丸ごと伏せる。**まだ机に何も置いていないの
+  // だから、備品も操作列も状態カードも出す意味がない** — 選ぶことに集中させる
+  for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'devCard', 'infoCard']) {
+    $(id).hidden = onWelcome;
+  }
+  // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か。
+  // **SVGに .hidden = で代入しても効かない** — hidden は HTMLElement の
+  // プロパティで、SVGElement には無い (代入するとJSの変数が生えるだけで
+  // 属性は変わらないため、読み返すと辻褄が合って気づけない)。属性で操作する
+  setHidden($('footGuide'), !onWelcome);
+  setHidden($('footDisk'), onWelcome);
+  // **「スタート」は起動したら消す。** 戻る先は画面ではなく「電源を切る」で、
+  // 一度機械が立ち上がれば行き先としての意味を失う (左上のVMカードが
+  // 「今どこに居るか」を引き受けたので、なおさら要らない)
+  const start = $('machines').querySelector('[data-id="start"]');
+  if (start) start.hidden = !onWelcome;
+  // **一覧の点灯はライブラリから起動したときだけ。** 落としたカーネルでも
+  // Linux機の組み立てには select() を通るので、そのままだと一覧の
+  // 「Linux 6.18」が点いてしまう — 走っているのは持ち込みのカーネルであって、
+  // 一覧のそれではない
+  if (bootOrigin && bootOrigin !== 'library') markCurrent(null);
+  syncVmCard();
   if (onWelcome) return;
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
   const powered = !!machine || !!linux?.booted;
@@ -110,26 +138,42 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('layout').closest('.sel').hidden = !!linux;
+  $('layout').hidden = !!linux;
+  $('layout').previousElementSibling.hidden = !!linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
-  // ネットワーク。**Linuxからは今のNE2000が見えない** — ltsカーネルは
-  // ISAバスを知らず、PCI越しにしか装置を探さない (ADR-0017 5c で RTL8029 を作る)
-  $('net').disabled = !!linux;
-  if (linux) $('net').title = 'ネットワーク: Linuxは未対応 (PCI + RTL8029 待ち)';
+  // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
+  // 16bit (ELKS/DOS) はISAのNE2000。32bitのLinuxはISAを知らないので
+  // PCIのRTL8029になる — こちらはまだ無い (ADR-0017 5c)
+  const nic = nicFor(!!linux);
+  $('netSel').querySelector('option[value="on"]').textContent = nic.label;
+  $('netSel').disabled = !nic.usable;
+  $('netSel').title = nic.usable ? NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off : nic.why;
+  syncSidebar();
   if (linux) {
     $('boot').disabled = linux.busy;
     $('pause').disabled = !linux.booted;
-    $('pause').textContent = linux.paused ? '再開' : '一時停止';
+    setPauseFace(!!linux.paused);
     $('snapExport').disabled = !linux.booted;
     $('snapImport').disabled = linux.busy;
     return;
   }
   $('pause').disabled = !on;
-  $('pause').textContent = machine?.paused ? '再開' : '一時停止';
+  setPauseFace(!!machine?.paused);
   $('boot').disabled = !lastImage;
   $('snapExport').disabled = !on;
   $('snapImport').disabled = false;
+}
+
+/**
+ * 一時停止ボタンの顔。**絵とラベルの両方を替える** —
+ * 止まっているときに ⏸ が出ていると、押した先が分からない。
+ * (textContent で書き換えると中のSVGごと消えるので、要素を分けてある)
+ */
+function setPauseFace(paused) {
+  setHidden($('pauseIcon'), paused);
+  setHidden($('playIcon'), !paused);
+  $('pauseLabel').textContent = paused ? '再開' : '一時停止';
 }
 
 /** 最後に起動したイメージの名前。スナップショットに添える */
@@ -141,6 +185,7 @@ function boot(image, label) {
   $('screen').hidden = false;
   machine?.stop();
   speaker.mute(); // 機械が替わるので、前の機械の音は道連れにしない
+  stopPaste(); // 貼りかけの文字も道連れにしない (前の機械宛だったもの)
   // **ケーブルは抜かない。** 機械を替えてもスイッチとの結線は生きたままで、
   // 灯りも点きっぱなし — 実機で床のLANケーブルを抜かないのと同じである
   // Linuxを見ている最中にフロッピーを落とされたら、Linuxを畳んでVGA端末に戻す
@@ -173,14 +218,9 @@ function boot(image, label) {
   // **NICを挿すのは電源を入れるこの瞬間だけ。** 起動時にしか装置を探さない
   // ゲスト (ELKSのカーネル) が居るので、後から挿しても見えない — 実機と同じ
   if (link) attachNet(machine);
-  // 物理キーはそのまま、貼り付けはASCIIとして送る。
-  // **¥ は \ として届ける** — MacのJIS配列は \ が素直に打てないが、
-  // 日本語DOSではそもそもパス区切り0x5Cの字形が「¥」だった。
-  // ¥キーで A:\> のパスが打てるのは、歴史的にはむしろ正しい姿である
+  // 物理キーはそのまま、貼り付けはASCIIとして送る (¥→\ の理由は decide.js)
   term.onKey = (code, down) => machine.key(code, down);
-  term.onChar = ch => machine.typeChar(ch === '¥' ? '\\' : ch);
-  term.onPaste = text => machine.paste(text.replaceAll('¥', '\\'));
-
+  term.onChar = ch => machine.typeChar(guestChar(ch));
   // 動作確認用の窓口。手元で開いているときだけ出す
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
     window.__machine = machine;
@@ -193,25 +233,34 @@ function boot(image, label) {
   syncControls();
 }
 
+/** 状態を右上のピルと左のカードへ同時に書く。**同じ数字を2つ持たない** */
+function showState(text, hist) {
+  $('pillState').textContent = text;
+  $('pillHist').textContent = hist;
+  // 走っていれば緑、止まっていれば灰
+  const live = text !== '停止中' && text !== '電源オフ';
+  $('pillDot').classList.toggle('ok', live);
+}
+
 /** 1秒に2回、速度と履歴の深さを出す。教材として「今どれくらい出ているか」を見せる */
 setInterval(() => {
   if (linux) {
-    const parts = [];
     // 起動の定規 (時間で統一、2026-08-13)。headless.mjs と同じ定義の秒数
-    if (linux.bootSecs != null) parts.push(`起動 ${linux.bootSecs.toFixed(1)}s`);
+    const boot = linux.bootSecs != null ? `起動 ${linux.bootSecs.toFixed(1)}s` : '';
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
-    parts.push(linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '');
-    $('gauge').textContent = parts.filter(Boolean).join('   ');
+    const run = linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '起動中';
+    showState(run, boot || '—');
     return;
   }
-  if (!machine) return;
-  const parts = [];
-  parts.push(
-    machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`,
-  );
-  if (term.scrollback.length) parts.push(`履歴 ${term.scrollback.length}行`);
-  if (term.offset) parts.push(`▲${term.offset}行前`);
-  $('gauge').textContent = parts.join('   ');
+  if (!machine) {
+    showState('電源オフ', '履歴 0 行');
+    return;
+  }
+  const run = machine.paused ? '停止中' : machine.idle ? 'アイドル' : `${machine.mips.toFixed(0)} MIPS`;
+  const hist = term.offset
+    ? `▲ ${term.offset} 行前`
+    : `履歴 ${term.scrollback.length} 行`;
+  showState(run, hist);
 }, 500);
 
 // --- キーボード配列 ---
@@ -242,18 +291,263 @@ function focusScreen() {
 // Enter/Spaceがゲスト行きのつもりでボタンをもう一度押してしまう
 // (再起動の意図せぬ連打)。個々のハンドラではなくバブリングで一括して受ける。
 // デバッガだけは例外 — 子ウインドウに移った注意を奪い返さない
-document.querySelector('.toolbar').addEventListener('click', e => {
-  const b = e.target.closest('button');
-  if (b && b.id !== 'debug') focusScreen();
+for (const bar of document.querySelectorAll('.bar')) {
+  bar.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (b && b.id !== 'debug') focusScreen();
+  });
+}
+
+// --- コンソールの見出しにある2つ: コピーとペースト ---
+//
+// 右クリックのメニューに組みを添える。**その環境の組みだけ出す** —
+// Macに Ctrl+Shift+C と書いても、押す人は居ない
+{
+  const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
+  $('mCopyKey').textContent = mac ? '⌘C' : 'Ctrl+Shift+C';
+  $('mPasteKey').textContent = mac ? '⌘V' : 'Ctrl+Shift+V';
+}
+
+// ---------- 見た目の明暗 ----------
+//
+// **既定はシステムに従う。** 押すたびに システム→暗→明→システム と回る。
+// 選んだらブラウザが覚える (機械ごとではなく、この人の好みなので)。
+// 端末の中は常に黒地に緑のまま — 実機のモニタが部屋の明るさで色を
+// 変えないのと同じで、変わるのは周りの造作だけである
+
+const THEME_STORE = 'rustx86.theme';
+const PREFERS_LIGHT = matchMedia('(prefers-color-scheme: light)');
+
+/** 覚えている好み ('system' | 'dark' | 'light') */
+function themePref() {
+  const t = localStorage.getItem(THEME_STORE);
+  return THEMES.includes(t) ? t : 'system';
+}
+
+/** 好みを画面に反映する (解き方は decide.js の resolveTheme) */
+function applyTheme() {
+  const pref = themePref();
+  document.documentElement.dataset.theme = resolveTheme(pref, PREFERS_LIGHT.matches);
+  setHidden($('themeAuto'), pref !== 'system');
+  setHidden($('themeDark'), pref !== 'dark');
+  setHidden($('themeLight'), pref !== 'light');
+  $('theme').title = {
+    system: '見た目: システムに従う',
+    dark: '見た目: 暗く',
+    light: '見た目: 明るく',
+  }[pref];
+}
+
+applyTheme();
+PREFERS_LIGHT.addEventListener('change', applyTheme); // system のときだけ効く
+$('theme').addEventListener('click', () => {
+  localStorage.setItem(THEME_STORE, nextTheme(themePref()));
+  applyTheme();
 });
+
+// ---------- 右クリックのメニュー ----------
+//
+// 画面の上で右を押したときだけ出す。**今できることだけを並べる** —
+// 選んでいなければコピーは灰色、走っていればイメージは開けない
+
+const menu = $('menu');
+
+function openMenu(x, y) {
+  menu.hidden = false;
+  // 画面の外へはみ出さない位置に置く (右下で押されたとき用)
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+}
+
+function closeMenu() {
+  if (!menu.hidden) menu.hidden = true; // 閉じているものを閉じ直さない
+}
+
+// consoleBox はこの下で定義されるので、ここでは要素を直に引く
+$('console').addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const can = menuAbility(!!(machine || linux), hasSelection(), acceptsDrop());
+  $('mCopy').disabled = !can.copy;
+  $('mPaste').disabled = !can.paste;
+  $('mOpen').disabled = !can.open;
+  openMenu(e.clientX, e.clientY);
+});
+for (const ev of ['pointerdown', 'blur', 'wheel']) {
+  window.addEventListener(ev, e => {
+    if (ev === 'pointerdown' && menu.contains(e.target)) return;
+    closeMenu();
+  });
+}
+window.addEventListener('keydown', e => {
+  // **捕捉段で止める。** ここで通すと、閉じるついでに Esc がゲストへ届く
+  if (e.key === 'Escape' && !menu.hidden) { e.stopPropagation(); e.preventDefault(); closeMenu(); }
+}, true);
+$('mCopy').addEventListener('click', () => { closeMenu(); doCopy(); });
+$('mPaste').addEventListener('click', () => { closeMenu(); requestPaste(); });
+$('mOpen').addEventListener('click', () => { closeMenu(); $('imageFile').click(); });
+
+// ---------- コピーと貼り付けの一本道 ----------
+//
+// 呼び口は4つある — 見出しのボタン・キーの組み・右クリックのメニュー・
+// Macの ⌘V (ブラウザが paste 事象をくれる)。**判断はここ1箇所に置く。**
+// 以前は経路ごとに実装が分かれていて、組みで押すと選んだ範囲しか取れず、
+// 取り消しも効かず、状態も出ないという食い違いが起きていた
+
+/** いま選ばれている文字列 (画面はVGAとシリアルの2つあるので、出ている方を見る) */
+function selectedText() {
+  return (linux ? linux.selectedText() : term.selectedText()) || '';
+}
+
+/** 何か選ばれているか。**可否を出し分けるだけならこちらを使う** (中身を作らない) */
+function hasSelection() {
+  return linux ? linux.hasSelection() : term.hasSelection();
+}
+
+/**
+ * コピー。**選んだところだけを取る** — どこのアプリでもそうであるように。
+ *
+ * 以前は選んでいなければ画面全体を取っていた。それを貼り戻すと起動ログが
+ * 丸ごとコマンドとして流れ込む (実際にELKSがそうなった)。
+ * 画面ぜんぶが欲しいときは「ログを保存」が受け持つ
+ */
+async function doCopy() {
+  const text = selectedText();
+  if (!text) {
+    setStatus('コピーするところをドラッグで選んでください');
+    return;
+  }
+  if (await term.copyText(text)) setStatus(`選んだ ${text.length} 文字をコピーしました`);
+  else setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
+}
+
+/**
+ * 貼り付けを頼まれたときの入口。
+ *
+ * **貼りかけは止められる。** 間違って大きなものを貼るとコマンドが
+ * 延々と流れ込むので、流れている最中の2度目は「取り消し」になる。
+ * これはボタンだけの作法だったが、組みでも右クリックでも同じにする
+ * @param {string} [text] 中身が既に届いている経路 (Macの ⌘V) だけ渡す
+ */
+function requestPaste(text) {
+  if (pasteQueue) {
+    const left = pasteQueue.length;
+    stopPaste();
+    setStatus(`貼り付けを止めました (残り ${left} 文字は捨てました)`);
+    return;
+  }
+  if (text === undefined) pasteFromClipboard();
+  else deliverPaste(text);
+}
+
+/** クリップボードを読んで流す (中身が届かない経路のための前段) */
+async function pasteFromClipboard() {
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    setStatus('クリップボードを読めませんでした (ブラウザに拒否されました)', true);
+    return;
+  }
+  deliverPaste(text);
+}
+
+/** ゲストへ流す出口。**経路によらずここを通る** */
+function deliverPaste(text) {
+  if (!text) return;
+  // シリアル (Linux) は受け側の行列が深いので一息に流せる。
+  // VGA機は**キーボードとして打つ**ので、少しずつ流す (下記)
+  if (linux) linux.send(text);
+  else startPaste(text.replaceAll('¥', '\\'));
+  focusScreen();
+}
+
+// ---------- 貼り付け ----------
+//
+// **一度に流し込むと消える。** キーボードから来た文字は BIOS の待ち行列に
+// 積まれるが、これは**16個しかない環**で、溢れた分は実機と同じく捨てられる。
+// 画面全文 (1558文字) を貼ったら数十文字しか届かなかったのはこれである。
+// 行列の空きを見ながら、空いた分だけ流す。
+
+/** 貼り付け待ちの残り */
+let pasteQueue = '';
+let pasteTimer = null;
+
+/**
+ * ゲストが握っている修飾キーを離させる。
+ *
+ * **Ctrl+Shift+V は「押したまま」貼り付けが始まる。** Ctrl と Shift の
+ * 打鍵はVの前に既にゲストへ届いていて、離すのは人の指が離れたときなので、
+ * その間に流し込んだ文字はゲスト側で制御コードに化ける
+ * (ELKSの login: に `§` や `‼♣‼↔` が出たのはこれ)。
+ * 貼り付けは打鍵ではないので、始める前にこちらから離させる。
+ * 実際の keyup は後から重ねて届くが、離すのを2度送っても害はない
+ */
+function releaseModifiers() {
+  for (const code of ['ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight']) {
+    machine.key(code, false);
+  }
+}
+
+function startPaste(text) {
+  if (!pasteQueue && machine) releaseModifiers(); // 流し始めの一度だけでよい
+  pasteQueue += text;
+  if (pasteTimer) return;
+  pasteTimer = setInterval(() => {
+    if (!machine || machine.paused) return; // 止まっている間は待つ (再開すれば続く)
+    if (!pasteQueue) {
+      clearInterval(pasteTimer);
+      pasteTimer = null;
+      setStatus('貼り付けました');
+      return;
+    }
+    // **空いた席は毎回いっぱいまで埋める。** 配分の理由は decide.js の
+    // pasteChunk (ここを2度外しているので、判断はテストのある側に置く)
+    const inflight = Math.ceil(machine.emu.key_backlog() / 2); // 1文字 = 押す/離すの2バイト
+    const n = pasteChunk(biosKeyRoom(), inflight, pasteQueue.length);
+    if (!n) return; // 席が無い。ゲストが読むまで待つ
+    machine.paste(pasteQueue.slice(0, n));
+    pasteQueue = pasteQueue.slice(n);
+    if (pasteQueue) setStatus(`貼り付け中… 残り ${pasteQueue.length} 文字`);
+  }, 4); // 環が空いた直後に継ぎ足せるよう、刻みは細かく
+}
+
+function stopPaste() {
+  pasteQueue = '';
+  if (pasteTimer) clearInterval(pasteTimer);
+  pasteTimer = null;
+}
+
+/**
+ * BIOSのキー待ち行列の空き。BDAに頭 (0x41A) と尻尾 (0x41C) があり、
+ * 環は 0x1E〜0x3E の16個。**BIOSを使わないゲスト (ELKSは8042を直に読む) では
+ * 頭も尻尾も動かない**ので、常に空きありと見える — そちらは受け側の行列が
+ * 際限なく伸びるので、それで困らない
+ */
+function biosKeyRoom() {
+  const b = machine.emu.read_mem(0x41a, 4);
+  const head = b[0] | (b[1] << 8);
+  const tail = b[2] | (b[3] << 8);
+  const span = 0x3e - 0x1e; // 環の大きさ (バイト)
+  const used = (((tail - head) % span) + span) % span / 2;
+  return Math.max(0, 16 - 1 - used);
+}
+
+// **クリップボードの取っ手は機械に依らないので、ここで一度だけ張る。**
+// boot() の中で張っていたときは、Linuxを直接起動した回では張られず、
+// 組みでの貼り付けが黙って効かなかった。行き先 (doCopy / requestPaste) が
+// 自分で機械を見るようになった以上、張り替える理由はもう無い。
+// Macの ⌘V は中身が届くのでそれを渡し、Ctrl+Shift+V は事象が飛ばないので
+// 読みにいかせる — どちらも取り消し・流量制御・Linux分岐は共通である
+term.onPaste = text => requestPaste(text);
+term.onPasteRequest = () => requestPaste();
+term.onCopyRequest = () => doCopy();
+
 
 // --- デバッガの子ウインドウ ---
 //
 // Emulator は再起動のたびに作り直されるので、**参照を握らせず毎回聞かせる**。
 // 握らせると再起動後に古い機械を覗き続けることになる
-/** Linuxを選んでいるときの取っ手 (選んでいなければ null) */
-let linux = null;
-
 // **いま動いている機械**を見せる。参照を握らせず毎回聞く —
 // Emulator は再起動のたびに作り直されるため。
 // Linuxのときはワーカー越しの代役 (各メソッドが Promise) を渡す。
@@ -281,7 +575,7 @@ const dbg = new Debugger({
     }
     if (!current) return;
     await bootFromUrl(current);
-    startScript(scriptFor(current));
+    startScript(scriptOf(current));
   },
 });
 
@@ -295,7 +589,7 @@ const dbg = new Debugger({
 
 /**
  * ケーブルを挿す。**機械が動いていなくても繋がるし、灯りも点く** —
- * リンクの成否は網元との間の話で、ゲストのドライバとは関係ない
+ * リンクの成否はSLiRP backendとの間の話で、ゲストのドライバとは関係ない
  */
 function netConnect(url) {
   link?.close();
@@ -343,10 +637,62 @@ const NET_LABEL = {
 };
 
 function setNetLamp(state) {
-  const b = $('net');
-  if (state) b.dataset.net = state;
-  else delete b.dataset.net;
-  b.title = NET_LABEL[state] ?? NET_LABEL.off;
+  for (const el of [$('netSel'), $('devNicDot')]) {
+    if (state) el.dataset.net = state;
+    else delete el.dataset.net;
+  }
+  $('netSel').title = NET_LABEL[state] ?? NET_LABEL.off;
+  // 選択そのものも状態に追従させる (「設定…」を選んだ後に戻す用でもある)
+  $('netSel').value = link ? 'on' : 'off';
+  $('devNic').textContent = link
+    ? { up: 'NE2000 (0x300)', wait: '接続中…', down: 'リンク無し' }[state] ?? 'NE2000 (0x300)'
+    : '未接続';
+}
+
+/**
+ * 左上の「今のVM」と、端末の上の「起動元」。
+ * **同じ事実を粗さを変えて2箇所に出す** — 左は状態(何が動いているか)、
+ * 端末の上は素性(何を食わせて動いているか)
+ */
+function syncVmCard() {
+  const live = !!machine || !!linux?.booted;
+  const paused = machine?.paused || linux?.paused;
+  const via = bootOrigin ? `（${ORIGIN_LABEL[bootOrigin]}起動）` : '';
+  $('vmDot').classList.toggle('ok', live && !paused);
+  $('vmDot').classList.toggle('partial', !!paused);
+  $('vmState').textContent = !live ? '停止中' : paused ? `一時停止中${via}` : `実行中${via}`;
+  // **名前も素性に合わせる。** 落としたイメージで動いているのに一覧で
+  // 選んだOS名が出ていると、別物を見ていることになる
+  // Linuxは自分が読んだカーネル名を持っている。**前の機械のラベルを使わない**
+  const imageLabel = linux ? linux.imageName || lastLabel : lastLabel;
+  const name = bootOrigin === 'library' ? current?.label : imageLabel || current?.label;
+  $('vmName').textContent = live || bootOrigin ? name ?? '—' : 'マシンを選んでください';
+
+  const showOrigin = live && !!bootOrigin;
+  $('originRow').hidden = !showOrigin;
+  if (showOrigin) {
+    $('originKind').textContent = `起動元：${ORIGIN_LABEL[bootOrigin]}`;
+    $('originName').textContent = imageLabel || current?.file || '—';
+  }
+}
+
+/** 左の状態カードを今の姿に合わせる。**画面に出ている数字と同じ出どころ**にする */
+function syncSidebar() {
+  const conJp = $('layout').value === 'jp' ? 'JIS 配列' : 'US 配列';
+  $('devCon').textContent = linux ? 'シリアル (ttyS0)' : conJp;
+  // Linuxのときは自分が読んだ名前を使う (前の機械のラベルを引きずらない)
+  const imageLabel = linux ? linux.imageName : lastLabel;
+  $('devDisk').textContent = linux ? 'initramfs-mini' : lastLabel || '—';
+  $('infoImage').textContent = imageLabel || '—';
+  // 機種とRAMは機械自身に聞く (デバッガと同じ出どころ)
+  try {
+    const j = JSON.parse(machine?.emu.cpu_json() ?? 'null');
+    $('infoMachine').textContent = j?.machine ?? (linux ? 'PC (32bit)' : '—');
+    $('infoRam').textContent = j ? `${j.ramMb} MB` : linux ? '128 MB' : '—';
+    $('infoArch').textContent = j?.pe ? 'i386 (プロテクトモード)' : 'i386 (リアルモード)';
+  } catch {
+    /* 起動直後などで読めなくても、表示が古いだけなので黙って見送る */
+  }
 }
 
 /** ダイアログの中身を今の状態に合わせる */
@@ -379,13 +725,35 @@ function netDialogSync() {
   }
 }
 
-$('net').addEventListener('click', () => {
+/** ネットワークの設定画面を開く (今の設定を入れてから) */
+function openNetDialog() {
   const saved = netSaved();
   const q = netFromQuery();
   $('netUrl').value = q ?? saved.url;
   $('netToken').value = q ? '' : saved.token;
   netDialogSync();
   $('netDialog').showModal();
+}
+
+// NICの選択。**カードを挿すか抜くか**の2択で、設定は「設定…」から。
+// 覚えている繋ぎ先があるので、ふだんは選ぶだけで繋がる
+$('netSel').addEventListener('change', e => {
+  const v = e.target.value;
+  if (v === 'config') {
+    openNetDialog();
+    e.target.value = link ? 'on' : 'off'; // 「設定…」は選択肢ではなく入口
+    return;
+  }
+  if (v === 'on') {
+    const saved = netSaved();
+    netConnect(withToken(saved.url, saved.token));
+    if (machine && !machine.netlink) {
+      setStatus(`${NET_LABEL.up} — ゲストから使うには「再起動」`);
+    }
+  } else {
+    netDisconnect();
+    setStatus(NET_LABEL.off);
+  }
 });
 
 $('netForm').addEventListener('submit', e => {
@@ -426,10 +794,11 @@ $('power').addEventListener('click', async () => {
     machine = null;
     term.reset();
     term.draw();
+    // 素性 (bootOrigin) は残す — 同じものからもう一度立ち上げるため
     setStatus('電源を切りました。もう一度押すと同じイメージで立ち上がります');
   } else if (lastImage) {
     boot(lastImage, lastLabel);
-    startScript(scriptFor(current));
+    startScript(scriptOf(current));
   }
   syncControls();
 });
@@ -461,7 +830,14 @@ $('boot').addEventListener('click', () => {
     linux.boot();
     return;
   }
-  if (lastImage) boot(lastImage, 'ディスク');
+  // **再起動でも自動起動スクリプトを流し直す。** 電源を入れ直したのだから
+  // F5もドライバ常駐もやり直しになる — 流さないと FreeDOS が言語選択で
+  // 止まったまま「ネットに繋がらない」ように見える。
+  // ラベルも保つ (ここで 'ディスク' に潰すと、左のディスク欄が化ける)
+  if (lastImage) {
+    boot(lastImage, lastLabel || 'ディスク');
+    startScript(scriptOf(current));
+  }
 });
 
 $('snapExport').addEventListener('click', async () => {
@@ -520,17 +896,57 @@ $('save').addEventListener('click', () => {
 // --- ディスクイメージの受け取り ---
 
 const consoleBox = $('console');
-for (const ev of ['dragenter', 'dragover']) {
-  consoleBox.addEventListener(ev, e => {
+
+/**
+ * イメージを受け取れるのは**スタート画面だけ**。
+ *
+ * 走っている機械の画面に落とせてしまうと、電源の入ったPCにフロッピーを
+ * 差し込んだら勝手に再起動した、という乱暴な挙動になる。一度立ち上げたら
+ * まず電源を切る — 実機と同じ順序を守らせる。
+ * (別のイメージに移りたいときは、左のOSライブラリか「イメージを開く…」から)
+ */
+function acceptsDrop() {
+  return !$('welcomePane').hidden;
+}
+
+// **子要素をまたぐたびに dragleave が飛ぶ**ので、素直に付け外しすると
+// 枠が明滅する。入った回数を数えて、0になったときだけ消す
+let dragDepth = 0;
+// **どこに落ちてもブラウザには開かせない。** 既定の動作はファイルを開くこと
+// なので、素通しにするとページごと差し替わり、走っていた機械が消える
+for (const ev of ['dragover', 'drop']) {
+  document.addEventListener(ev, e => {
     e.preventDefault();
-    consoleBox.classList.add('drop');
+    if (e.type === 'dragover' && e.dataTransfer) e.dataTransfer.dropEffect = 'none';
   });
 }
-for (const ev of ['dragleave', 'drop']) {
-  consoleBox.addEventListener(ev, () => consoleBox.classList.remove('drop'));
-}
+
+consoleBox.addEventListener('dragenter', e => {
+  e.preventDefault();
+  if (acceptsDrop() && ++dragDepth === 1) consoleBox.classList.add('drop');
+});
+consoleBox.addEventListener('dragover', e => {
+  e.preventDefault();
+  e.stopPropagation(); // 上の「受け取らない」既定を、この枠の中だけ上書きする
+  // 「コピーして取り込む」の意思表示。これが無いとカーソルが禁止マークになる
+  if (e.dataTransfer) e.dataTransfer.dropEffect = acceptsDrop() ? 'copy' : 'none';
+});
+consoleBox.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    consoleBox.classList.remove('drop');
+  }
+});
 consoleBox.addEventListener('drop', async e => {
   e.preventDefault();
+  dragDepth = 0;
+  consoleBox.classList.remove('drop');
+  if (!acceptsDrop()) {
+    // 黙って捨てない。**なぜ入らないのかと、どうすれば入るのかを言う**。
+    // 電源を切っても机の上には機械が残っているので、入口は左のメディア口になる
+    setStatus('動いている機械にはイメージを入れられません。左の「イメージを開く…」から差し替えてください', true);
+    return;
+  }
   const f = e.dataTransfer?.files?.[0];
   if (f) insertMedia(f);
 });
@@ -559,6 +975,7 @@ async function insertMedia(f) {
           linux.loadStateBytes(o.state);
         } else {
           if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+          bootOrigin = 'snapshot';
           await linux.boot({ snapshot: o.state });
         }
         setStatus(`${f.name} の状態に戻した (${stamp})`);
@@ -568,6 +985,7 @@ async function insertMedia(f) {
         setStatus('先に同じディスクイメージを起動してください (VGA機のスナップショット)', true);
         return;
       }
+      bootOrigin = 'snapshot';
       machine.loadState(o.state);
       term.reset();
       setStatus(`${f.name} の状態に戻した (${stamp})`);
@@ -578,8 +996,31 @@ async function insertMedia(f) {
     return;
   }
   setStatus(`${f.name} を読み込み中…`);
-  boot(new Uint8Array(await f.arrayBuffer()), f.name);
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  // **中身で行き先を決める。** 落ちてくるものは3種類ある:
+  //   スナップショット (上で処理済み) / Linuxカーネル / ディスクイメージ
+  // 拡張子では決めない — vmlinux-lts のように拡張子を持たないものがある
+  if (isKernel(bytes)) {
+    if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+    bootOrigin = 'image';
+    lastLabel = f.name;
+    await linux.boot({ kernel: bytes, kernelName: f.name });
+    return;
+  }
+  // ディスクとして通す前に**印を確かめる**。拡張子で絞るのをやめた以上、
+  // 何を落とされてもおかしくない — 分からないものは分からないと言う
+  if (!isBootable(bytes)) {
+    setStatus(
+      `${f.name} は起動できる形に見えません ` +
+        '(ブートセクタの印 0x55AA が無く、Linuxカーネルでもスナップショットでもない)',
+      true,
+    );
+    return;
+  }
+  bootOrigin = 'image';
+  boot(bytes, f.name);
 }
+
 
 // ---------- 起動シナリオ ----------
 //
@@ -659,13 +1100,17 @@ async function renderMachines() {
     await Promise.all(MACHINES.map(async (m) => [m.id, await imageAvailable(m)])),
   );
   nav.textContent = '';
+  // カードの中身は .body に入れる (見出し帯を持つ他のカードと作法を揃える)
+  const body = document.createElement('div');
+  body.className = 'body';
+  nav.append(body);
   for (const [group, list] of byGroup()) {
     const rows = list.filter((m) => avail.get(m.id));
     if (rows.length === 0) continue; // 空のグループは見出しごと出さない
     if (group) {
-      const h = document.createElement('h2');
+      const h = document.createElement('h3');
       h.textContent = group;
-      nav.append(h);
+      body.append(h);
     }
     for (const m of rows) {
       // **別ページに住むマシンはリンクにする** (Linux)。見た目はボタンと揃えるが、
@@ -675,7 +1120,7 @@ async function renderMachines() {
       // 緑ランプ + 名前だけの1行。「動く」は色で分かるので言葉にしない。
       // ランプはマシンだけ (「スタート」はマシンではない)
       const dot = m.status ? `<span class="dot ${m.status}"></span>` : '';
-      b.innerHTML = `<span class="name">${dot}${m.label}</span>`;
+      b.innerHTML = `${dot}<span class="name">${m.label}</span>`;
       if (m.href) {
         b.href = m.href;
       } else {
@@ -683,7 +1128,7 @@ async function renderMachines() {
         b.disabled = m.status === 'todo';
         b.addEventListener('click', () => select(m));
       }
-      nav.append(b);
+      body.append(b);
     }
   }
 }
@@ -744,7 +1189,9 @@ async function select(m, { autoBoot = true } = {}) {
     term.reset();
     $('screen').hidden = true;
     $('welcomePane').hidden = false;
-    $('gauge').textContent = ''; // 前のマシンの「アイドル」等を持ち越さない
+    showState('電源オフ', '履歴 0 行'); // 前のマシンの「アイドル」等を持ち越さない
+    bootOrigin = null;
+    lastLabel = '';
     showNote(null);
     setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
     dbg.reset();
@@ -760,6 +1207,10 @@ async function select(m, { autoBoot = true } = {}) {
     $('linuxScreen').hidden = false;
     linux = mountLinux($('linuxScreen'), {
       onStatus: setStatus,
+      // クリップボードはVGA機と同じ道へ (取り消しも状態表示も共通になる)
+      onPaste: text => requestPaste(text),
+      onPasteRequest: () => requestPaste(),
+      onCopyRequest: () => doCopy(),
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
       onTone: hz => speaker.update(hz),
@@ -773,8 +1224,9 @@ async function select(m, { autoBoot = true } = {}) {
     return;
   }
 
+  bootOrigin = 'library';
   await bootFromUrl(m);
-  startScript(scriptFor(m));
+  startScript(scriptOf(m));
   dbg.reset();
 }
 
@@ -832,10 +1284,19 @@ try {
   }
   setStatus('OSライブラリから選ぶか、イメージをドロップ /「イメージを開く…」で起動してください');
   syncControls();
-  // ?net= があれば、機械を選ぶより先にケーブルを挿しておく。
-  // E2Eも「開いたら既に繋がっている」方が扱いやすい
+  // **既定で繋いでおく。** 机の裏でLANケーブルが刺さっているのが普通の姿で、
+  // 使うたびに挿し直させる理由がない。相手 (SLiRP backend) が居なければ
+  // 赤が点くだけで、機械は「リンクの無いNIC」を積んで普通に起動する。
+  // 切っておきたいときは ?net=off
   const q = netFromQuery();
-  if (q) netConnect(q);
+  if (new URLSearchParams(location.search).get('net') === 'off') {
+    setNetLamp(null);
+  } else if (q) {
+    netConnect(q);
+  } else {
+    const saved = netSaved();
+    netConnect(withToken(saved.url, saved.token));
+  }
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
 }
