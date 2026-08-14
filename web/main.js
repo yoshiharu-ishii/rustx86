@@ -475,7 +475,24 @@ function deliverPaste(text) {
 let pasteQueue = '';
 let pasteTimer = null;
 
+/**
+ * ゲストが握っている修飾キーを離させる。
+ *
+ * **Ctrl+Shift+V は「押したまま」貼り付けが始まる。** Ctrl と Shift の
+ * 打鍵はVの前に既にゲストへ届いていて、離すのは人の指が離れたときなので、
+ * その間に流し込んだ文字はゲスト側で制御コードに化ける
+ * (ELKSの login: に `§` や `‼♣‼↔` が出たのはこれ)。
+ * 貼り付けは打鍵ではないので、始める前にこちらから離させる。
+ * 実際の keyup は後から重ねて届くが、離すのを2度送っても害はない
+ */
+function releaseModifiers() {
+  for (const code of ['ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight']) {
+    machine.key(code, false);
+  }
+}
+
 function startPaste(text) {
+  if (!pasteQueue && machine) releaseModifiers(); // 流し始めの一度だけでよい
   pasteQueue += text;
   if (pasteTimer) return;
   pasteTimer = setInterval(() => {
