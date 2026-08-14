@@ -469,9 +469,6 @@ function deliverPaste(text) {
 // 画面全文 (1558文字) を貼ったら数十文字しか届かなかったのはこれである。
 // 行列の空きを見ながら、空いた分だけ流す。
 
-/** 1刻み (16ms) に足す文字数の上限。**上げすぎると環を溢れさせる** */
-const PASTE_PER_TICK = 2;
-
 /** 貼り付け待ちの残り */
 let pasteQueue = '';
 let pasteTimer = null;
@@ -504,23 +501,24 @@ function startPaste(text) {
       setStatus('貼り付けました');
       return;
     }
-    // **細く、途切れさせずに流す。**
-    //
-    // 以前は「行列が空になるまで待って、空いた分をまとめて投げる」作りだった。
-    // 15文字がどっと出て、はけるまで数百ミリ秒止まる、の繰り返しになるので、
-    // 見ていると出ては止まりのカクカクになる。
+    // **空いた席は毎回いっぱいまで埋める。**
     //
     // 詰まりは2段ある。8042の行列 (まだゲストへ配っていないスキャンコード) と、
-    // BIOSの環 (16枠、ゲストが読むまで空かない)。どちらにも余裕がある分だけ
-    // 毎刻み少しずつ足せば、詰めずに流し続けられる
+    // BIOSの環 (16枠、ゲストが読むまで空かない)。**律速は環の方**で、
+    // 8042は64命令ごとに1バイト出せるから、実質そこは詰まらない。
+    //
+    // 以前は「8042の行列が空になるまで待つ」ようにしていたので、
+    // 出しては止まりを繰り返した。1文字ずつに絞ったらタイプライターになった。
+    // 正しいのは**環の空きだけを見て、その分を一度に渡す**こと。
+    // ゲストが読むのが遅ければ席が空かないので、自然に待つ形になる
     const inflight = Math.ceil(machine.emu.key_backlog() / 2); // 1文字 = 押す/離すの2バイト
     const room = biosKeyRoom() - inflight; // 配送中の分も席を取る
-    if (room < 2) return; // 余裕が無い。ゲストが読むまで足さない
-    const n = Math.min(room - 1, PASTE_PER_TICK, pasteQueue.length);
+    if (room < 2) return; // 席が無い。ゲストが読むまで待つ
+    const n = Math.min(room - 1, pasteQueue.length);
     machine.paste(pasteQueue.slice(0, n));
     pasteQueue = pasteQueue.slice(n);
     if (pasteQueue) setStatus(`貼り付け中… 残り ${pasteQueue.length} 文字`);
-  }, 16);
+  }, 4); // 環が空いた直後に継ぎ足せるよう、刻みは細かく
 }
 
 function stopPaste() {
