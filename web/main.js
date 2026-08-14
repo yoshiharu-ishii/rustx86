@@ -19,7 +19,7 @@ import { NetLink } from './netlink.js';
 // 画面の**判断**は decide.js に集めてある (node --test で押さえられる)。
 // ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
 import {
-  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar,
+  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
 } from './decide.js';
 
 const $ = id => document.getElementById(id);
@@ -108,9 +108,12 @@ function syncControls() {
   for (const id of ['barRig', 'barOps', 'consoleHead', 'stage', 'devCard', 'infoCard']) {
     $(id).hidden = onWelcome;
   }
-  // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か
-  $('footGuide').hidden = !onWelcome;
-  $('footDisk').hidden = onWelcome;
+  // 下辺の絵も持ち場に合わせる: 案内 (本) か、動いている媒体 (フロッピー) か。
+  // **SVGに .hidden = で代入しても効かない** — hidden は HTMLElement の
+  // プロパティで、SVGElement には無い (代入するとJSの変数が生えるだけで
+  // 属性は変わらないため、読み返すと辻褄が合って気づけない)。属性で操作する
+  setHidden($('footGuide'), !onWelcome);
+  setHidden($('footDisk'), onWelcome);
   // **「スタート」は起動したら消す。** 戻る先は画面ではなく「電源を切る」で、
   // 一度機械が立ち上がれば行き先としての意味を失う (左上のVMカードが
   // 「今どこに居るか」を引き受けたので、なおさら要らない)
@@ -163,8 +166,8 @@ function syncControls() {
  * (textContent で書き換えると中のSVGごと消えるので、要素を分けてある)
  */
 function setPauseFace(paused) {
-  $('pauseIcon').hidden = paused;
-  $('playIcon').hidden = !paused;
+  setHidden($('pauseIcon'), paused);
+  setHidden($('playIcon'), !paused);
   $('pauseLabel').textContent = paused ? '再開' : '一時停止';
 }
 
@@ -291,14 +294,22 @@ for (const bar of document.querySelectorAll('.bar')) {
   });
 }
 
-// --- コンソールの見出しにある2つ ---
+// --- コンソールの見出しにある2つ: コピーとペースト ---
 //
-// **クリアは画面を消すだけで、機械には触れない。** 実機のコンソールで
-// スクロールバッファを流すのと同じで、走っているOSは何も知らない
-$('clear').addEventListener('click', () => {
-  if (linux) return; // シリアル端末側は自分の履歴を持っている (別途)
-  term.reset();
-  term.draw();
+// **ペーストはキーを打つのと同じ。** クリップボードの中身を1文字ずつ
+// ゲストへ流し込む — 画面を消す「クリア」より、長いコマンドを持ち込める
+// こちらの方が要る (DOSのパスやURLは打つのが面倒なので)
+$('paste').addEventListener('click', async () => {
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    setStatus('クリップボードを読めませんでした (ブラウザに拒否されました)', true);
+    return;
+  }
+  if (!text) return;
+  if (linux) term.onData?.(text);
+  else machine?.paste(text.replaceAll('¥', '\\'));
   focusScreen();
 });
 

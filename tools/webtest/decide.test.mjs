@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar,
+  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
 } from '../../web/decide.js';
 
 /** 先頭512バイトの末尾に 0x55AA を置いた、最小の起動できるディスク */
@@ -87,4 +87,23 @@ test('¥ はバックスラッシュとして届く', () => {
   assert.equal(guestChar('¥'), '\\', 'MacのJIS配列で A:\\> のパスが打てる');
   assert.equal(guestChar('a'), 'a');
   assert.equal(guestChar('\\'), '\\');
+});
+
+test('出し入れは属性で行う (SVGの .hidden は効かない)', () => {
+  // DOMを持ち出さずに、属性を触ったかどうかだけを見る作りもの。
+  // **SVGは .hidden プロパティを持たない**ので、代入で済ませると
+  // 見た目が変わらないまま読み返しだけ辻褄が合う (実際に踏んだ)
+  const el = {
+    attrs: new Set(),
+    toggleAttribute(name, on) {
+      if (on) this.attrs.add(name);
+      else this.attrs.delete(name);
+      return on;
+    },
+  };
+  setHidden(el, true);
+  assert.ok(el.attrs.has('hidden'), '隠すときは hidden 属性が付く');
+  setHidden(el, false);
+  assert.ok(!el.attrs.has('hidden'), '出すときは hidden 属性が外れる');
+  assert.equal(el.hidden, undefined, 'プロパティ側は触らない (SVGでは意味を持たない)');
 });
