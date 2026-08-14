@@ -168,14 +168,14 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
       直接ロードして32bitエントリへ (QEMUの `-kernel` 方式)。
       ブラウザで Linux 6.18 (Alpine) が起動し、busybox のシェルで遊べる
 - [ ] **4c: virtio-blk** — virtio-mmio を使えば PCI を実装せずに済む
-- [ ] **4d: x87 (FPU)** — 今はスタブ (ESCを黙って流す) で、**muslのstrtodが
-      壊れる**。`sleep 3` の「3」がbusyboxのparse_duration (strtod・x87長倍精度)
-      で20msに化け、ゲストのpingが本物のインターネットへ洪水になった
-      (2026-08-14に実害)。printf '%f' は収束せず無限ループ。整数の道
-      (DHCP/TCP/read -t) は正しいので、ネットは動くが**浮動小数点を通る
-      時間指定が全部嘘になる**。f64裏打ちの実装 (QEMU-tiny/v86と同じ割り切り)
-      + Unicornオラクルのcosim拡張で行く。5bの前の踏み石は不要 (16bitは
-      has_fpu=false でFPU無しの顔を貫いている)
+- [x] **4d: x87 (FPU)** — f64裏打ちで実装 (2026-08-14、QEMU-tiny/v86と同じ
+      割り切り)。スタブが演算のESCを黙って流していた時代、muslのstrtodが壊れ
+      `sleep 3` の「3」がbusyboxのparse_durationで20msに化け、ゲストのpingが
+      本物のインターネットへ洪水になった (同日の実害が着工の引き金)。
+      実装後: printf '%f' 3 = 3.000000、time sleep 3 = 実時間3.01s。
+      未実装ESCは trap で止める (黙って流す穴は塞いだ)。
+      台帳: 80bit精度そのもの (f80 softfloat) とUnicornオラクルのcosim拡張は
+      精度が問題になった実測が出てから
 
 ## Tier 5: ネットワーク (2026-08-13 引き直し、[ADR-0017](adr/0017-network-isa-first.md))
 
