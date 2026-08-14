@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
+  THEMES, nextTheme, resolveTheme, menuAbility,
 } from '../../web/decide.js';
 
 /** 先頭512バイトの末尾に 0x55AA を置いた、最小の起動できるディスク */
@@ -106,4 +107,25 @@ test('出し入れは属性で行う (SVGの .hidden は効かない)', () => {
   setHidden(el, false);
   assert.ok(!el.attrs.has('hidden'), '出すときは hidden 属性が外れる');
   assert.equal(el.hidden, undefined, 'プロパティ側は触らない (SVGでは意味を持たない)');
+});
+
+test('見た目の好みは3つを回り、system だけがOSに従う', () => {
+  assert.deepEqual(THEMES, ['system', 'dark', 'light']);
+  assert.equal(nextTheme('system'), 'dark');
+  assert.equal(nextTheme('light'), 'system', '最後まで行ったら先頭へ');
+  assert.equal(nextTheme('でたらめ'), 'system', '覚えが壊れていても止まらない');
+
+  assert.equal(resolveTheme('dark', true), 'dark', '選んだ側がOSより強い');
+  assert.equal(resolveTheme('light', false), 'light');
+  assert.equal(resolveTheme('system', true), 'light', 'OSが明るいなら明るく');
+  assert.equal(resolveTheme('system', false), 'dark');
+});
+
+test('右クリックのメニューは今できることだけ出す', () => {
+  // 起動前: 貼るゲストが居ない。イメージは受け付ける
+  assert.deepEqual(menuAbility(false, false, true), { copy: false, paste: false, open: true });
+  // 走行中: コピーも貼り付けもできるが、**ディスクは差し替えない** (ドロップと同じ)
+  assert.deepEqual(menuAbility(true, false, false), { copy: true, paste: true, open: false });
+  // 起動前でも、選んだ字があればコピーはできる
+  assert.equal(menuAbility(false, true, true).copy, true);
 });
