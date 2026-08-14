@@ -217,11 +217,6 @@ function boot(image, label) {
   // 物理キーはそのまま、貼り付けはASCIIとして送る (¥→\ の理由は decide.js)
   term.onKey = (code, down) => machine.key(code, down);
   term.onChar = ch => machine.typeChar(guestChar(ch));
-  // 貼り付けは**必ず流量制御を通す** (一度に流すと消える。下の startPaste)
-  term.onPaste = text => startPaste(text.replaceAll('¥', '\\'));
-  // Ctrl+Shift+V は paste 事象が飛ばないので、こちらから読みにいく
-  term.onPasteRequest = () => pasteFromClipboard();
-
   // 動作確認用の窓口。手元で開いているときだけ出す
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
     window.__machine = machine;
@@ -304,17 +299,7 @@ for (const bar of document.querySelectorAll('.bar')) {
 // **ペーストはキーを打つのと同じ。** クリップボードの中身を1文字ずつ
 // ゲストへ流し込む — 画面を消す「クリア」より、長いコマンドを持ち込める
 // こちらの方が要る (DOSのパスやURLは打つのが面倒なので)
-$('paste').addEventListener('click', async () => {
-  // **貼りかけを止められるようにする。** 間違って大きなものを貼ると
-  // コマンドが延々と流れ込むので、もう一度押したら取り消せる
-  if (pasteQueue) {
-    const left = pasteQueue.length;
-    stopPaste();
-    setStatus(`貼り付けを止めました (残り ${left} 文字は捨てました)`);
-    return;
-  }
-  pasteFromClipboard();
-});
+$('paste').addEventListener('click', () => requestPaste());
 
 // ボタンにも組みを添える。**その環境の組みだけ出す** —
 // Macに Ctrl+Shift+C と書いても、押す人は居ない
@@ -401,11 +386,63 @@ window.addEventListener('keydown', e => {
   // **捕捉段で止める。** ここで通すと、閉じるついでに Esc がゲストへ届く
   if (e.key === 'Escape' && !menu.hidden) { e.stopPropagation(); e.preventDefault(); closeMenu(); }
 }, true);
-$('mCopy').addEventListener('click', () => { closeMenu(); $('copy').click(); });
-$('mPaste').addEventListener('click', () => { closeMenu(); pasteFromClipboard(); });
+$('mCopy').addEventListener('click', () => { closeMenu(); doCopy(); });
+$('mPaste').addEventListener('click', () => { closeMenu(); requestPaste(); });
 $('mOpen').addEventListener('click', () => { closeMenu(); $('imageFile').click(); });
 
-/** クリップボードを読んでゲストへ流す (ボタンと Ctrl+Shift+V の共通の道) */
+// ---------- コピーと貼り付けの一本道 ----------
+//
+// 呼び口は4つある — 見出しのボタン・キーの組み・右クリックのメニュー・
+// Macの ⌘V (ブラウザが paste 事象をくれる)。**判断はここ1箇所に置く。**
+// 以前は経路ごとに実装が分かれていて、組みで押すと選んだ範囲しか取れず、
+// 取り消しも効かず、状態も出ないという食い違いが起きていた
+
+/**
+ * コピー。**選んでいればそこだけ、選んでいなければ今見えている画面まで。**
+ * 履歴の全文は取らない — 全文をコピーしてそのまま貼ると、起動ログが
+ * 丸ごとコマンドとして流れ込む (実際にELKSがそうなった)。
+ * 全部が欲しいときは「ログを保存」が受け持つ
+ */
+async function doCopy() {
+  // Linuxは画面が流れていくので、選んでいなければログ全部を取る。
+  // VGA機は見えている画面まで (どちらも選択が最優先)
+  // Linuxは別のcanvas (シリアル端末) なので、VGA端末の選択は見ない —
+  // 見ると前の機械で選んだ範囲をコピーしてしまう
+  const sel = linux ? '' : term.selectedText();
+  const text = sel || (linux ? linux.logText : term.screenText());
+  if (!text) return;
+  if (await term.copyText(text)) {
+    const lines = text.split('\n').length;
+    setStatus(
+      sel ? `選んだ ${text.length} 文字をコピーしました`
+        : linux ? `ログ (${lines} 行) をコピーしました`
+        : `画面 (${lines} 行) をコピーしました`,
+    );
+  } else {
+    setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
+  }
+}
+
+/**
+ * 貼り付けを頼まれたときの入口。
+ *
+ * **貼りかけは止められる。** 間違って大きなものを貼るとコマンドが
+ * 延々と流れ込むので、流れている最中の2度目は「取り消し」になる。
+ * これはボタンだけの作法だったが、組みでも右クリックでも同じにする
+ * @param {string} [text] 中身が既に届いている経路 (Macの ⌘V) だけ渡す
+ */
+function requestPaste(text) {
+  if (pasteQueue) {
+    const left = pasteQueue.length;
+    stopPaste();
+    setStatus(`貼り付けを止めました (残り ${left} 文字は捨てました)`);
+    return;
+  }
+  if (text === undefined) pasteFromClipboard();
+  else deliverPaste(text);
+}
+
+/** クリップボードを読んで流す (中身が届かない経路のための前段) */
 async function pasteFromClipboard() {
   let text = '';
   try {
@@ -414,10 +451,15 @@ async function pasteFromClipboard() {
     setStatus('クリップボードを読めませんでした (ブラウザに拒否されました)', true);
     return;
   }
+  deliverPaste(text);
+}
+
+/** ゲストへ流す出口。**経路によらずここを通る** */
+function deliverPaste(text) {
   if (!text) return;
   // シリアル (Linux) は受け側の行列が深いので一息に流せる。
   // VGA機は**キーボードとして打つ**ので、少しずつ流す (下記)
-  if (linux) term.onData?.(text);
+  if (linux) linux.send(text);
   else startPaste(text.replaceAll('¥', '\\'));
   focusScreen();
 }
@@ -477,23 +519,17 @@ function biosKeyRoom() {
   return Math.max(0, 16 - 1 - used);
 }
 
-$('copy').addEventListener('click', async () => {
-  // **選んでいればそこだけ。** 何も選んでいないときも「今見えている画面」まで
-  // で、履歴の全文は取らない — 全文をコピーしてそのまま貼ると、起動ログが
-  // 丸ごとコマンドとして流れ込む (実際にELKSがそうなった)。
-  // 全部が欲しいときは「ログを保存」が受け持つ
-  const text = linux ? linux.logText : term.selectedText() || term.screenText();
-  try {
-    await navigator.clipboard.writeText(text);
-    setStatus(
-      term.selectedText()
-        ? `選んだ ${text.length} 文字をコピーしました`
-        : `画面 (${text.split('\n').length} 行) をコピーしました`,
-    );
-  } catch {
-    setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
-  }
-});
+$('copy').addEventListener('click', () => doCopy());
+
+// **クリップボードの取っ手は機械に依らないので、ここで一度だけ張る。**
+// boot() の中で張っていたときは、Linuxを直接起動した回では張られず、
+// 組みでの貼り付けが黙って効かなかった。行き先 (doCopy / requestPaste) が
+// 自分で機械を見るようになった以上、張り替える理由はもう無い。
+// Macの ⌘V は中身が届くのでそれを渡し、Ctrl+Shift+V は事象が飛ばないので
+// 読みにいかせる — どちらも取り消し・流量制御・Linux分岐は共通である
+term.onPaste = text => requestPaste(text);
+term.onPasteRequest = () => requestPaste();
+term.onCopyRequest = () => doCopy();
 
 // --- デバッガの子ウインドウ ---
 //
@@ -1157,6 +1193,10 @@ async function select(m, { autoBoot = true } = {}) {
     $('linuxScreen').hidden = false;
     linux = mountLinux($('linuxScreen'), {
       onStatus: setStatus,
+      // クリップボードはVGA機と同じ道へ (取り消しも状態表示も共通になる)
+      onPaste: text => requestPaste(text),
+      onPasteRequest: () => requestPaste(),
+      onCopyRequest: () => doCopy(),
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
       onTone: hz => speaker.update(hz),

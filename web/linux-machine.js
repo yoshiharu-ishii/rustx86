@@ -30,6 +30,11 @@ let sharedTerm = null;
 export function mountLinux(canvas, opts = {}) {
   const term = (sharedTerm ??= new AnsiTerminal(canvas, { cols: 80, rows: 24 }));
   term.reset();
+  // クリップボードの行き先は**呼び手 (main.js) の一本道**。
+  // ここで onData へ直に流していたので、VGA機とは別の作法になっていた
+  term.onPaste = (text) => opts.onPaste?.(text);
+  term.onPasteRequest = () => opts.onPasteRequest?.();
+  term.onCopyRequest = () => opts.onCopyRequest?.();
   const status = (msg, err = false) => opts.onStatus?.(msg, err);
 
   let worker = null;
@@ -329,6 +334,10 @@ export function mountLinux(canvas, opts = {}) {
         スナップショット起動でも画面に見えている分は必ず入る */
     get logText() {
       return term.allText();
+    },
+    /** 文字列をゲストへ流す (貼り付け)。シリアルは受け側の行列が深いので一息でよい */
+    send(text) {
+      term.onData?.(text);
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {

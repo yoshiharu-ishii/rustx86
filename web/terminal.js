@@ -45,16 +45,17 @@ const SCROLLBAR_W = 10;
 /** カーソルの点滅周期 (ミリ秒) */
 const BLINK_MS = 530;
 
-/** このMacか (Cmd を修飾キーに使う環境か) */
-const IS_MAC = /Mac|iPhone|iPad/.test(
+/** Cmd を修飾キーに使う環境か */
+export const IS_MAC = /Mac|iPhone|iPad/.test(
   globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '',
 );
 
 /**
  * クリップボードの組みか。**素の Ctrl+C をゲストから奪わない**のが要点で、
- * そのためにMac以外では Shift を要求する (端末の作法)
+ * そのためにMac以外では Shift を要求する (端末の作法)。
+ * シリアル端末 (ans.js) も同じ鍵でなければ困るので、ここから引かせる
  */
-function isClipboardCombo(e, code) {
+export function isClipboardCombo(e, code) {
   if (e.code !== code) return false;
   return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey;
 }
@@ -109,10 +110,12 @@ export class Terminal {
 
     /** キーが押された/離されたときに呼ばれる。(code, down) => boolean */
     this.onKey = null;
-    /** 貼り付けられたときに呼ばれる。(text) => void */
+    /** 貼り付けられたときに呼ばれる (Macの ⌘V など、中身が届く経路)。(text) => void */
     this.onPaste = null;
-    /** Ctrl+Shift+V のとき呼ばれる (クリップボードは呼び手が読む) */
+    /** 貼り付けの組みが押されたときに呼ばれる (クリップボードは呼び手が読む) */
     this.onPasteRequest = null;
+    /** コピーの組みが押されたときに呼ばれる (何をコピーするかは呼び手が決める) */
+    this.onCopyRequest = null;
     /** 文字として打たれたときに呼ばれる (JP配列のとき)。(ch) => void */
     this.onChar = null;
 
@@ -500,13 +503,10 @@ export class Terminal {
       // コマンドを止める鍵なので、端末が横取りしてはいけない
       // (Macは Cmd と Ctrl が別なので、この衝突が起きない)
       if (isClipboardCombo(e, 'KeyC')) {
-        const sel = this.selectedText();
-        if (sel) {
-          this.#copy(sel);
-          this.selection = null;
-          this.draw();
-        }
+        // **中身は決めない。** 何をコピーするか (選んだ範囲か、見えている画面か)
+        // は見出しのボタンと同じ判断でなければならないので、呼び手に任せる
         e.preventDefault();
+        this.onCopyRequest?.();
         return;
       }
       if (isClipboardCombo(e, 'KeyV')) {
@@ -552,18 +552,23 @@ export class Terminal {
   }
 
   /**
-   * 文字列をクリップボードへ。
+   * 文字列をクリップボードへ。**書き込みの道はここ1本にする。**
    *
    * `navigator.clipboard` は**セキュアな配信元でしか存在しない**。
    * localhost は該当するが、LAN内のIPアドレスで開くと消える。
    * 黙って何も起きないのが一番困るので、古いやり方に落とす。
+   * @returns {Promise<boolean>} 書けたか (呼び手が結果を伝える)
    */
-  #copy(text) {
+  async copyText(text) {
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).catch(() => this.#copyFallback(text));
-    } else {
-      this.#copyFallback(text);
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        /* セキュアでない配信元。下の古いやり方に落とす */
+      }
     }
+    return this.#copyFallback(text);
   }
 
   #copyFallback(text) {
@@ -573,13 +578,15 @@ export class Terminal {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    let ok = false;
     try {
-      document.execCommand('copy');
+      ok = document.execCommand('copy');
     } catch {
       /* ここまで来たら諦める */
     }
     ta.remove();
     this.canvas.focus();
+    return ok;
   }
 
   #scrollbarTo(ev) {
