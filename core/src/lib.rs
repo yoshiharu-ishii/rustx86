@@ -970,8 +970,16 @@ impl Machine {
                 return elapsed;
             }
             // HLT中でも装置は動き続ける。タイマ割り込みで目を覚ますため、
-            // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
-            if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
+            // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する。
+            // **PICの挙手も見る** — ワンショットのタイマは鳴った瞬間に止まる
+            // (running=false) ので、鳴らした割り込みがまだPICに居るうちに
+            // ここで抜けると、配られないまま機械が永眠する (Linuxのhresティックで
+            // 実際に眠った。周期モードのOSでは running が真のままで起きない)
+            if self.halted
+                && self.pending_irq.is_none()
+                && !self.devices.pit.counters[0].running
+                && !self.devices.pic[0].has_pending()
+            {
                 break;
             }
             if self.trap.is_some() {

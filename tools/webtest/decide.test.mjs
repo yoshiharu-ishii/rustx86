@@ -69,9 +69,8 @@ test('挿さるNICはOSの世代で決まる', () => {
   assert.match(isa.label, /NE2000/);
 
   const pci = nicFor(true);
-  assert.ok(!pci.usable, 'LinuxはISAを知らないので、まだ挿せるカードが無い');
-  assert.match(pci.label, /PCI/);
-  assert.ok(pci.why, '選べない理由を言えること');
+  assert.ok(pci.usable, 'LinuxにはPCIのRTL8029が挿さる');
+  assert.match(pci.label, /RTL8029/);
 });
 
 test('自動起動は線が生きているときだけネットの続きを流す', () => {
