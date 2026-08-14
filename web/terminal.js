@@ -45,6 +45,20 @@ const SCROLLBAR_W = 10;
 /** カーソルの点滅周期 (ミリ秒) */
 const BLINK_MS = 530;
 
+/** このMacか (Cmd を修飾キーに使う環境か) */
+const IS_MAC = /Mac|iPhone|iPad/.test(
+  globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '',
+);
+
+/**
+ * クリップボードの組みか。**素の Ctrl+C をゲストから奪わない**のが要点で、
+ * そのためにMac以外では Shift を要求する (端末の作法)
+ */
+function isClipboardCombo(e, code) {
+  if (e.code !== code) return false;
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey;
+}
+
 export class Terminal {
   /**
    * @param {HTMLCanvasElement} canvas
@@ -97,6 +111,8 @@ export class Terminal {
     this.onKey = null;
     /** 貼り付けられたときに呼ばれる。(text) => void */
     this.onPaste = null;
+    /** Ctrl+Shift+V のとき呼ばれる (クリップボードは呼び手が読む) */
+    this.onPasteRequest = null;
     /** 文字として打たれたときに呼ばれる (JP配列のとき)。(ch) => void */
     this.onChar = null;
 
@@ -477,12 +493,29 @@ export class Terminal {
     });
 
     c.addEventListener('keydown', e => {
-      // コピーは端末が受け取る (ゲストへは渡さない)
-      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC' && this.selectedText()) {
-        this.#copy(this.selectedText());
-        this.selection = null;
-        this.draw();
+      // **コピー/ペーストの組みはOSの作法に合わせる。**
+      //   Mac      Cmd+C / Cmd+V
+      //   その他   Ctrl+Shift+C / Ctrl+Shift+V
+      // 素の Ctrl+C は**ゲストのもの** — DOSでもELKSでも実行中の
+      // コマンドを止める鍵なので、端末が横取りしてはいけない
+      // (Macは Cmd と Ctrl が別なので、この衝突が起きない)
+      if (isClipboardCombo(e, 'KeyC')) {
+        const sel = this.selectedText();
+        if (sel) {
+          this.#copy(sel);
+          this.selection = null;
+          this.draw();
+        }
         e.preventDefault();
+        return;
+      }
+      if (isClipboardCombo(e, 'KeyV')) {
+        // Macの Cmd+V はブラウザが paste 事象をくれるので、そちらに任せる。
+        // Ctrl+Shift+V は事象が飛ばないので、こちらから読みにいく
+        if (!IS_MAC) {
+          e.preventDefault();
+          this.onPasteRequest?.();
+        }
         return;
       }
       // 打ったら最新へ戻る

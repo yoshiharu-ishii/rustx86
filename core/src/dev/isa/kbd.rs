@@ -93,6 +93,13 @@ impl Kbd8042 {
         self.keys.pop_front().unwrap_or(0xFF)
     }
 
+    /// まだゲストへ配っていないスキャンコードの数。
+    /// **配送は1タイマー刻みに1バイト**なので、ここが空くのを待たずに
+    /// 流し込むと、貼り付けた文字が行列に積み上がるだけになる
+    pub fn backlog(&self) -> usize {
+        self.keys.len()
+    }
+
     /// 今このタイミングでIRQ1を上げるべきか。**1バイトにつき1回だけ真を返す**
     pub fn take_irq(&mut self) -> bool {
         if self.has_data() && !self.irq_asserted {
