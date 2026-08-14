@@ -91,3 +91,16 @@ export function scriptFor(m, linkUp) {
 export function guestChar(ch) {
   return ch === '¥' ? '\\' : ch;
 }
+
+/**
+ * 要素の出し入れ。**`el.hidden = x` を使ってはいけない。**
+ *
+ * `hidden` は HTMLElement のプロパティで、**SVGElement には無い**。
+ * SVGに代入するとJSの変数が生えるだけで属性は変わらず、しかも読み返すと
+ * その変数が返るので**辻褄が合って気づけない** (一時停止の絵がずっと
+ * 差し替わらなかった原因。読み返す検証をすり抜けた)。
+ * 属性で操作すれば、HTMLでもSVGでも同じように効く。
+ */
+export function setHidden(el, hidden) {
+  el.toggleAttribute('hidden', !!hidden);
+}
