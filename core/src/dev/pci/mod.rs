@@ -400,23 +400,36 @@ fn mask_of(size: u8) -> u32 {
 mod tests {
     use super::*;
 
+    /// 試験用の**架空の装置**。実在のカードを題材にしない — 機構のテストが
+    /// 特定のカードの値に依存すると、カード側を直したときに機構のテストが
+    /// 落ちて、原因の切り分けが1段遠くなる。
+    /// 実在の装置が名乗る値の検査は、その装置のファイルが持つ
+    /// (`host_bridge.rs` / `rtl8029.rs`)
+    fn test_card() -> PciFunction {
+        PciFunction::new(0xDEAD, 0xBEEF, 0x00, 0x00, 0x00)
+    }
+
+    /// 32バイトのI/O窓を1つ持つ架空の装置
+    fn io_card() -> PciFunction {
+        test_card().with_bar(0, Bar { size: 32, io: true }, 0xC000)
+    }
+
     fn host() -> PciHost {
         let mut h = PciHost::new();
-        h.plug(0, host_bridge());
+        h.plug(0, test_card());
         h
     }
 
     /// 0xCF8 で指して 0xCFC で読む、という機構#1の一往復
     #[test]
     fn config_mechanism_one_roundtrip() {
-        let h = host();
-        let mut h = h;
+        let mut h = host();
         h.io_write(CONFIG_ADDRESS, 0x8000_0000, 4); // bus0 dev0 fun0 reg0
-        assert_eq!(h.io_read(CONFIG_DATA, 4), 0x1237_8086, "ベンダIDと装置ID");
+        assert_eq!(h.io_read(CONFIG_DATA, 4), 0xBEEF_DEAD, "ベンダIDと装置ID");
         // バイトで覗いても同じ場所が見える (ポートのずれ = レジスタ内のずれ)
-        assert_eq!(h.io_read(CONFIG_DATA, 1), 0x86);
-        assert_eq!(h.io_read(CONFIG_DATA + 1, 1), 0x80);
-        assert_eq!(h.io_read(CONFIG_DATA + 2, 2), 0x1237);
+        assert_eq!(h.io_read(CONFIG_DATA, 1), 0xAD);
+        assert_eq!(h.io_read(CONFIG_DATA + 1, 1), 0xDE);
+        assert_eq!(h.io_read(CONFIG_DATA + 2, 2), 0xBEEF);
     }
 
     /// **空きスロットは全部1を返す。** OSはこれで不在を知る
@@ -435,22 +448,15 @@ mod tests {
     fn identity_is_read_only() {
         let mut h = host();
         h.io_write(CONFIG_ADDRESS, 0x8000_0000, 4);
-        h.io_write(CONFIG_DATA, 0xDEAD_BEEF, 4);
-        assert_eq!(h.io_read(CONFIG_DATA, 4), 0x1237_8086);
+        h.io_write(CONFIG_DATA, 0x1234_5678, 4);
+        assert_eq!(h.io_read(CONFIG_DATA, 4), 0xBEEF_DEAD);
     }
 
     /// BARの幅の測定 — 全部1を書いて読み返すと、使わない下位だけが残る
     #[test]
     fn bar_sizing_reports_width() {
         let mut h = PciHost::new();
-        h.plug(
-            2,
-            PciFunction::new(0x10EC, 0x8029, 0x02, 0x00, 0x00).with_bar(
-                0,
-                Bar { size: 32, io: true },
-                0xC000,
-            ),
-        );
+        h.plug(2, io_card());
         let addr = 0x8000_0000 | (2 << 11) | reg::BAR0 as u32;
         h.io_write(CONFIG_ADDRESS, addr, 4);
         assert_eq!(h.io_read(CONFIG_DATA, 4), 0xC001, "I/O BARは下位bitが1");
@@ -469,7 +475,7 @@ mod tests {
     /// 無いBARは書いても0のまま (OSはこれで「このBARは無い」と知る)
     #[test]
     fn absent_bar_stays_zero() {
-        let mut h = host();
+        let mut h = host(); // BARを持たない架空の装置
         h.io_write(CONFIG_ADDRESS, 0x8000_0000 | reg::BAR0 as u32, 4);
         h.io_write(CONFIG_DATA, 0xFFFF_FFFF, 4);
         assert_eq!(h.io_read(CONFIG_DATA, 4), 0);
@@ -480,14 +486,7 @@ mod tests {
     #[test]
     fn io_hit_needs_command_bit() {
         let mut h = PciHost::new();
-        h.plug(
-            2,
-            PciFunction::new(0x10EC, 0x8029, 0x02, 0x00, 0x00).with_bar(
-                0,
-                Bar { size: 32, io: true },
-                0xC000,
-            ),
-        );
+        h.plug(2, io_card());
         assert_eq!(h.io_hit(0xC000), None, "許可前は名乗らない");
 
         let addr = 0x8000_0000 | (2 << 11) | reg::COMMAND as u32;
@@ -504,12 +503,7 @@ mod tests {
     #[test]
     fn io_window_follows_the_bar() {
         let mut h = PciHost::new();
-        h.plug(
-            2,
-            PciFunction::new(0x10EC, 0x8029, 0x02, 0x00, 0x00)
-                .with_bar(0, Bar { size: 32, io: true }, 0xC000)
-                .with_irq(11, 1),
-        );
+        h.plug(2, io_card().with_irq(11, 1));
         let cmd = 0x8000_0000 | (2 << 11) | reg::COMMAND as u32;
         h.io_write(CONFIG_ADDRESS, cmd, 4);
         h.io_write(CONFIG_DATA, command::IO_SPACE as u32, 4);
