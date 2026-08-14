@@ -383,6 +383,28 @@ pub fn host_bridge() -> PciFunction {
     PciFunction::new(0x8086, 0x1237, 0x06, 0x00, 0x00)
 }
 
+/// NICが挿さるスロット。**位置は固定でよい** — 実機でも挿した場所は
+/// 動かないし、決まっていれば装置への振り分けが `match` で書ける
+pub const NET_SLOT: usize = 3;
+
+/// RTL8029のI/O窓の番地 (firmwareが配ったことにする値)。
+/// Linuxは既に割り当て済みなら尊重するので、BIOSを書かずに済む
+pub const NET_IO_BASE: u32 = 0xC000;
+
+/// RTL8029AS — **PCIの皮を被ったNE2000** (Realtek 10EC:8029)。
+///
+/// 中身のレジスタはISA版と同じDP8390なので、装置の実体は
+/// [`isa::ne2000`](../isa/ne2000/index.html) をそのまま使う。この関数が
+/// 作るのは**設定空間の顔**だけである。実物のRTL8029ASも「NE2000互換で
+/// あること」を売りにした廉価チップで、ドライバ (ne2k-pci) はISA版の
+/// コードの大半を共有している — 皮だけ替わるのは歴史的にも正しい姿
+pub fn rtl8029(irq_line: u8) -> PciFunction {
+    PciFunction::new(0x10EC, 0x8029, 0x02, 0x00, 0x00)
+        .with_bar(0, Bar { size: 32, io: true }, NET_IO_BASE)
+        .with_irq(irq_line, 1) // INTA#
+        .with_subsystem(0x10EC, 0x8029)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

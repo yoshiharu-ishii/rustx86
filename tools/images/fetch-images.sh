@@ -145,6 +145,13 @@ PY
 
 build_linux() {
   mkdir -p "$IMAGES"
+  # カーネルとinitramfsは**対で取る**。Alpineのnetbootは常に最新を指すので、
+  # 別々の時期に取ると版がずれる — モジュール (initramfs側) のvermagicが
+  # カーネルと合わず insmod が黙って失敗する (実際に 6.18/6.12 で踏んだ)。
+  # 片方でも欠けていたら両方を取り直す
+  if [ ! -f "$IMAGES/vmlinuz-lts" ] || [ ! -f "$IMAGES/initramfs-lts" ]; then
+    rm -f "$IMAGES/vmlinuz-lts" "$IMAGES/initramfs-lts" "$IMAGES/System.map-lts"
+  fi
   fetch "$ALPINE_BASE/vmlinuz-lts" "$IMAGES/vmlinuz-lts"
   fetch "$ALPINE_BASE/initramfs-lts" "$IMAGES/initramfs-lts"
   # System.map (ブート解剖 bootprof 用)。ファイル名に版が入るので一覧から拾う

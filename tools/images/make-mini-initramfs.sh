@@ -27,7 +27,15 @@ cp "$work/bin/busybox" "$work/root/bin/busybox"
 cp "$work/lib/ld-musl-i386.so.1" "$work/root/lib/"
 cp "$work/lib/libc.musl-x86.so.1" "$work/root/lib/" 2>/dev/null || true
 cp tools/guest/snake "$work/root/bin/snake"
-chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"*
+# ネットワークのモジュール。Alpineのinitramfsから3つだけ借りる —
+# カーネルと同じ荷物から取るので vermagic が必ず合う。
+#   8390 + ne2k-pci  NICのドライバ (RTL8029 = PCI版NE2000)
+#   af_packet        生ソケット (udhcpc がDHCPを喋るのに要る)
+mod_dir=$(dirname "$(find -L "$work/lib" "$work/usr/lib" -name ne2k-pci.ko 2>/dev/null | head -1)")
+pkt=$(find -L "$work/lib" "$work/usr/lib" -name af_packet.ko 2>/dev/null | head -1)
+mkdir -p "$work/root/lib/modules"
+cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
+chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
 cat > "$work/root/init" <<'INIT'
 #!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
@@ -38,6 +46,12 @@ cat > "$work/root/init" <<'INIT'
 # 作法を選べるように、素直なxtermを名乗っておく
 export TERM=xterm
 /bin/busybox stty rows 24 cols 80
+# NICのドライバを挿す。**カードが無くてもエラーにはならない** — ドライバは
+# 載るがbindする相手が居ないだけ (実機にカードを挿していないのと同じ)。
+# 依存の順: ne2k-pci は 8390 の上に建つ
+/bin/busybox insmod /lib/modules/af_packet.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/8390.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/ne2k-pci.ko 2>/dev/null
 echo
 echo "  rustx86 mini initramfs — busybox shell"
 echo "  ゲーム: snake   エディタ: vi"
