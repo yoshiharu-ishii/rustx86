@@ -22,7 +22,7 @@ fi
 [ -f "$work/bin/busybox" ] || { echo "busyboxが取り出せない"; exit 1; }
 [ -f "$work/lib/ld-musl-i386.so.1" ] || { echo "ld-muslが取り出せない"; exit 1; }
 
-mkdir -p "$work/root/bin" "$work/root/lib" "$work/root/proc" "$work/root/sys" "$work/root/dev"
+mkdir -p "$work/root/bin" "$work/root/lib" "$work/root/proc" "$work/root/sys" "$work/root/dev" "$work/root/tmp"
 cp "$work/bin/busybox" "$work/root/bin/busybox"
 cp "$work/lib/ld-musl-i386.so.1" "$work/root/lib/"
 cp "$work/lib/libc.musl-x86.so.1" "$work/root/lib/" 2>/dev/null || true
@@ -35,6 +35,23 @@ mod_dir=$(dirname "$(find -L "$work/lib" "$work/usr/lib" -name ne2k-pci.ko 2>/de
 pkt=$(find -L "$work/lib" "$work/usr/lib" -name af_packet.ko 2>/dev/null | head -1)
 mkdir -p "$work/root/lib/modules"
 cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
+# TLS一式 — busyboxのwgetはhttpsを外部ヘルパ ssl_client に投げる。
+# 全部Alpineのinitramfs-ltsから借りる (busybox/muslと同じ出自)。
+#   ssl_client            13KB  wgetのTLS口 (libssl/libcryptoに動的リンク)
+#   libssl/libcrypto.so.3 4.5MB OpenSSL本体。**同梱物で一番重い**が、TLSの
+#                               実体そのものなので削れない (gzip後 約2.1MB)
+#   ca-certificates.crt   179KB 信頼の根。減らすと「特定サイトだけ謎に失敗」
+#                               を生むので全束のまま入れる
+# 前提はcore側に2つ: MMX (libcryptoが#UDせず動く) と RTCの実時刻注入
+# (証明書の有効期間検証)。どちらが欠けてもhttpsは開かない
+cp "$work/bin/ssl_client" "$work/root/bin/ssl_client"
+cp "$work/usr/lib/libssl.so.3" "$work/usr/lib/libcrypto.so.3" "$work/root/lib/"
+mkdir -p "$work/root/etc/ssl/certs"
+cp "$work/etc/ssl/certs/ca-certificates.crt" "$work/root/etc/ssl/certs/"
+# OpenSSLの既定CAファイルは /etc/ssl/cert.pem (OPENSSLDIR直下)。
+# certs/ だけ入れても見つけてくれない — Alpineと同じ別名を張る
+ln -sf certs/ca-certificates.crt "$work/root/etc/ssl/cert.pem"
+chmod 755 "$work/root/bin/ssl_client"
 chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
 # udhcpc がリースを**実際に適用する**スクリプト。busybox の udhcpc は
 # 取ったリースを自分では適用せず、このスクリプトに渡すだけである

@@ -76,6 +76,9 @@ export class Machine {
   /** @param {Uint8Array} image ディスクイメージ (フロッピー) */
   constructor(image) {
     this.emu = Emulator.from_disk(image);
+    // RTCを実時刻に合わせる (DOSのDATE/TIMEが今日を示す)。
+    // CIのヘッドレス検証は注入しないので、そちらは決定的なまま
+    this.emu.set_rtc_unix(Date.now() / 1000);
     this.running = false;
     /** 直前のカーソル位置。動いたかどうかの判定に使う */
     this.lastCursor = [-1, -1];

@@ -676,6 +676,14 @@ impl Machine {
         self.devices.net = Some(nic);
     }
 
+    /// RTCの時計をUNIX時刻 (UTC秒) に合わせる。net_attachと同じ入力口の
+    /// 流儀 — 呼ばなければ既定の固定時刻のままで、起動はビット同一
+    /// (CIのgolden traceは不変)。ブラウザは電源投入時に実時刻を渡し、
+    /// ゲストのTLS証明書検証が通る時計になる
+    pub fn set_rtc_unix(&mut self, secs: u64) {
+        self.devices.cmos.set_clock_unix(secs);
+    }
+
     /// 外の世界 (WebSocket等) から届いたEthernetフレームを受信リングへ。
     /// シリアルの feed と同じ境界 — 入れるタイミングは外側が決め、
     /// 同じ列を同じタイミングで入れれば実行は決定的になる
