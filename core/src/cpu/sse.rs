@@ -48,11 +48,12 @@ pub(crate) enum Pfx {
 }
 
 pub(crate) fn pfx(d: &Decoder) -> Pfx {
-    // 32bitコードで 66 が付くと opsize32 が反転して false になっている
+    // 命令選択子は**生のプレフィクス**で決まる。実効オペランド幅 (opsize32) を
+    // 見ると16bitコードで判定が裏返る — 66の有無そのものを見る
     match d.rep {
         Some(0xF3) => Pfx::F3,
         Some(0xF2) => Pfx::F2,
-        _ if !d.opsize32 => Pfx::P66,
+        _ if d.p66 => Pfx::P66,
         _ => Pfx::None,
     }
 }
@@ -73,11 +74,11 @@ fn write_m128(m: &mut Machine, a: u32, v: u128) {
     m.write32(a.wrapping_add(12), (v >> 96) as u32);
 }
 
-fn read_m64(m: &Machine, a: u32) -> u64 {
+pub(crate) fn read_m64(m: &Machine, a: u32) -> u64 {
     m.read32(a) as u64 | (m.read32(a.wrapping_add(4)) as u64) << 32
 }
 
-fn write_m64(m: &mut Machine, a: u32, v: u64) {
+pub(crate) fn write_m64(m: &mut Machine, a: u32, v: u64) {
     m.write32(a, v as u32);
     m.write32(a.wrapping_add(4), (v >> 32) as u32);
 }
@@ -870,8 +871,8 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
             m.write32(addr.wrapping_add(24), mx);
             m.write32(addr.wrapping_add(28), 0xFFFF); // MXCSR_MASK
             for i in 0..8 {
-                let v = m.cpu.fpu.st_raw(i);
-                let (mant, se) = crate::cpu::fpu::f64_to_f80(v);
+                // 80bit原本ごと保存する — MMX値 (指数全1) もビット同一で残る
+                let (mant, se) = m.cpu.fpu.st_f80(i);
                 let at = addr.wrapping_add(32 + i as u32 * 16);
                 m.write32(at, mant as u32);
                 m.write32(at.wrapping_add(4), (mant >> 32) as u32);
@@ -894,8 +895,7 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
                 let at = addr.wrapping_add(32 + i as u32 * 16);
                 let mant = m.read32(at) as u64 | (m.read32(at.wrapping_add(4)) as u64) << 32;
                 let se = m.read16(at.wrapping_add(8));
-                let v = crate::cpu::fpu::f80_to_f64(mant, se);
-                m.cpu.fpu.set_st_raw(i, v, ftw & (1 << i) != 0);
+                m.cpu.fpu.set_st_f80(i, mant, se, ftw & (1 << i) != 0);
             }
             m.cpu.mxcsr = m.read32(addr.wrapping_add(24));
             for i in 0..8 {

@@ -720,6 +720,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 rep: None,
                 opsize32: true,
                 addrsize32: true,
+                p66: false,
                 lock: false,
             };
             string::exec(m, &d, op);

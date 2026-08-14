@@ -30,7 +30,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v9: NE2000 (挿さっていれば) を追加
 // v10: NE2000に受信機のラッチ (running) が加わった — STA/STPはコマンドで、
 //      crの生値からは走行状態を再現できない
-pub const VERSION: u16 = 10;
+/// v11: x87に80bit原本サイドバンド (raw) が加わった — MMXがここに住む
+pub const VERSION: u16 = 11;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -243,6 +244,19 @@ impl Machine {
         w.u8(self.cpu.fpu.empty); // v10
         w.u8(self.cpu.fpu.top); // v10
         w.u16(self.cpu.fpu.cond); // v10
+        for r in self.cpu.fpu.raw {
+            // v11: 80bit原本。無し=指数0xFFFFの仮数0…は原本としてあり得るので
+            // 有無を1バイトで明示する
+            match r {
+                Some((mant, se)) => {
+                    w.u8(1);
+                    w.u32(mant as u32);
+                    w.u32((mant >> 32) as u32);
+                    w.u16(se);
+                }
+                None => w.u8(0),
+            }
+        }
         w.u32(self.cpu.mxcsr); // v7
         for x in self.cpu.xmm {
             w.u32(x as u32);
@@ -342,6 +356,16 @@ impl Machine {
         m.cpu.fpu.empty = r.u8()?;
         m.cpu.fpu.top = r.u8()?;
         m.cpu.fpu.cond = r.u16()?;
+        for i in 0..8 {
+            // v11: 80bit原本
+            m.cpu.fpu.raw[i] = if r.u8()? != 0 {
+                let mant = r.u32()? as u64 | (r.u32()? as u64) << 32;
+                let se = r.u16()?;
+                Some((mant, se))
+            } else {
+                None
+            };
+        }
         m.cpu.mxcsr = r.u32()?; // v7
         for i in 0..8 {
             let a = r.u32()? as u128;

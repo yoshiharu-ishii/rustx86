@@ -305,13 +305,16 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.regs[AX] = 0x0633;
                     m.cpu.regs[BX] = 0;
                     m.cpu.regs[CX] = 0;
-                    // FPU|TSC|CX8|CMOV|FXSR|SSE|SSE2。
+                    // FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2。
                     // FXSRを名乗る = カーネルはFXSAVE/FXRSTORでXMMを退避し始める。
-                    // 名乗った分は全部実装してある (sse.rs)
+                    // MMXはSSE2を名乗った時点で事実上必須 (libcryptoはCPUIDの
+                    // MMXビットを見ずに使う)。名乗った分は全部実装してある
+                    // (sse.rs / mmx.rs)
                     m.cpu.regs[DX] = (1 << 0)
                         | (1 << 4)
                         | (1 << 8)
                         | (1 << 15)
+                        | (1 << 23)
                         | (1 << 24)
                         | (1 << 25)
                         | (1 << 26);
@@ -580,9 +583,13 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             }
         }
         _ => {
-            // 残りはSSE/SSE2の空間を試す。プレフィクス (66/F2/F3) が
-            // 命令選択子に化けるデコードは sse.rs が知っている
-            if !super::sse::step_sse(m, d, op2) {
+            // 残りはMMX → SSE/SSE2 の順で試す。プレフィクス無しの整数opは
+            // MMX (mmレジスタ)、66付きはSSE2 (XMM) — 同じオペコードの別の顔。
+            // プレフィクス付き (66/F2/F3 = memcpyの主戦場) はMMXであり得ない
+            // ので、判定ごと素通しする。どちらの管轄でもなければtrap
+            let plain = d.rep.is_none() && !d.p66;
+            let took = (plain && super::mmx::step_mmx(m, d, op2)) || super::sse::step_sse(m, d, op2);
+            if !took {
                 m.cpu.ip = start_ip;
                 m.trap(format!("unimplemented opcode 0f {op2:#04x}"));
             }
