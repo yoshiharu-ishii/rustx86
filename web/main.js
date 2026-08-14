@@ -33,6 +33,10 @@ for (const ev of ['keydown', 'pointerdown']) {
 }
 
 let machine = null;
+/** Linuxを選んでいるときの取っ手 (選んでいなければ null)。
+    **machine と並べて先に置く** — 画面の判断 (コピーの可否など) が
+    読み込みの早い段階で参照するので、宣言が後ろにあると触れない */
+let linux = null;
 /** 最後に起動したイメージ。再起動に使う */
 let lastImage = null;
 
@@ -101,6 +105,7 @@ function setStatus(text, warn = false) {
 
 /** ツールバーの表示を実際の状態に合わせる */
 function syncControls() {
+  syncCopyable(); // 機械が替われば選択も消える (端末の reset が落とす)
   // スタート画面では機械向けの操作列を丸ごと伏せる。
   // 押せない灰色のボタンの列は「まだ何も選んでいない」画面には要らない
   const onWelcome = !$('welcomePane').hidden;
@@ -370,7 +375,7 @@ function closeMenu() {
 // consoleBox はこの下で定義されるので、ここでは要素を直に引く
 $('console').addEventListener('contextmenu', e => {
   e.preventDefault();
-  const can = menuAbility(!!(machine || linux), !!term.selectedText(), acceptsDrop());
+  const can = menuAbility(!!(machine || linux), !!selectedText(), acceptsDrop());
   $('mCopy').disabled = !can.copy;
   $('mPaste').disabled = !can.paste;
   $('mOpen').disabled = !can.open;
@@ -397,30 +402,31 @@ $('mOpen').addEventListener('click', () => { closeMenu(); $('imageFile').click()
 // 以前は経路ごとに実装が分かれていて、組みで押すと選んだ範囲しか取れず、
 // 取り消しも効かず、状態も出ないという食い違いが起きていた
 
+/** いま選ばれている文字列 (画面はVGAとシリアルの2つあるので、出ている方を見る) */
+function selectedText() {
+  return (linux ? linux.selectedText() : term.selectedText()) || '';
+}
+
 /**
- * コピー。**選んでいればそこだけ、選んでいなければ今見えている画面まで。**
- * 履歴の全文は取らない — 全文をコピーしてそのまま貼ると、起動ログが
+ * コピー。**選んだところだけを取る** — どこのアプリでもそうであるように。
+ *
+ * 以前は選んでいなければ画面全体を取っていた。それを貼り戻すと起動ログが
  * 丸ごとコマンドとして流れ込む (実際にELKSがそうなった)。
- * 全部が欲しいときは「ログを保存」が受け持つ
+ * 画面ぜんぶが欲しいときは「ログを保存」が受け持つ
  */
 async function doCopy() {
-  // Linuxは画面が流れていくので、選んでいなければログ全部を取る。
-  // VGA機は見えている画面まで (どちらも選択が最優先)
-  // Linuxは別のcanvas (シリアル端末) なので、VGA端末の選択は見ない —
-  // 見ると前の機械で選んだ範囲をコピーしてしまう
-  const sel = linux ? '' : term.selectedText();
-  const text = sel || (linux ? linux.logText : term.screenText());
-  if (!text) return;
-  if (await term.copyText(text)) {
-    const lines = text.split('\n').length;
-    setStatus(
-      sel ? `選んだ ${text.length} 文字をコピーしました`
-        : linux ? `ログ (${lines} 行) をコピーしました`
-        : `画面 (${lines} 行) をコピーしました`,
-    );
-  } else {
-    setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
+  const text = selectedText();
+  if (!text) {
+    setStatus('コピーするところをドラッグで選んでください');
+    return;
   }
+  if (await term.copyText(text)) setStatus(`選んだ ${text.length} 文字をコピーしました`);
+  else setStatus('コピーできませんでした (ブラウザに拒否されました)', true);
+}
+
+/** 選んでいなければコピーは押せない (ボタンも右クリックも同じ判断) */
+function syncCopyable() {
+  $('copy').disabled = !selectedText();
 }
 
 /**
@@ -547,14 +553,13 @@ $('copy').addEventListener('click', () => doCopy());
 term.onPaste = text => requestPaste(text);
 term.onPasteRequest = () => requestPaste();
 term.onCopyRequest = () => doCopy();
+term.onSelect = syncCopyable;
+syncCopyable();
 
 // --- デバッガの子ウインドウ ---
 //
 // Emulator は再起動のたびに作り直されるので、**参照を握らせず毎回聞かせる**。
 // 握らせると再起動後に古い機械を覗き続けることになる
-/** Linuxを選んでいるときの取っ手 (選んでいなければ null) */
-let linux = null;
-
 // **いま動いている機械**を見せる。参照を握らせず毎回聞く —
 // Emulator は再起動のたびに作り直されるため。
 // Linuxのときはワーカー越しの代役 (各メソッドが Promise) を渡す。
@@ -1214,6 +1219,7 @@ async function select(m, { autoBoot = true } = {}) {
       onPaste: text => requestPaste(text),
       onPasteRequest: () => requestPaste(),
       onCopyRequest: () => doCopy(),
+      onSelect: syncCopyable,
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
       onTone: hz => speaker.update(hz),

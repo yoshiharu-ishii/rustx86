@@ -129,6 +129,11 @@ export function resolveTheme(pref, systemLight) {
 
 /**
  * 右クリックのメニューで**今できること**。
+ *
+ * コピーは**選んでいるときだけ** — どこのアプリでもそうであるように。
+ * 以前は選んでいなければ画面全体を取っていたが、それを貼り戻すと
+ * 起動ログが丸ごとコマンドとして流れ込む。画面ぜんぶが欲しいときは
+ * 「ログを保存」が受け持つ。
  * イメージを開くのはドラッグと同じ条件にする — 走っている機械に
  * 別のディスクを差し込めてしまうと、画面と中身が食い違う
  * @param {boolean} hasGuest 機械が載っているか
@@ -136,6 +141,6 @@ export function resolveTheme(pref, systemLight) {
  * @param {boolean} canOpen イメージを受け付ける状態か (acceptsDrop と同じ)
  */
 export function menuAbility(hasGuest, hasSelection, canOpen) {
-  return { copy: hasGuest || hasSelection, paste: hasGuest, open: canOpen };
+  return { copy: hasSelection, paste: hasGuest, open: canOpen };
 }
 
