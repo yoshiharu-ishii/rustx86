@@ -188,14 +188,23 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
 
 - [x] **5a: 踏み台** — wsslirp として独立リポジトリで完成 (TAP/MASQUERADEではなく
       gVisor netstackのユーザーモードNATになった。root不要でどこにでも置ける)
-- [ ] **5b: ISA NE2000 (DP8390)** — **16bitからpingを飛ばす**のが最初の絵。
-      FreeDOS (NE2000.COM + mTCP) と ELKS (ne2k + ktcp)。coreの境界は
-      フレーム送受のtraitだけ、WS等の非決定I/Oは外側 (ADR-0017)
-- [ ] **5c: PCI + RTL8029** — PCIバス (設定空間の列挙) を作り、**同じ8390コア**を
-      PCIの皮で包む。Alpine lts に `NE2K_PCI=m` があるので、**カーネル無変更で
-      Linuxからping** が通る。e1000/rtl8139 は ReactOS/DOS の要求が来たら同じバスへ
+- [x] **5b: ISA NE2000 (DP8390)** — 達成 (2026-08-14)。**1993年のFreeDOSから
+      `ping 1.1.1.1` が返る** (NE2000.COM + mTCP)。ELKSも urlget で本物のHTMLを引く。
+      coreの境界はフレーム送受だけで、WS等の非決定I/Oは外側 (ADR-0017)
+- [x] **5c: PCI + RTL8029** — 達成 (2026-08-14)。PCIバス (設定空間の列挙) を作り、
+      **同じ8390コア**をPCIの皮で包んだ。Alpine lts の `ne2k-pci` がカーネル無変更で
+      bindし、ブラウザのLinuxから DHCP → ping → wget が通る。
+      e1000/rtl8139 は ReactOS/DOS の要求が来たら同じバスへ
+- [x] **5c+: TLS** — 達成 (2026-08-14)。`wget https://` が実物のPNGを引く。
+      壁は6枚あった: MMX (libcryptoが#UD) → SSE2の語彙の歯抜け → RTCの実時刻
+      (証明書の有効期間) → ssl_client + CA束の同梱 → CAの置き場所 (/etc/ssl/cert.pem) →
+      /tmp が無い。**CIでは見張れていない** (閉じた世界に信頼できる証明書が無い) ので、
+      実インターネット向けの手動E2Eが唯一の番人 (docs/reference/ci.md)
 - [ ] **5d: 本測定** — TCP over TCP の破綻、MTUの押し出し、レイテンシの内訳。
       **Linuxのスタックなので最初から本気で測れる**
+- 常設の関門: CIに「4 機能層 — ネットワーク」。ping先を 10.0.2.2 (netstackが自分で
+      答える)、HTTPをジョブ自身のサーバにして**外に出ない**まま、16bitと32bitの
+      両方が線に出ることを毎push見張る
 - 台帳: virtio-net/virtio-blk は microVM段 (Tier 8、自前カーネルとセット)、
       PAE は x86_64 (Tier 9) で。詳細は ADR-0017
 
