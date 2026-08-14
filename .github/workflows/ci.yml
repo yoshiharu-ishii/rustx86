@@ -382,7 +382,7 @@ jobs:
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip
+          sudo apt-get install -y -qq cpio unzip mtools
           tools/images/fetch-images.sh elks
           tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
@@ -491,7 +491,7 @@ jobs:
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip
+          sudo apt-get install -y -qq cpio unzip mtools
           tools/images/fetch-images.sh elks
           tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
@@ -566,7 +566,7 @@ jobs:
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip
+          sudo apt-get install -y -qq cpio unzip mtools
           tools/images/fetch-images.sh elks
           tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
@@ -679,7 +679,7 @@ jobs:
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip
+          sudo apt-get install -y -qq cpio unzip mtools
           tools/images/fetch-images.sh elks
           tools/images/fetch-images.sh freedos
           tools/images/fetch-images.sh linux
