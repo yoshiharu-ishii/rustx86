@@ -82,6 +82,11 @@ cat > "$work/root/init" <<'INIT'
 # 作法を選べるように、素直なxtermを名乗っておく
 export TERM=xterm
 /bin/busybox stty rows 24 cols 80
+# ループバックを上げる。**通常のLinuxではinitスクリプトの仕事**で、
+# うちのミニinitramfsは誰もやっていなかった — `ping 127.0.0.1` が
+# 100% packet loss になる (自分自身にすら届かない、妙な機械だった)。
+# lo が下りていると、UNIXドメインではなくTCPで自分に繋ぐ道具も全部黙る
+/bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up
 # NICのドライバを挿す。**カードが無くてもエラーにはならない** — ドライバは
 # 載るがbindする相手が居ないだけ (実機にカードを挿していないのと同じ)。
 # 依存の順: ne2k-pci は 8390 の上に建つ
