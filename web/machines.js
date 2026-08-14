@@ -33,7 +33,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'elks',
-    label: 'ELKS 0.9.1',
+    label: 'ELKS',
     sub: 'フロッピー1枚のUNIX',
     image: './fd2880.img',
     status: 'ok',
@@ -50,7 +50,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'freedos',
-    label: 'FreeDOS 1.4',
+    label: 'FreeDOS',
     sub: 'DOS',
     image: './fd14boot.img',
     status: 'ok',
@@ -88,7 +88,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'linux',
-    label: 'Linux 6.18',
+    label: 'Linux',
     sub: 'bzImage + initramfs',
     // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
     // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
@@ -111,9 +111,11 @@ export const MACHINES = [
     label: 'イメージを開く…',
     kind: 'open',
     note:
-      'フロッピー/ディスクイメージ (.img、先頭512バイトがブートセクタのもの) を' +
-      '手元から選んで起動する。画面へのドラッグ&ドロップでも同じ。' +
-      'スナップショット (.rx86snap) もここから読み戻せる。',
+      '手元のファイルから起動する。**拡張子では絞らない** — 何であるかは' +
+      '中身の印で決める: ブートセクタ (末尾の 0x55AA) ならディスク、' +
+      'ELF か "HdrS" ならLinuxカーネル (initramfs はページの隣から借りる)、' +
+      'スナップショット (.rx86snap) ならその状態へ戻る。' +
+      'スタート画面へのドラッグ&ドロップでも同じ。',
   },
 ];
 

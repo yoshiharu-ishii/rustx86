@@ -174,7 +174,7 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
 旧計画は virtio-net 先行だったが、偵察で崩れた — Alpine lts は virtio-mmio を
 カーネル引数で発見できず (`CMDLINE_DEVICES` 無効)、virt フレーバーは PAE 必須で
 現行 core では起動しない。装置は「本物」に寄せ、**バスの歴史の順 (ISA → PCI)**
-で行く。網元は [wsslirp](https://github.com/yoshiharu-ishii/wsslirp) (Go、完成済み —
+で行く。SLiRP backendは [wsslirp](https://github.com/yoshiharu-ishii/wsslirp) (Go、完成済み —
 DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検証済み)。
 境界は「1 WSバイナリメッセージ = 1 Ethernetフレーム」だけ。
 

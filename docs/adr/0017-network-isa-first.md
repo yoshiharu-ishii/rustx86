@@ -4,11 +4,11 @@
 - 日付: 2026-08-13
 - 関連: [ADR-0011](0011-tier-redraw-after-compat.md) (Tier引き直し)、
   [ADR-0016](0016-platform-cfg.md) (ターゲット別の裁き方)、
-  [roadmap Tier 5](../roadmap.md)、網元は [wsslirp](https://github.com/yoshiharu-ishii/wsslirp)
+  [roadmap Tier 5](../roadmap.md)、SLiRP backendは [wsslirp](https://github.com/yoshiharu-ishii/wsslirp)
 
 ## 背景
 
-網元 (wsslirp、Go) は完成した — WS越しにDHCP・DNS・TCP (ハーフクローズ込み)・
+SLiRP backend (wsslirp、Go) は完成した — WS越しにDHCP・DNS・TCP (ハーフクローズ込み)・
 外向きICMPまで実インターネットで検証済み。境界プロトコルは
 **「1 WSバイナリメッセージ = 1 Ethernetフレーム」だけ**。残っていたのは
 こちら側、ゲストの仮想NICである。

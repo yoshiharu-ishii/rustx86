@@ -45,6 +45,21 @@ const SCROLLBAR_W = 10;
 /** カーソルの点滅周期 (ミリ秒) */
 const BLINK_MS = 530;
 
+/** Cmd を修飾キーに使う環境か */
+export const IS_MAC = /Mac|iPhone|iPad/.test(
+  globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '',
+);
+
+/**
+ * クリップボードの組みか。**素の Ctrl+C をゲストから奪わない**のが要点で、
+ * そのためにMac以外では Shift を要求する (端末の作法)。
+ * シリアル端末 (ans.js) も同じ鍵でなければ困るので、ここから引かせる
+ */
+export function isClipboardCombo(e, code) {
+  if (e.code !== code) return false;
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey;
+}
+
 export class Terminal {
   /**
    * @param {HTMLCanvasElement} canvas
@@ -95,8 +110,12 @@ export class Terminal {
 
     /** キーが押された/離されたときに呼ばれる。(code, down) => boolean */
     this.onKey = null;
-    /** 貼り付けられたときに呼ばれる。(text) => void */
+    /** 貼り付けられたときに呼ばれる (Macの ⌘V など、中身が届く経路)。(text) => void */
     this.onPaste = null;
+    /** 貼り付けの組みが押されたときに呼ばれる (クリップボードは呼び手が読む) */
+    this.onPasteRequest = null;
+    /** コピーの組みが押されたときに呼ばれる (何をコピーするかは呼び手が決める) */
+    this.onCopyRequest = null;
     /** 文字として打たれたときに呼ばれる (JP配列のとき)。(ch) => void */
     this.onChar = null;
 
@@ -200,6 +219,17 @@ export class Terminal {
   }
 
   /** 選択されている文字列 (無ければ空) */
+  /**
+   * 何か選ばれているか。**中身は組み立てない。**
+   * ドラッグ中は動かすたびに呼ばれるので、ここで文字列を作ると
+   * 16bit機 (エミュレータが同じスレッドで回る) の足を引っ張る
+   */
+  hasSelection() {
+    if (!this.selection) return false;
+    const { a, b } = this.selection;
+    return a.row !== b.row || a.col !== b.col;
+  }
+
   selectedText() {
     if (!this.selection) return '';
     const { a, b } = this.#orderedSelection();
@@ -439,6 +469,9 @@ export class Terminal {
 
     let dragging = null;
     c.addEventListener('mousedown', e => {
+      // **右ボタンでは選択を触らない。** 選んで右を押して「コピー」という
+      // 手順が、押した瞬間に選択を消してしまっては成り立たない
+      if (e.button !== 0) return;
       const p = this.#cellAt(e);
       if (p.onScrollbar) {
         dragging = 'scrollbar';
@@ -477,12 +510,26 @@ export class Terminal {
     });
 
     c.addEventListener('keydown', e => {
-      // コピーは端末が受け取る (ゲストへは渡さない)
-      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC' && this.selectedText()) {
-        this.#copy(this.selectedText());
-        this.selection = null;
-        this.draw();
+      // **コピー/ペーストの組みはOSの作法に合わせる。**
+      //   Mac      Cmd+C / Cmd+V
+      //   その他   Ctrl+Shift+C / Ctrl+Shift+V
+      // 素の Ctrl+C は**ゲストのもの** — DOSでもELKSでも実行中の
+      // コマンドを止める鍵なので、端末が横取りしてはいけない
+      // (Macは Cmd と Ctrl が別なので、この衝突が起きない)
+      if (isClipboardCombo(e, 'KeyC')) {
+        // **中身は決めない。** 何をコピーするか (選んだ範囲か、見えている画面か)
+        // は見出しのボタンと同じ判断でなければならないので、呼び手に任せる
         e.preventDefault();
+        this.onCopyRequest?.();
+        return;
+      }
+      if (isClipboardCombo(e, 'KeyV')) {
+        // Macの Cmd+V はブラウザが paste 事象をくれるので、そちらに任せる。
+        // Ctrl+Shift+V は事象が飛ばないので、こちらから読みにいく
+        if (!IS_MAC) {
+          e.preventDefault();
+          this.onPasteRequest?.();
+        }
         return;
       }
       // 打ったら最新へ戻る
@@ -519,18 +566,23 @@ export class Terminal {
   }
 
   /**
-   * 文字列をクリップボードへ。
+   * 文字列をクリップボードへ。**書き込みの道はここ1本にする。**
    *
    * `navigator.clipboard` は**セキュアな配信元でしか存在しない**。
    * localhost は該当するが、LAN内のIPアドレスで開くと消える。
    * 黙って何も起きないのが一番困るので、古いやり方に落とす。
+   * @returns {Promise<boolean>} 書けたか (呼び手が結果を伝える)
    */
-  #copy(text) {
+  async copyText(text) {
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).catch(() => this.#copyFallback(text));
-    } else {
-      this.#copyFallback(text);
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        /* セキュアでない配信元。下の古いやり方に落とす */
+      }
     }
+    return this.#copyFallback(text);
   }
 
   #copyFallback(text) {
@@ -540,13 +592,15 @@ export class Terminal {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
+    let ok = false;
     try {
-      document.execCommand('copy');
+      ok = document.execCommand('copy');
     } catch {
       /* ここまで来たら諦める */
     }
     ta.remove();
     this.canvas.focus();
+    return ok;
   }
 
   #scrollbarTo(ev) {

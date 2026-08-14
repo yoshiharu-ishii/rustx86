@@ -23,6 +23,8 @@
 //   - SGR (色・太字・反転)  ・ カーソル表示/非表示 `\x1b[?25l/h`
 //   - `\r` `\n` `\b` `\t` と、80桁での折り返し
 
+import { IS_MAC, isClipboardCombo } from './terminal.js';
+
 const CELL_W = 9;
 const CELL_H = 16;
 const SCROLLBAR_W = 10;
@@ -61,6 +63,8 @@ export class AnsiTerminal {
     this.scrollback = [];
     /** 何行さかのぼって見ているか (0 = 最新) */
     this.offset = 0;
+    /** ドラッグで選んだ範囲 {a:{row,col}, b:{row,col}} — 表示上の座標 */
+    this.selection = null;
     this.reset();
 
     // パーサの状態
@@ -70,14 +74,39 @@ export class AnsiTerminal {
 
     // 入力: キーが来たら onData(str) を呼ぶ (端末→ゲスト)
     this.onData = null;
+    // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
+    // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
+    /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
+    this.onPaste = null;
+    /** 貼り付けの組みが押されたときに呼ばれる (クリップボードは呼び手が読む) */
+    this.onPasteRequest = null;
+    /** コピーの組みが押されたときに呼ばれる (何をコピーするかは呼び手が決める) */
+    this.onCopyRequest = null;
     this._utf8 = []; // 受信UTF-8の途中バイト
 
     canvas.tabIndex = 0;
     canvas.style.outline = 'none';
-    canvas.addEventListener('keydown', (e) => this._key(e));
+    canvas.addEventListener('keydown', (e) => {
+      // **コピー/ペーストの組みはゲストへ渡さない** (VGA端末と同じ判断を使う)。
+      // 素の Ctrl+C はゲストのもの — シリアルでも SIGINT の鍵である
+      if (isClipboardCombo(e, 'KeyC')) {
+        e.preventDefault();
+        this.onCopyRequest?.();
+        return;
+      }
+      if (isClipboardCombo(e, 'KeyV')) {
+        // ⌘V はブラウザが paste 事象をくれるので、そちらに任せる
+        if (!IS_MAC) {
+          e.preventDefault();
+          this.onPasteRequest?.();
+        }
+        return;
+      }
+      this._key(e);
+    });
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
-      if (t) this.onData?.(t);
+      if (t) this.onPaste?.(t);
       e.preventDefault();
     });
 
@@ -90,22 +119,34 @@ export class AnsiTerminal {
       },
       { passive: false },
     );
-    let draggingBar = false;
+    // ドラッグで選ぶ (VGA端末と同じ操作感)。**選んだ範囲だけがコピーの対象**
+    let dragging = null;
     canvas.addEventListener('mousedown', (e) => {
-      const r = canvas.getBoundingClientRect();
-      const x = ((e.clientX - r.left) * canvas.width) / r.width;
-      if (x >= this.cols * CELL_W) {
-        draggingBar = true;
+      // 右ボタンでは選択を触らない (選んで右を押してコピー、が成り立つように)
+      if (e.button !== 0) return;
+      const p = this._cellAt(e);
+      if (p.onScrollbar) {
+        dragging = 'scrollbar';
         this._scrollbarTo(e);
-        e.preventDefault();
+      } else {
+        dragging = 'select';
+        this.selection = { a: { row: p.row, col: p.col }, b: { row: p.row, col: p.col } };
+        this.dirty = true;
       }
       canvas.focus();
+      e.preventDefault();
     });
     window.addEventListener('mousemove', (e) => {
-      if (draggingBar) this._scrollbarTo(e);
+      if (dragging === 'select') {
+        const p = this._cellAt(e);
+        this.selection.b = { row: p.row, col: p.col };
+        this.dirty = true;
+      } else if (dragging === 'scrollbar') {
+        this._scrollbarTo(e);
+      }
     });
     window.addEventListener('mouseup', () => {
-      draggingBar = false;
+      dragging = null;
     });
 
     // カーソルの点滅 (VGA端末と同じ周期)
@@ -129,6 +170,7 @@ export class AnsiTerminal {
     this.bold = false;
     this.inv = false;
     this.cursorVisible = true;
+    this.selection = null;
     this.dirty = true;
   }
 
@@ -398,6 +440,58 @@ export class AnsiTerminal {
     }
   }
 
+  /** 見せる行: 最新なら画面そのもの、遡っていれば履歴+画面の窓 */
+  _view() {
+    if (this.offset === 0) return this.grid;
+    const all = [...this.scrollback, ...this.grid];
+    const start = Math.max(0, all.length - this.rows - this.offset);
+    return all.slice(start, start + this.rows);
+  }
+
+  /** マウスの位置を桁と行に直す (右端の帯の上かどうかも返す) */
+  _cellAt(ev) {
+    const r = this.canvas.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) * this.canvas.width) / r.width;
+    const y = ((ev.clientY - r.top) * this.canvas.height) / r.height;
+    return {
+      row: Math.max(0, Math.min(this.rows - 1, Math.floor(y / CELL_H))),
+      col: Math.max(0, Math.min(this.cols, Math.round(x / CELL_W))),
+      onScrollbar: x >= this.cols * CELL_W,
+    };
+  }
+
+  /** 始点と終点を、上から下・左から右の順に直す (逆向きにも引けるので) */
+  _orderedSelection() {
+    const { a, b } = this.selection;
+    const back = b.row < a.row || (b.row === a.row && b.col < a.col);
+    return back ? { a: b, b: a } : { a, b };
+  }
+
+  /** 何か選ばれているか (中身は組み立てない — ドラッグ中に毎回呼ばれる) */
+  hasSelection() {
+    if (!this.selection) return false;
+    const { a, b } = this.selection;
+    return a.row !== b.row || a.col !== b.col;
+  }
+
+  /** 選んだ文字列 (何も選んでいなければ空) */
+  selectedText() {
+    if (!this.selection) return '';
+    const { a, b } = this._orderedSelection();
+    const view = this._view();
+    const out = [];
+    for (let r = a.row; r <= b.row; r++) {
+      const line = (view[r] ?? [])
+        .map((c) => c.ch)
+        .join('')
+        .padEnd(this.cols, ' ');
+      const from = r === a.row ? a.col : 0;
+      const to = r === b.row ? b.col : this.cols;
+      out.push(line.slice(from, to).replace(/\s+$/, ''));
+    }
+    return out.join('\n');
+  }
+
   _scrollbarTo(ev) {
     const r = this.canvas.getBoundingClientRect();
     const y = ((ev.clientY - r.top) * this.canvas.height) / r.height;
@@ -415,15 +509,7 @@ export class AnsiTerminal {
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.textBaseline = 'top';
 
-    // 見せる行: 最新なら画面そのもの、遡っていれば履歴+画面の窓
-    let view;
-    if (this.offset === 0) {
-      view = this.grid;
-    } else {
-      const all = [...this.scrollback, ...this.grid];
-      const start = Math.max(0, all.length - this.rows - this.offset);
-      view = all.slice(start, start + this.rows);
-    }
+    const view = this._view();
 
     for (let y = 0; y < view.length; y++) {
       for (let x = 0; x < this.cols; x++) {
@@ -440,6 +526,16 @@ export class AnsiTerminal {
           ctx.fillStyle = PALETTE[cell.bold && fg < 8 ? fg + 8 : fg];
           ctx.fillText(cell.ch, x * CELL_W, y * CELL_H + 1);
         }
+      }
+    }
+
+    if (this.selection) {
+      const { a, b } = this._orderedSelection();
+      this.ctx.fillStyle = 'rgba(0, 255, 0, 0.30)';
+      for (let r = a.row; r <= b.row; r++) {
+        const from = r === a.row ? a.col : 0;
+        const to = r === b.row ? b.col : this.cols;
+        this.ctx.fillRect(from * CELL_W, r * CELL_H, (to - from) * CELL_W, CELL_H);
       }
     }
 
