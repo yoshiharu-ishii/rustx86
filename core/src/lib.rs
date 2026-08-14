@@ -46,6 +46,12 @@ pub struct MachineProfile {
     /// CMOVを使い始めた事故がある。名乗るものを1ビット間違えるだけで、
     /// 相手は別の道を歩き出す
     pub has_cpuid: bool,
+    /// PCIバス (ホストブリッジ) を積んでいるか。
+    /// 16bit機は**積んでいない** — PCIは1992年で、ELKS/FreeDOSが動く機械の
+    /// 世代には無い。積むと装置探索が走って起動の命令列が変わるので、
+    /// 「NIC無し起動はビット同一」([ADR-0017] の不変条件) の意味でも
+    /// 世代で分けるのが正しい
+    pub has_pci: bool,
 }
 
 impl MachineProfile {
@@ -55,6 +61,7 @@ impl MachineProfile {
         ram_bytes: MEM_SIZE,
         has_fpu: false,
         has_cpuid: false,
+        has_pci: false,
     };
 
     /// 32bit PC (Linux用)。`mb` MB。任意のMB数を取れる (物理は折り返さず、
@@ -65,6 +72,7 @@ impl MachineProfile {
             ram_bytes: mb << 20,
             has_fpu: true,
             has_cpuid: true,
+            has_pci: true,
         }
     }
 }
@@ -305,7 +313,16 @@ impl Machine {
             pic_service: false,
             pending_fault: std::cell::Cell::new(None),
             sys_access: std::cell::Cell::new(false),
-            devices: Devices::new(),
+            devices: {
+                let mut d = Devices::new();
+                // **PCIは世代で決まる。** 32bit機にだけホストブリッジを挿す
+                if profile.has_pci {
+                    let mut host = dev::PciHost::new();
+                    host.plug(0, dev::pci::host_bridge());
+                    d.pci = Some(host);
+                }
+                d
+            },
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
