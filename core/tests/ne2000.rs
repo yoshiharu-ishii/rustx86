@@ -300,3 +300,38 @@ fn pci_machine_wears_the_rtl8029_face() {
     // **ISAの0x300窓は開かない** — 同じ実体が両方の窓で応えると2枚に数えられる
     assert_eq!(m.io_read8(BASE + 0x07), 0xFF, "PCI機に0x300のカードは無い");
 }
+
+/// フロッピー起動機 (ブラウザのFreeDOS/ELKSと同じ機械) では、NICは
+/// **ISAの0x300に挿さり、PROMは倍幅**であること。
+///
+/// この機械はPCIを積まない。積むと [`Machine::net_attach`] がPCIスロット側へ
+/// 挿してISAの窓が閉じ、FreeDOSのパケットドライバからNICが消える —
+/// MACが FF:FF:FF:FF:FF:FF に化けて DHCP が沈黙した (2026-08-14のデグレ)。
+/// **coreのテストは16bit機 (PC_16BIT) しか見ておらず、ブラウザだけが
+/// 32bitプロファイルでフロッピーを起動していたので誰も気づかなかった。**
+/// ここがその見張り
+#[test]
+fn floppy_machine_keeps_the_nic_on_the_isa_window() {
+    use rustx86_core::MachineProfile;
+    let mut m = Machine::with_profile(MachineProfile::pc_floppy(16));
+    m.net_attach(MAC);
+
+    // PCIそのものが無い (設定空間は誰も応えない)
+    m.io_write32(0xCF8, 0x8000_0000 | (3 << 11));
+    assert_eq!(m.io_read32(0xCFC), 0xFFFF_FFFF, "フロッピー機にPCIは無い");
+
+    // パケットドライバの手順でPROMを読む: STP → RBCR/RSAR → リモート読み
+    m.io_write8(BASE, 0x21); // STP | page0
+    m.io_write8(BASE + 0x0A, 32); // RBCR
+    m.io_write8(BASE + 0x0B, 0);
+    m.io_write8(BASE + 0x08, 0); // RSAR
+    m.io_write8(BASE + 0x09, 0);
+    m.io_write8(BASE, 0x0A); // リモート読み + 開始
+    let prom: Vec<u8> = (0..16).map(|_| m.io_read8(BASE + 0x10)).collect();
+    // ISAの8bit経路の癖で各バイトが2度ずつ並ぶ。ドライバは偶数バイトを拾う
+    for (i, b) in MAC.iter().enumerate() {
+        assert_eq!(prom[i * 2], *b, "PROM {}バイト目", i * 2);
+        assert_eq!(prom[i * 2 + 1], *b, "倍幅の写し");
+    }
+    assert_eq!((prom[14], prom[15]), (0x57, 0x57), "NE2000の印は14/15");
+}

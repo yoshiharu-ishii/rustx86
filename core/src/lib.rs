@@ -75,6 +75,24 @@ impl MachineProfile {
             has_pci: true,
         }
     }
+
+    /// フロッピーから起動する機械 (ELKS / FreeDOS / test386.img)。`mb` MB。
+    ///
+    /// **PCIは積まない。** フロッピーで起動する世代の機械にPCIは無く、
+    /// NICはISAの0x300に挿さる — FreeDOSのパケットドライバはそこしか叩かない。
+    /// PCIを積んだ機械では [`Machine::net_attach`] がPCIスロット側へ挿し、
+    /// ISAの0x300窓は閉じるので、**16bitのゲストからNICが消える**
+    /// (2026-08-14、ブラウザのFreeDOSでMACが FF:FF:… に化けた)。
+    ///
+    /// FPUとCPUIDは名乗ったままにする — 32bitのブートセクタ (test386.img) が
+    /// 使うし、ここを変えると16bit機の起動の命令列が動く
+    pub fn pc_floppy(mb: usize) -> Self {
+        Self {
+            name: "floppy PC",
+            has_pci: false,
+            ..Self::pc_32bit(mb)
+        }
+    }
 }
 
 /// 何命令ごとに装置を進めるか。
