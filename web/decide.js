@@ -144,3 +144,29 @@ export function menuAbility(hasGuest, hasSelection, canOpen) {
   return { copy: hasSelection, paste: hasGuest, open: canOpen };
 }
 
+/**
+ * 貼り付けで**今いくつ渡すか**。
+ *
+ * キーの道は2段ある。8042の行列 (まだゲストへ配っていないスキャンコード) と、
+ * BIOSの環 (16枠、ゲストが読むまで空かない)。**律速は環の方**で、
+ * 8042は64命令ごとに1バイト出せるから実質詰まらない。
+ *
+ * ここを2度外している:
+ *
+ * - 8042の行列が空になるまで待つ → 出しては止まるカクカク
+ * - 毎刻み1〜2文字に絞る → タイプライターのようにちょろちょろ
+ *
+ * 正しいのは**環の空きだけを見て、その分を一度に渡す**こと。配送中の分も
+ * 席を取るので数に入れる。席が無ければ0を返し、ゲストが読むまで待つ
+ * (溢れさせると実機と同じく捨てられる — 画面全文を貼って数十文字しか
+ * 届かなかったのはこれ)。1枠だけ残すのは、環が満杯になると
+ * 「空」と見分けが付かなくなる作りのため
+ * @param {number} ringRoom BIOSの環の空き枠
+ * @param {number} inflight まだ配り終えていない文字数 (8042の行列 ÷ 2)
+ * @param {number} waiting 貼り付け待ちの残り文字数
+ */
+export function pasteChunk(ringRoom, inflight, waiting) {
+  const room = ringRoom - inflight;
+  if (room < 2) return 0;
+  return Math.max(0, Math.min(room - 1, waiting));
+}
