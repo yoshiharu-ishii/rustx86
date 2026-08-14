@@ -151,7 +151,7 @@ impl PciFunction {
                 continue;
             }
             let base = self.bar_base(i) as u16;
-            if port >= base && (port as u32) < base as u32 + bar.size as u32 {
+            if port >= base && u32::from(port) < u32::from(base) + bar.size {
                 return Some(port - base);
             }
         }
@@ -314,6 +314,57 @@ impl PciHost {
             }
         }
         None
+    }
+}
+
+impl PciFunction {
+    fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.bytes(&self.cfg);
+        for b in &self.bars {
+            w.u32(b.size);
+            w.bool(b.io);
+        }
+    }
+
+    fn load(r: &mut crate::snapshot::Reader) -> Result<Self, String> {
+        let cfg: [u8; 256] = r
+            .bytes()?
+            .try_into()
+            .map_err(|_| "PCIの設定空間が256バイトでない".to_string())?;
+        let mut bars = [Bar::default(); 6];
+        for b in &mut bars {
+            b.size = r.u32()?;
+            b.io = r.bool()?;
+        }
+        Ok(Self { cfg, bars })
+    }
+}
+
+impl PciHost {
+    /// **設定空間ごと残す。** BARの割り当てもCOMMANDの許可もOSが書いた結果なので、
+    /// 復元して同じ番地に戻らなければ、装置は行方不明になる
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        w.u32(self.addr);
+        for s in &self.slots {
+            match s {
+                Some(f) => {
+                    w.bool(true);
+                    f.save(w);
+                }
+                None => w.bool(false),
+            }
+        }
+    }
+
+    pub fn load(r: &mut crate::snapshot::Reader) -> Result<Self, String> {
+        let mut h = Self::new();
+        h.addr = r.u32()?;
+        for i in 0..32 {
+            if r.bool()? {
+                h.slots[i] = Some(PciFunction::load(r)?);
+            }
+        }
+        Ok(h)
     }
 }
 

@@ -268,6 +268,13 @@ impl Machine {
             }
             None => w.bool(false),
         }
+        match &self.devices.pci {
+            Some(pci) => {
+                w.bool(true);
+                pci.save(&mut w);
+            }
+            None => w.bool(false),
+        }
 
         // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
         w.rle(&self.mem);
@@ -351,6 +358,11 @@ impl Machine {
         } else {
             None
         };
+        m.devices.pci = if r.bool()? {
+            Some(crate::dev::PciHost::load(&mut r)?)
+        } else {
+            None
+        };
 
         // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
         // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
@@ -367,6 +379,7 @@ impl Machine {
                 ram_bytes: mem.len(),
                 has_fpu: true,
                 has_cpuid: true,
+                has_pci: m.devices.pci.is_some(),
             }
         };
         m.pic_service = m.devices.pic[0].has_pending();

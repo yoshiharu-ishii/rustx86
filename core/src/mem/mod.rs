@@ -671,12 +671,37 @@ impl Machine {
                     0xFF
                 }
             },
-            IoTarget::Unmapped => {
-                self.unhandled_io.insert(port);
-                0xFF
-            }
+            IoTarget::PciConfig => match &self.devices.pci {
+                Some(pci) => pci.io_read(port, 1) as u8,
+                None => {
+                    self.unhandled_io.insert(port);
+                    0xFF
+                }
+            },
+            IoTarget::Unmapped => self.pci_io_read(port),
         }
     }
+
+    /// PCIの窓に落ちるか。**ISAの定数`match`で名乗り手が居なかったときだけ**
+    /// ここへ来る — 番地がBARで動く装置は、実行時に探すしかない
+    fn pci_io_read(&mut self, port: u16) -> u8 {
+        if let Some(pci) = &self.devices.pci {
+            if let Some((slot, off)) = pci.io_hit(port) {
+                return self.pci_slot_read(slot, off);
+            }
+        }
+        self.unhandled_io.insert(port);
+        0xFF
+    }
+
+    /// PCIの装置への読み。**挿さっている装置ごとの分岐はここ1箇所**
+    fn pci_slot_read(&mut self, _slot: usize, _off: u16) -> u8 {
+        // 装置はまだ無い (次の段で RTL8029 がここに来る)
+        0xFF
+    }
+
+    /// PCIの装置への書き
+    fn pci_slot_write(&mut self, _slot: usize, _off: u16, _val: u8) {}
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
         // POST診断ポート。テストROM (test386) が進行番号を書く — 足跡として残す
@@ -740,7 +765,19 @@ impl Machine {
                     self.unhandled_io.insert(port);
                 }
             },
+            IoTarget::PciConfig => match &mut self.devices.pci {
+                Some(pci) => pci.io_write(port, u32::from(val), 1),
+                None => {
+                    self.unhandled_io.insert(port);
+                }
+            },
             IoTarget::Unmapped => {
+                if let Some(pci) = &self.devices.pci {
+                    if let Some((slot, off)) = pci.io_hit(port) {
+                        self.pci_slot_write(slot, off, val);
+                        return;
+                    }
+                }
                 self.unhandled_io.insert(port);
             }
         }
