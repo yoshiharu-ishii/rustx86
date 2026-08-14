@@ -65,8 +65,6 @@ export class AnsiTerminal {
     this.offset = 0;
     /** ドラッグで選んだ範囲 {a:{row,col}, b:{row,col}} — 表示上の座標 */
     this.selection = null;
-    /** 選び直されたときに呼ばれる (コピーの可否を出し分けるため) */
-    this.onSelect = null;
     this.reset();
 
     // パーサの状態
@@ -134,7 +132,6 @@ export class AnsiTerminal {
         dragging = 'select';
         this.selection = { a: { row: p.row, col: p.col }, b: { row: p.row, col: p.col } };
         this.dirty = true;
-        this.onSelect?.();
       }
       canvas.focus();
       e.preventDefault();
@@ -144,7 +141,6 @@ export class AnsiTerminal {
         const p = this._cellAt(e);
         this.selection.b = { row: p.row, col: p.col };
         this.dirty = true;
-        this.onSelect?.();
       } else if (dragging === 'scrollbar') {
         this._scrollbarTo(e);
       }

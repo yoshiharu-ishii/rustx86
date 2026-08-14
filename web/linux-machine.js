@@ -35,10 +35,12 @@ export function mountLinux(canvas, opts = {}) {
   term.onPaste = (text) => opts.onPaste?.(text);
   term.onPasteRequest = () => opts.onPasteRequest?.();
   term.onCopyRequest = () => opts.onCopyRequest?.();
-  term.onSelect = () => opts.onSelect?.();
   const status = (msg, err = false) => opts.onStatus?.(msg, err);
 
   let worker = null;
+  /** 実際に読んだイメージの名前。**画面の「起動元」に出す** —
+      前の機械のラベル (fd2880.img) が残ると、別物を見ていることになる */
+  let imageName = '';
   let booted = false;
   let paused = false;
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
@@ -157,7 +159,8 @@ export function mountLinux(canvas, opts = {}) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
       // カーネルだけ落とされても、ルートFSが無ければシェルに着けないので
       kernel = givenKernel;
-      status(`${kernelName || 'カーネル'} を起動します`);
+      imageName = kernelName || 'カーネル';
+      status(`${imageName} を起動します`);
       try {
         initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
       } catch {
@@ -174,11 +177,13 @@ export function mountLinux(canvas, opts = {}) {
           if (!wantVmlinux) throw new Error('既定はbzImage');
           // vmlinux (非圧縮ELF): 自己解凍ステブをホスト側の展開で飛ばす近道
           const gz = await fetchWithProgress('./vmlinux-lts.gz', 'カーネル (vmlinux)');
+          imageName = 'vmlinux-lts.gz';
           status('カーネルを展開中… (ホスト側でやる — ゲストにやらせると起動の55%を食う)');
           const ds = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
           kernel = new Uint8Array(await new Response(ds).arrayBuffer());
         } catch {
           kernel = await fetchWithProgress('./vmlinuz-lts', 'カーネル (bzImage)');
+          imageName = 'vmlinuz-lts';
         }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
@@ -339,6 +344,10 @@ export function mountLinux(canvas, opts = {}) {
     /** 文字列をゲストへ流す (貼り付け)。シリアルは受け側の行列が深いので一息でよい */
     send(text) {
       term.onData?.(text);
+    },
+    /** 実際に読んだイメージの名前 (まだ読んでいなければ空) */
+    get imageName() {
+      return imageName;
     },
     /** 何か選ばれているか (中身は組み立てない) */
     hasSelection() {
