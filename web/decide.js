@@ -104,3 +104,37 @@ export function guestChar(ch) {
 export function setHidden(el, hidden) {
   el.toggleAttribute('hidden', !!hidden);
 }
+
+/** 見た目の好みの並び。**押すたびにこの順で回る** */
+export const THEMES = ['system', 'dark', 'light'];
+
+/** 次の好み (最後まで行ったら先頭へ) */
+export function nextTheme(pref) {
+  const i = THEMES.indexOf(pref);
+  return THEMES[(i < 0 ? 0 : i + 1) % THEMES.length];
+}
+
+/**
+ * 好みを実際の明暗に解く。**`system` はここで解いて属性に落とす。**
+ * CSS側で prefers-color-scheme を見ると同じ色の並びを2回書くことになり、
+ * 片方だけ直す事故が起きる。解くのを1箇所に寄せれば、色の定義は
+ * `:root` (暗) と `:root[data-theme="light"]` (明) の2つで済む
+ * @param {string} pref 覚えている好み
+ * @param {boolean} systemLight OSが明るい方を望んでいるか
+ */
+export function resolveTheme(pref, systemLight) {
+  if (pref === 'dark' || pref === 'light') return pref;
+  return systemLight ? 'light' : 'dark';
+}
+
+/**
+ * 右クリックのメニューで**今できること**。
+ * イメージを開くのはドラッグと同じ条件にする — 走っている機械に
+ * 別のディスクを差し込めてしまうと、画面と中身が食い違う
+ * @param {boolean} hasGuest 機械が載っているか
+ * @param {boolean} hasSelection 画面の一部を選んでいるか
+ * @param {boolean} canOpen イメージを受け付ける状態か (acceptsDrop と同じ)
+ */
+export function menuAbility(hasGuest, hasSelection, canOpen) {
+  return { copy: hasGuest || hasSelection, paste: hasGuest, open: canOpen };
+}

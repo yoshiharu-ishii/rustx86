@@ -20,6 +20,7 @@ import { NetLink } from './netlink.js';
 // ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
 import {
   isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
+  THEMES, nextTheme, resolveTheme, menuAbility,
 } from './decide.js';
 
 const $ = id => document.getElementById(id);
@@ -321,7 +322,88 @@ $('paste').addEventListener('click', async () => {
   const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform || navigator.platform || '');
   $('copy').title = `選んだ範囲をコピー (${mac ? '⌘C' : 'Ctrl+Shift+C'})`;
   $('paste').title = `クリップボードをゲストへ打ち込む (${mac ? '⌘V' : 'Ctrl+Shift+V'})`;
+  $('mCopyKey').textContent = mac ? '⌘C' : 'Ctrl+Shift+C';
+  $('mPasteKey').textContent = mac ? '⌘V' : 'Ctrl+Shift+V';
 }
+
+// ---------- 見た目の明暗 ----------
+//
+// **既定はシステムに従う。** 押すたびに システム→暗→明→システム と回る。
+// 選んだらブラウザが覚える (機械ごとではなく、この人の好みなので)。
+// 端末の中は常に黒地に緑のまま — 実機のモニタが部屋の明るさで色を
+// 変えないのと同じで、変わるのは周りの造作だけである
+
+const THEME_STORE = 'rustx86.theme';
+const PREFERS_LIGHT = matchMedia('(prefers-color-scheme: light)');
+
+/** 覚えている好み ('system' | 'dark' | 'light') */
+function themePref() {
+  const t = localStorage.getItem(THEME_STORE);
+  return THEMES.includes(t) ? t : 'system';
+}
+
+/** 好みを画面に反映する (解き方は decide.js の resolveTheme) */
+function applyTheme() {
+  const pref = themePref();
+  document.documentElement.dataset.theme = resolveTheme(pref, PREFERS_LIGHT.matches);
+  setHidden($('themeAuto'), pref !== 'system');
+  setHidden($('themeDark'), pref !== 'dark');
+  setHidden($('themeLight'), pref !== 'light');
+  $('theme').title = {
+    system: '見た目: システムに従う',
+    dark: '見た目: 暗く',
+    light: '見た目: 明るく',
+  }[pref];
+}
+
+applyTheme();
+PREFERS_LIGHT.addEventListener('change', applyTheme); // system のときだけ効く
+$('theme').addEventListener('click', () => {
+  localStorage.setItem(THEME_STORE, nextTheme(themePref()));
+  applyTheme();
+});
+
+// ---------- 右クリックのメニュー ----------
+//
+// 画面の上で右を押したときだけ出す。**今できることだけを並べる** —
+// 選んでいなければコピーは灰色、走っていればイメージは開けない
+
+const menu = $('menu');
+
+function openMenu(x, y) {
+  menu.hidden = false;
+  // 画面の外へはみ出さない位置に置く (右下で押されたとき用)
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+}
+
+function closeMenu() {
+  menu.hidden = true;
+}
+
+// consoleBox はこの下で定義されるので、ここでは要素を直に引く
+$('console').addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const can = menuAbility(!!(machine || linux), !!term.selectedText(), acceptsDrop());
+  $('mCopy').disabled = !can.copy;
+  $('mPaste').disabled = !can.paste;
+  $('mOpen').disabled = !can.open;
+  openMenu(e.clientX, e.clientY);
+});
+for (const ev of ['pointerdown', 'blur', 'wheel']) {
+  window.addEventListener(ev, e => {
+    if (ev === 'pointerdown' && menu.contains(e.target)) return;
+    closeMenu();
+  });
+}
+window.addEventListener('keydown', e => {
+  // **捕捉段で止める。** ここで通すと、閉じるついでに Esc がゲストへ届く
+  if (e.key === 'Escape' && !menu.hidden) { e.stopPropagation(); e.preventDefault(); closeMenu(); }
+}, true);
+$('mCopy').addEventListener('click', () => { closeMenu(); $('copy').click(); });
+$('mPaste').addEventListener('click', () => { closeMenu(); pasteFromClipboard(); });
+$('mOpen').addEventListener('click', () => { closeMenu(); $('imageFile').click(); });
 
 /** クリップボードを読んでゲストへ流す (ボタンと Ctrl+Shift+V の共通の道) */
 async function pasteFromClipboard() {
