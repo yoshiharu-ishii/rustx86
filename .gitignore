@@ -12,3 +12,4 @@ web/linux-booted.snap.gz
 web/vmlinux-lts.gz
 # 起動回帰の証跡 (CIアーティファクト用の一時出力)
 regress-out/
+dist/
