@@ -66,7 +66,7 @@ export function netOff(search) {
  */
 export function nicFor(isLinux) {
   return isLinux
-    ? { label: 'RTL8029 (PCI) — 未実装', usable: false, why: 'PCIバスとRTL8029はこれから (ADR-0017 5c)' }
+    ? { label: 'RTL8029 (PCI)', usable: true }
     : { label: 'NE2000 (ISA 0x300)', usable: true };
 }
 

@@ -77,6 +77,9 @@ pub enum IoTarget {
     /// 0x300-0x31F: NE2000 (Ethernet)。ISAカードの定番アドレス。
     /// カードを挿していない機械では Unmapped と同じ顔をする
     Net,
+    /// 0xCF8-0xCFF: PCIの設定空間の窓 (機構#1)。**ここだけが定数**で、
+    /// この窓の向こうにある装置の番地は実行時に決まる (BARが動かす)
+    PciConfig,
     /// 誰も名乗り出ないポート
     Unmapped,
 }
@@ -92,6 +95,7 @@ pub fn decode_io(port: u16) -> IoTarget {
         0x300..=0x31F => IoTarget::Net,
         0x3D4 | 0x3D5 => IoTarget::Crtc,
         0x3F8..=0x3FF => IoTarget::Uart,
+        0xCF8..=0xCFF => IoTarget::PciConfig,
         _ => IoTarget::Unmapped,
     }
 }
@@ -120,6 +124,9 @@ pub struct Devices {
     /// NE2000 (0x300-0x31F)。**挿さっていないのが既定** — NIC無し起動の
     /// ビット同一 (ADR-0017の不変条件) は、装置が居ないことで自明に守られる
     pub net: Option<crate::dev::Ne2000>,
+    /// PCIのホストブリッジ。**16bit機には挿さない** — 1980年代の機械に
+    /// PCIは無く、挿すと起動の命令列が変わる。世代で分けるのが史実にも合う
+    pub pci: Option<crate::dev::PciHost>,
 }
 
 impl Default for Devices {
@@ -139,6 +146,7 @@ impl Devices {
             crtc: crate::dev::Crtc::new(),
             sysctl: 0,
             net: None,
+            pci: None,
         }
     }
 }

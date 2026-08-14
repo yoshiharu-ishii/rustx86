@@ -58,26 +58,7 @@ pub fn load_seg_pub(m: &mut Machine, idx: usize, sel: u16) {
     let _ = load_seg(m, idx, sel);
 }
 
-/// 最小のx87 — 検出と初期化に答えるだけ。
-/// 実装するのは fninit / fnstsw / fnstcw / fldcw。それ以外のESCは黙って流す
-/// (演算が要るコードに出会ったら、そのとき trap で知らせる形に格上げする)
-fn fpu_min(m: &mut Machine, op: u8, reg: usize, rm: &Operand) {
-    match (op, reg, rm) {
-        // DB E3: FNINIT — 状態を既定へ
-        (0xDB, 4, Operand::Reg(3)) => m.cpu.fpu_cw = 0x037F,
-        // D9 /5 m16: FLDCW / D9 /7 m16: FNSTCW
-        (0xD9, 5, Operand::Mem { addr, .. }) => m.cpu.fpu_cw = m.read16(*addr),
-        (0xD9, 7, Operand::Mem { addr, .. }) => {
-            let cw = m.cpu.fpu_cw;
-            m.write16(*addr, cw);
-        }
-        // DD /7 m16: FNSTSW — 例外もスタック使用も無いので常に0
-        (0xDD, 7, Operand::Mem { addr, .. }) => m.write16(*addr, 0),
-        // DF E0: FNSTSW AX
-        (0xDF, 4, Operand::Reg(0)) => m.cpu.set_reg16(AX, 0),
-        _ => {}
-    }
-}
+pub mod fpu;
 
 // レジスタ番号 (x86エンコーディング準拠)
 pub const AX: usize = 0;
@@ -171,8 +152,10 @@ pub struct Cpu {
     pub idtr_base: u32,
     pub idtr_limit: u16,
     /// x87 の制御語 (FLDCW/FNSTCWで読み書き)。
-    /// 演算はまだ持たない — カーネルのFPU検出と初期化に答えるための最小構成
+    /// SSE側 (FXSAVE) も触るので、[`fpu::Fpu`] の外に居る
     pub fpu_cw: u16,
+    /// x87 のレジスタスタックと状態 (f64裏打ちの実装は [`fpu`])
+    pub fpu: fpu::Fpu,
     /// タイムスタンプカウンタ (RDTSC)。1命令=1カウントで刻む。
     /// 実機のような周波数の意味は無いが、カーネルの較正は
     /// 「PITと突き合わせて比率を測る」だけなので、単調に増えれば成立する
@@ -231,6 +214,7 @@ impl Cpu {
             cr3: 0,
             cr4: 0,
             fpu_cw: 0x037F, // FNINIT後の既定値
+            fpu: fpu::Fpu::default(),
             tsc: 0,
             gdtr_base: 0,
             gdtr_limit: 0,

@@ -664,17 +664,52 @@ impl Machine {
                 self.devices.sysctl
             }
             IoTarget::Net => match &mut self.devices.net {
-                Some(net) => net.read(port - 0x300),
+                // **PCI機ではISAの0x300窓は開かない。** カードはPCIスロット側に
+                // 居て、番地はBARが決める — 同じ実体が両方の窓で応えると、
+                // OSが2枚あると数えてしまう
+                Some(net) if !self.profile.has_pci => net.read(port - 0x300),
                 // カードが挿さっていなければ、ただの空きスロットである
+                _ => {
+                    self.unhandled_io.insert(port);
+                    0xFF
+                }
+            },
+            IoTarget::PciConfig => match &self.devices.pci {
+                Some(pci) => pci.io_read(port, 1) as u8,
                 None => {
                     self.unhandled_io.insert(port);
                     0xFF
                 }
             },
-            IoTarget::Unmapped => {
-                self.unhandled_io.insert(port);
-                0xFF
+            IoTarget::Unmapped => self.pci_io_read(port),
+        }
+    }
+
+    /// PCIの窓に落ちるか。**ISAの定数`match`で名乗り手が居なかったときだけ**
+    /// ここへ来る — 番地がBARで動く装置は、実行時に探すしかない
+    fn pci_io_read(&mut self, port: u16) -> u8 {
+        if let Some(pci) = &self.devices.pci {
+            if let Some((slot, off)) = pci.io_hit(port) {
+                return self.pci_slot_read(slot, off);
             }
+        }
+        self.unhandled_io.insert(port);
+        0xFF
+    }
+
+    /// PCIの装置への読み。**挿さっている装置ごとの分岐はここ1箇所**
+    fn pci_slot_read(&mut self, slot: usize, off: u16) -> u8 {
+        match (slot, &mut self.devices.net) {
+            // RTL8029: 皮はPCIでも中身はISA版と同じDP8390
+            (crate::dev::pci::NET_SLOT, Some(net)) => net.read(off),
+            _ => 0xFF,
+        }
+    }
+
+    /// PCIの装置への書き
+    fn pci_slot_write(&mut self, slot: usize, off: u16, val: u8) {
+        if let (crate::dev::pci::NET_SLOT, Some(net)) = (slot, &mut self.devices.net) {
+            net.write(off, val);
         }
     }
 
@@ -735,12 +770,24 @@ impl Machine {
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
             IoTarget::Net => match &mut self.devices.net {
-                Some(net) => net.write(port - 0x300, val),
+                Some(net) if !self.profile.has_pci => net.write(port - 0x300, val),
+                _ => {
+                    self.unhandled_io.insert(port);
+                }
+            },
+            IoTarget::PciConfig => match &mut self.devices.pci {
+                Some(pci) => pci.io_write(port, u32::from(val), 1),
                 None => {
                     self.unhandled_io.insert(port);
                 }
             },
             IoTarget::Unmapped => {
+                if let Some(pci) = &self.devices.pci {
+                    if let Some((slot, off)) = pci.io_hit(port) {
+                        self.pci_slot_write(slot, off, val);
+                        return;
+                    }
+                }
                 self.unhandled_io.insert(port);
             }
         }

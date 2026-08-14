@@ -914,15 +914,15 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
         // **書き換わらなかったこと**で不在を知る。だから16bit機で気を利かせて
         // 書くと、逆に「FPUが在る」と誤認させてしまう。
         //
-        // **32bit機は挿している。** 現代のカーネルはFPU前提で、検出列
-        // (fninit → fnstsw → fnstcw) に正しい値を返さないと起動しない。
-        // 演算はまだ持たず、検出と初期化に答える最小構成だけ実装する。
+        // **32bit機は挿している。** f64裏打ちの実装 ([`super::fpu`])。
+        // muslのstrtodはx87の長倍精度で計算するので、ここが無いと
+        // 「sleep 3」の3が化ける (実際に化けてpingが洪水になった)。
         //
         // どちらでもModRMは読む — IPを正しく進めないと次の命令がずれる。
         0xD8..=0xDF => {
             let (reg, rm) = modrm(m, d);
             if m.profile.has_fpu {
-                fpu_min(m, op, reg, &rm);
+                super::fpu::exec(m, op, reg, &rm);
             }
         }
 

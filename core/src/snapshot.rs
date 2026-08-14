@@ -28,7 +28,9 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v7: x87の制御語 (fpu_cw) を追加
 /// v8: LDTRの隠しレジスタ (base/limit) を追加
 /// v9: NE2000 (挿さっていれば) を追加
-pub const VERSION: u16 = 9;
+// v10: NE2000に受信機のラッチ (running) が加わった — STA/STPはコマンドで、
+//      crの生値からは走行状態を再現できない
+pub const VERSION: u16 = 10;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -232,6 +234,15 @@ impl Machine {
             w.u32(d);
         }
         w.u16(self.cpu.fpu_cw); // v7
+                                // v10: x87のレジスタスタック (f64裏打ち)
+        for r in self.cpu.fpu.regs {
+            let b = r.to_bits();
+            w.u32(b as u32);
+            w.u32((b >> 32) as u32);
+        }
+        w.u8(self.cpu.fpu.empty); // v10
+        w.u8(self.cpu.fpu.top); // v10
+        w.u16(self.cpu.fpu.cond); // v10
         w.u32(self.cpu.mxcsr); // v7
         for x in self.cpu.xmm {
             w.u32(x as u32);
@@ -265,6 +276,13 @@ impl Machine {
             Some(net) => {
                 w.bool(true);
                 net.save(&mut w);
+            }
+            None => w.bool(false),
+        }
+        match &self.devices.pci {
+            Some(pci) => {
+                w.bool(true);
+                pci.save(&mut w);
             }
             None => w.bool(false),
         }
@@ -316,6 +334,14 @@ impl Machine {
             m.cpu.dr[i] = r.u32()?;
         }
         m.cpu.fpu_cw = r.u16()?; // v7
+        for i in 0..8 {
+            let lo = r.u32()? as u64;
+            let hi = r.u32()? as u64;
+            m.cpu.fpu.regs[i] = f64::from_bits(hi << 32 | lo);
+        }
+        m.cpu.fpu.empty = r.u8()?;
+        m.cpu.fpu.top = r.u8()?;
+        m.cpu.fpu.cond = r.u16()?;
         m.cpu.mxcsr = r.u32()?; // v7
         for i in 0..8 {
             let a = r.u32()? as u128;
@@ -351,6 +377,11 @@ impl Machine {
         } else {
             None
         };
+        m.devices.pci = if r.bool()? {
+            Some(crate::dev::PciHost::load(&mut r)?)
+        } else {
+            None
+        };
 
         // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
         // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
@@ -367,6 +398,7 @@ impl Machine {
                 ram_bytes: mem.len(),
                 has_fpu: true,
                 has_cpuid: true,
+                has_pci: m.devices.pci.is_some(),
             }
         };
         m.pic_service = m.devices.pic[0].has_pending();
