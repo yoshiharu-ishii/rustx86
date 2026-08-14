@@ -28,7 +28,10 @@
 /// フロッピーの種類 (レジスタ 0x10)。上位4bit=1台目、下位4bit=2台目
 pub const FLOPPY_1440K: u8 = 4;
 
-/// 起動時の日時 (固定)。**ホストの時計は読まない** — 上記の理由による
+/// 起動時の日時 (既定値・固定)。**coreは自分ではホストの時計を読まない** —
+/// 上記の理由による。実時刻が要るとき (TLSの証明書検証など) は、ホストが
+/// 起動時に [`Cmos::set_clock_unix`] で**入力として**注入する。MACアドレスと
+/// 同じ扱いで、注入しなければ従来どおりこの固定値 (CIのgolden traceは不変)
 const EPOCH: Time = Time {
     year: 2026,
     month: 1,
@@ -216,6 +219,34 @@ impl Cmos {
         self.now.month = from_bcd(month).clamp(1, 12);
         self.now.day = from_bcd(day).clamp(1, days_in_month(self.now.year, self.now.month));
     }
+
+    /// 時計をUNIX時刻 (UTC秒) に合わせる。ホストが起動時に呼ぶ入力口で、
+    /// core自身は時計を読まない (モジュール冒頭の決定論の理由を参照)。
+    /// 変換は proleptic Gregorian (Howard Hinnantの civil_from_days)
+    pub fn set_clock_unix(&mut self, secs: u64) {
+        let days = (secs / 86400) as i64;
+        let rem = secs % 86400;
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+        self.now = Time {
+            year: y as u16,
+            month: m as u8,
+            day: d as u8,
+            // 1970-01-01は木曜。MC146818は 1=日曜
+            weekday: ((days + 4).rem_euclid(7) + 1) as u8,
+            hour: (rem / 3600) as u8,
+            min: (rem % 3600 / 60) as u8,
+            sec: (rem % 60) as u8,
+        };
+        self.sub_second = 0;
+    }
 }
 
 impl Cmos {
@@ -305,6 +336,37 @@ mod tests {
         assert_eq!(c.time_bcd(), (0x13, 0x45, 0x30));
         c.set_date_bcd(0x19, 0x81, 0x08, 0x12); // 1981-08-12
         assert_eq!(c.date_bcd(), (0x19, 0x81, 0x08, 0x12));
+    }
+
+    /// UNIX時刻の注入が日付・曜日・時刻まで正しく変換されること。
+    /// 曜日はMC146818の流儀 (1=日曜)
+    #[test]
+    fn unix_clock_injection_converts_correctly() {
+        let mut c = Cmos::new();
+        // 2026-08-14 09:30:00 UTC (金曜)
+        c.set_clock_unix(1_786_699_800);
+        assert_eq!(c.date_bcd(), (0x20, 0x26, 0x08, 0x14));
+        assert_eq!(c.time_bcd(), (0x09, 0x30, 0x00));
+        c.write_index(0x06);
+        assert_eq!(c.read_data(), 6, "金曜 = 6");
+
+        // 2000-02-29 23:59:59 (うるう日・火曜)
+        c.set_clock_unix(951_868_799);
+        assert_eq!(c.date_bcd(), (0x20, 0x00, 0x02, 0x29));
+        assert_eq!(c.time_bcd(), (0x23, 0x59, 0x59));
+        c.write_index(0x06);
+        assert_eq!(c.read_data(), 3, "火曜 = 3");
+
+        // エポックの原点 (木曜)
+        c.set_clock_unix(0);
+        assert_eq!(c.date_bcd(), (0x19, 0x70, 0x01, 0x01));
+        c.write_index(0x06);
+        assert_eq!(c.read_data(), 5, "木曜 = 5");
+
+        // 32bit秒の端 (2038-01-19 03:14:07 火曜) も越えられる
+        c.set_clock_unix(2_147_483_647);
+        assert_eq!(c.date_bcd(), (0x20, 0x38, 0x01, 0x19));
+        assert_eq!(c.time_bcd(), (0x03, 0x14, 0x07));
     }
 
     /// PITのクロックを1秒ぶん流すと、時計がちょうど1秒進むこと

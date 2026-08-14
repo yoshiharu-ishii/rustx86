@@ -63,6 +63,9 @@ self.onmessage = (e) => {
         // NICを挿すのは電源を入れるこの瞬間だけ (VGA機と同じ)。
         // Linuxは起動時にしかPCIを数えないので、後から挿しても見えない
         if (msg.mac) emu.net_attach(new Uint8Array(msg.mac));
+        // RTCを実時刻に合わせる (TLSの証明書検証は正しい時計が前提)。
+        // スナップショット復元はカーネルがもう時計を読んだ後なので合わせない
+        emu.set_rtc_unix(Date.now() / 1000);
       }
       netInbox = [];
       running = true;

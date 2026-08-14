@@ -108,6 +108,11 @@ def main():
         for f in sorted(filenames):
             full = os.path.join(dirpath, f)
             rel = rel_posix(full)
+            if os.path.islink(full):
+                # symlinkはリンクのまま運ぶ (本文=リンク先)。実体を複製すると
+                # /etc/ssl/cert.pem のようなCA束の別名で179KBが二重になる
+                out = entry(out, rel, stat.S_IFLNK | 0o777, os.readlink(full).encode())
+                continue
             with open(full, "rb") as fh:
                 body = fh.read()
             mode = stat.S_IFREG | (0o755 if os.access(full, os.X_OK) else 0o644)

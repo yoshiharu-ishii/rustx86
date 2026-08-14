@@ -29,6 +29,12 @@ use crate::Machine;
 pub struct Fpu {
     /// 物理レジスタ。論理 st(i) は `regs[(top + i) & 7]`
     pub regs: [f64; 8],
+    /// 80bitの原本 (仮数, 符号+指数)。f64に落とすと壊れる値のための控えで、
+    /// **MMXレジスタはここに住む** (仮数64bit・指数0xFFFF がMMXの実機表現)。
+    /// x87の演算がレジスタを書いた瞬間に消え、f64が原本に戻る。
+    /// FXSAVE/FRSTORはここを優先して読むので、MMX値や非正規なf80が
+    /// コンテキストスイッチを**ビット落ちなしで往復**する
+    pub raw: [Option<(u64, u16)>; 8],
     /// 空きビットマスク (物理番号)。1 = 空
     pub empty: u8,
     /// スタックトップ (物理番号)
@@ -46,6 +52,7 @@ impl Default for Fpu {
     fn default() -> Self {
         Self {
             regs: [0.0; 8],
+            raw: [None; 8],
             empty: 0xFF,
             top: 0,
             cond: 0,
@@ -74,6 +81,7 @@ impl Fpu {
     fn set_st(&mut self, i: usize, v: f64) {
         let p = self.phys(i);
         self.regs[p] = v;
+        self.raw[p] = None;
         self.empty &= !(1 << p);
     }
 
@@ -81,6 +89,7 @@ impl Fpu {
         self.top = self.top.wrapping_sub(1) & 7;
         let t = self.top as usize;
         self.regs[t] = v;
+        self.raw[t] = None;
         self.empty &= !(1 << t);
     }
 
@@ -94,20 +103,50 @@ impl Fpu {
         self.empty & (1 << self.phys(i)) != 0
     }
 
-    /// st(i) の生の値 (空でも読む — FXSAVEは8本全部書く)
-    pub fn st_raw(&self, i: usize) -> f64 {
-        self.regs[self.phys(i)]
+    /// st(i) の80bit表現 (空でも読む — FXSAVEは8本全部書く)。
+    /// 原本 (raw) があればそれを、なければf64から組み立てて返す
+    pub fn st_f80(&self, i: usize) -> (u64, u16) {
+        let p = self.phys(i);
+        self.raw[p].unwrap_or_else(|| f64_to_f80(self.regs[p]))
     }
 
-    /// st(i) へ書き戻す (FXRSTOR用)。valid=false なら空印を立てる
-    pub fn set_st_raw(&mut self, i: usize, v: f64, valid: bool) {
+    /// st(i) へ80bitのまま書き戻す (FXRSTOR用)。valid=false なら空印を立てる。
+    /// 原本も保存するので、FXSAVE→FXRSTORはビット同一で往復する
+    pub fn set_st_f80(&mut self, i: usize, mant: u64, se: u16, valid: bool) {
         let p = self.phys(i);
-        self.regs[p] = v;
+        self.regs[p] = f80_to_f64(mant, se);
+        self.raw[p] = Some((mant, se));
         if valid {
             self.empty &= !(1 << p);
         } else {
             self.empty |= 1 << p;
         }
+    }
+
+    // ---- MMX (mm0-7 = 物理レジスタの仮数64bit。TOPは見ない) ----
+
+    /// mm(i) を読む。x87の値が入っていたら、その80bit表現の仮数が見える
+    /// (実機のエイリアスと同じ)
+    pub fn mm(&self, i: usize) -> u64 {
+        self.raw[i].unwrap_or_else(|| f64_to_f80(self.regs[i])).0
+    }
+
+    /// mm(i) へ書く。実機の流儀どおり指数部を全1にする。
+    /// タグとTOPの更新は [`Self::mmx_touch`] に任せる (全MMX命令が通る)
+    pub fn set_mm(&mut self, i: usize, v: u64) {
+        self.raw[i] = Some((v, 0xFFFF));
+        self.regs[i] = f80_to_f64(v, 0xFFFF);
+    }
+
+    /// MMX命令の共通作用: TOP=0、タグ全部valid (EMMS以外の全命令。Intel SDMの仕様)
+    pub fn mmx_touch(&mut self) {
+        self.top = 0;
+        self.empty = 0;
+    }
+
+    /// EMMS: タグを全部emptyへ戻し、x87の世界へ返す
+    pub fn emms(&mut self) {
+        self.empty = 0xFF;
     }
 
     /// タグワード (2bit×8、物理番号順)。00=有効 01=ゼロ 10=特殊 11=空
@@ -208,11 +247,6 @@ fn read_f32(m: &mut Machine, a: u32) -> f64 {
 fn read_f64(m: &mut Machine, a: u32) -> f64 {
     f64::from_bits(m.read32(a) as u64 | (m.read32(a + 4) as u64) << 32)
 }
-fn read_f80(m: &mut Machine, a: u32) -> f64 {
-    let mant = m.read32(a) as u64 | (m.read32(a + 4) as u64) << 32;
-    let se = m.read16(a + 8);
-    f80_to_f64(mant, se)
-}
 fn write_f32(m: &mut Machine, a: u32, v: f64) {
     m.write32(a, (v as f32).to_bits());
 }
@@ -220,12 +254,6 @@ fn write_f64(m: &mut Machine, a: u32, v: f64) {
     let b = v.to_bits();
     m.write32(a, b as u32);
     m.write32(a + 4, (b >> 32) as u32);
-}
-fn write_f80(m: &mut Machine, a: u32, v: f64) {
-    let (mant, se) = f64_to_f80(v);
-    m.write32(a, mant as u32);
-    m.write32(a + 4, (mant >> 32) as u32);
-    m.write16(a + 8, se);
 }
 
 /// 整数変換。丸めは制御語のRC (bit10-11): 0=最近接偶数 1=床 2=天井 3=切り捨て
@@ -350,8 +378,13 @@ fn exec_mem(m: &mut Machine, op: u8, reg: usize, a: u32) {
             m.cpu.fpu.push(v);
         }
         (0xDB, 5) => {
-            let v = read_f80(m, a);
-            m.cpu.fpu.push(v);
+            // FLD m80: 原本ごと積む — FSTP m80 との往復がビット同一になる
+            // (muslはlong doubleをx87経由でコピーすることがある)
+            let mant = m.read32(a) as u64 | (m.read32(a + 4) as u64) << 32;
+            let se = m.read16(a + 8);
+            m.cpu.fpu.push(f80_to_f64(mant, se));
+            let t = m.cpu.fpu.top as usize;
+            m.cpu.fpu.raw[t] = Some((mant, se));
         }
         (0xD9, 2) => write_f32(m, a, m.cpu.fpu.st(0)),
         (0xD9, 3) => {
@@ -364,7 +397,10 @@ fn exec_mem(m: &mut Machine, op: u8, reg: usize, a: u32) {
             m.cpu.fpu.pop();
         }
         (0xDB, 7) => {
-            write_f80(m, a, m.cpu.fpu.st(0));
+            let (mant, se) = m.cpu.fpu.st_f80(0);
+            m.write32(a, mant as u32);
+            m.write32(a + 4, (mant >> 32) as u32);
+            m.write16(a + 8, se);
             m.cpu.fpu.pop();
         }
         // --- 整数ロード/ストア ---
@@ -462,20 +498,26 @@ fn exec_mem(m: &mut Machine, op: u8, reg: usize, a: u32) {
             m.write16(a, cw);
         }
         (0xDD, 4) => {
-            // FRSTOR: 環境 + レジスタ8本 (80bit×8)
+            // FRSTOR: 環境 + レジスタ8本 (80bit×8)。原本ごと戻す
             load_env(m, a);
             for i in 0..8 {
-                let v = read_f80(m, a + 28 + i as u32 * 10);
+                let at = a + 28 + i as u32 * 10;
+                let mant = m.read32(at) as u64 | (m.read32(at + 4) as u64) << 32;
+                let se = m.read16(at + 8);
                 let p = m.cpu.fpu.phys(i);
-                m.cpu.fpu.regs[p] = v;
+                let valid = m.cpu.fpu.empty & (1 << p) == 0; // タグはload_env済み
+                m.cpu.fpu.set_st_f80(i, mant, se, valid);
             }
         }
         (0xDD, 6) => {
             // FNSAVE: 環境 + レジスタ、その後 FNINIT
             store_env(m, a);
             for i in 0..8 {
-                let v = m.cpu.fpu.st(i);
-                write_f80(m, a + 28 + i as u32 * 10, v);
+                let (mant, se) = m.cpu.fpu.st_f80(i);
+                let at = a + 28 + i as u32 * 10;
+                m.write32(at, mant as u32);
+                m.write32(at + 4, (mant >> 32) as u32);
+                m.write16(at + 8, se);
             }
             m.cpu.fpu.reset();
             m.cpu.fpu_cw = 0x037F;
