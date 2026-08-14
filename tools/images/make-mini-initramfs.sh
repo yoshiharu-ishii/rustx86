@@ -82,7 +82,13 @@ echo
 echo "  rustx86 mini initramfs — busybox shell"
 echo "  ゲーム: snake   エディタ: vi"
 echo
-exec /bin/busybox sh
+# **シェルに制御端末を持たせる。** initから直接execすると制御端末が無く、
+# ^C のSIGINTを配る相手が居ない — pingが止められなかった (実話)。
+# /dev/console は制御端末になれないので、実体の /dev/ttyS0 を
+# セッションリーダー (setsidの子) が開き直す。cttyhackはAlpineのbusyboxに
+# 入っていないため、リダイレクトで同じことをする
+exec /bin/busybox setsid /bin/busybox sh -c \
+  'exec /bin/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'
 INIT
 chmod 755 "$work/root/init"
 # cpioは自前で書く (tools/images/mkcpio.py) — /dev/console ノードを非rootで
