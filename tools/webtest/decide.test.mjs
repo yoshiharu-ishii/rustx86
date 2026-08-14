@@ -1,0 +1,90 @@
+// 画面の判断 (web/decide.js) のテスト。
+//
+//   node --test tools/webtest/
+//
+// **実ブラウザを持ち出さない。** ここで押さえるのは見た目ではなく判断で、
+// 今日踏んだUIのバグはどれも判断の間違いだった。素の node で回るので
+// CIでも数百ミリ秒で済む。
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar,
+} from '../../web/decide.js';
+
+/** 先頭512バイトの末尾に 0x55AA を置いた、最小の起動できるディスク */
+function disk(extra = 0) {
+  const b = new Uint8Array(512 + extra);
+  b[510] = 0x55;
+  b[511] = 0xaa;
+  return b;
+}
+
+test('落とされたものを中身で見分ける', () => {
+  // vmlinux: 拡張子を持たないので、印で見分けるしかない
+  const elf = new Uint8Array(0x300);
+  elf.set([0x7f, 0x45, 0x4c, 0x46]);
+  assert.ok(isKernel(elf), 'ELFをカーネルと見なす');
+
+  // bzImage: setupヘッダの "HdrS" は 0x202 固定
+  const bz = new Uint8Array(0x300);
+  bz.set([0x48, 0x64, 0x72, 0x53], 0x202);
+  assert.ok(isKernel(bz), 'HdrSをカーネルと見なす');
+
+  assert.ok(!isKernel(disk()), 'ディスクをカーネルと間違えない');
+  assert.ok(isBootable(disk()), '0x55AAがあれば起動できる');
+  assert.ok(!isBootable(new Uint8Array([1, 2, 3])), '短すぎるものは起動できない');
+  assert.ok(!isBootable(new Uint8Array(512)), '印が無ければ起動できない');
+  // **ELFの中に偶然0x55AAが居ても、カーネル判定が先に効く**ことを担保する
+  const elfWithSig = new Uint8Array(0x300);
+  elfWithSig.set([0x7f, 0x45, 0x4c, 0x46]);
+  elfWithSig[510] = 0x55;
+  elfWithSig[511] = 0xaa;
+  assert.ok(isKernel(elfWithSig), 'ELF印を優先する');
+});
+
+test('繋ぎ先の組み立て', () => {
+  assert.equal(withToken('ws://h/net', ''), 'ws://h/net', 'トークン無しは素通し');
+  assert.equal(withToken('ws://h/net', 'dev'), 'ws://h/net?token=dev');
+  assert.equal(withToken('ws://h/net?a=1', 'dev'), 'ws://h/net?a=1&token=dev', '既にクエリがあれば &');
+  assert.equal(withToken('ws://h/net', 'a b'), 'ws://h/net?token=a%20b', 'トークンは符号化する');
+});
+
+test('?net= の読み方', () => {
+  const D = 'ws://127.0.0.1:8087/net';
+  assert.equal(netUrlFromQuery('', D), null, '無指定は繋ぎ先を決めない (既定に任せる)');
+  assert.equal(netUrlFromQuery('?net=1', D), D, '?net=1 は手元のSLiRP backend');
+  assert.equal(netUrlFromQuery('?net=1&nettoken=dev', D), `${D}?token=dev`);
+  assert.equal(netUrlFromQuery('?net=wss://x/net', D), 'wss://x/net', '任意の繋ぎ先');
+  // **off は繋ぎ先ではない。** URLとして扱うと ws://off のような嘘になる
+  assert.equal(netUrlFromQuery('?net=off', D), null);
+  assert.ok(netOff('?net=off'), 'off は「挿さずに起動」の合図');
+  assert.ok(!netOff('?net=1'));
+  assert.ok(!netOff(''), '無指定は off ではない (既定は繋ぐ)');
+});
+
+test('挿さるNICはOSの世代で決まる', () => {
+  const isa = nicFor(false);
+  assert.ok(isa.usable, '16bitのゲストにはISAのNE2000が挿さる');
+  assert.match(isa.label, /NE2000/);
+
+  const pci = nicFor(true);
+  assert.ok(!pci.usable, 'LinuxはISAを知らないので、まだ挿せるカードが無い');
+  assert.match(pci.label, /PCI/);
+  assert.ok(pci.why, '選べない理由を言えること');
+});
+
+test('自動起動は線が生きているときだけネットの続きを流す', () => {
+  const m = { script: [{ when: 'a', send: 'x' }], netScript: [{ when: 'b', send: 'y' }] };
+  assert.equal(scriptFor(m, false).length, 1, 'リンクが死んでいればDHCPを打たせない');
+  assert.equal(scriptFor(m, true).length, 2, '生きていれば続きを流す');
+  // 元の配列を書き換えない (2度目の起動で段が増え続けると自動起動が壊れる)
+  assert.equal(m.script.length, 1);
+  assert.equal(scriptFor({ script: [{ when: 'a' }] }, true).length, 1, 'netScript が無い機械');
+  assert.equal(scriptFor(null, true), undefined, 'マシン未選択でも落ちない');
+});
+
+test('¥ はバックスラッシュとして届く', () => {
+  assert.equal(guestChar('¥'), '\\', 'MacのJIS配列で A:\\> のパスが打てる');
+  assert.equal(guestChar('a'), 'a');
+  assert.equal(guestChar('\\'), '\\');
+});
