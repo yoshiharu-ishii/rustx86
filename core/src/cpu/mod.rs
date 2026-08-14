@@ -30,6 +30,7 @@ pub(crate) mod dcache;
 pub mod decimal;
 pub mod group;
 pub mod interrupt;
+pub mod mmx;
 pub(crate) mod onebyte;
 pub mod operand;
 pub mod segment;
@@ -611,6 +612,10 @@ pub struct Decoder {
     pub opsize32: bool,
     /// `0x67` が付いていた。実効アドレスの計算が16bit形式と32bit形式で入れ替わる
     pub addrsize32: bool,
+    /// `0x66` が**実際に付いていた** (opsize32は既定幅との合成なので別物)。
+    /// SSE/MMXの命令選択子は生のプレフィクスで決まる — 16bitコードでも
+    /// `0F 6F` はMMX、`66 0F 6F` はSSE2
+    pub p66: bool,
     /// `0xF0` (LOCK) が付いていた。バス占有はシングルコアでは意味を持たないが、
     /// **付けてよい命令かの検査**には要る (読んで書く命令以外は #UD)
     pub lock: bool,
@@ -666,11 +671,11 @@ pub fn step(m: &mut Machine) {
         rep: None,
         opsize32: cs32,
         addrsize32: cs32,
+        p66: false,
         lock: false,
     };
 
     // プレフィクスループ
-    let mut saw_66 = false;
     let op = loop {
         let b = fetch8(m);
         match b {
@@ -685,7 +690,7 @@ pub fn step(m: &mut Machine) {
             0x66 => {
                 // オペランドサイズの**反転** (386〜)
                 d.opsize32 = !cs32;
-                saw_66 = true;
+                d.p66 = true;
             }
             0x67 => d.addrsize32 = !cs32, // アドレスサイズの反転 (386〜)
             0xF2 | 0xF3 => d.rep = Some(b),
@@ -709,7 +714,7 @@ pub fn step(m: &mut Machine) {
     // ここで BTreeSet::insert を踏んでいて、プロファイルの27%を占めていた —
     // 診断のつもりの1行が、実行そのものより高くついていた。
     // 記録済みかどうかは配列1発で見る (木を歩かない)
-    if saw_66 && !m.prefixed_seen[op as usize] {
+    if d.p66 && !m.prefixed_seen[op as usize] {
         m.prefixed_seen[op as usize] = true;
         m.prefixed_ops.insert(op);
     }
