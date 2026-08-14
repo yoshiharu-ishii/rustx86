@@ -664,9 +664,12 @@ impl Machine {
                 self.devices.sysctl
             }
             IoTarget::Net => match &mut self.devices.net {
-                Some(net) => net.read(port - 0x300),
+                // **PCI機ではISAの0x300窓は開かない。** カードはPCIスロット側に
+                // 居て、番地はBARが決める — 同じ実体が両方の窓で応えると、
+                // OSが2枚あると数えてしまう
+                Some(net) if !self.profile.has_pci => net.read(port - 0x300),
                 // カードが挿さっていなければ、ただの空きスロットである
-                None => {
+                _ => {
                     self.unhandled_io.insert(port);
                     0xFF
                 }
@@ -695,13 +698,20 @@ impl Machine {
     }
 
     /// PCIの装置への読み。**挿さっている装置ごとの分岐はここ1箇所**
-    fn pci_slot_read(&mut self, _slot: usize, _off: u16) -> u8 {
-        // 装置はまだ無い (次の段で RTL8029 がここに来る)
-        0xFF
+    fn pci_slot_read(&mut self, slot: usize, off: u16) -> u8 {
+        match (slot, &mut self.devices.net) {
+            // RTL8029: 皮はPCIでも中身はISA版と同じDP8390
+            (crate::dev::pci::NET_SLOT, Some(net)) => net.read(off),
+            _ => 0xFF,
+        }
     }
 
     /// PCIの装置への書き
-    fn pci_slot_write(&mut self, _slot: usize, _off: u16, _val: u8) {}
+    fn pci_slot_write(&mut self, slot: usize, off: u16, val: u8) {
+        if let (crate::dev::pci::NET_SLOT, Some(net)) = (slot, &mut self.devices.net) {
+            net.write(off, val);
+        }
+    }
 
     pub fn io_write8(&mut self, port: u16, val: u8) {
         // POST診断ポート。テストROM (test386) が進行番号を書く — 足跡として残す
@@ -760,8 +770,8 @@ impl Machine {
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
             IoTarget::Net => match &mut self.devices.net {
-                Some(net) => net.write(port - 0x300, val),
-                None => {
+                Some(net) if !self.profile.has_pci => net.write(port - 0x300, val),
+                _ => {
                     self.unhandled_io.insert(port);
                 }
             },

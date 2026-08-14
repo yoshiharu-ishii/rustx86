@@ -28,7 +28,9 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v7: x87の制御語 (fpu_cw) を追加
 /// v8: LDTRの隠しレジスタ (base/limit) を追加
 /// v9: NE2000 (挿さっていれば) を追加
-pub const VERSION: u16 = 9;
+// v10: NE2000に受信機のラッチ (running) が加わった — STA/STPはコマンドで、
+//      crの生値からは走行状態を再現できない
+pub const VERSION: u16 = 10;
 
 /// 順番に書いていくだけの器
 pub struct Writer {

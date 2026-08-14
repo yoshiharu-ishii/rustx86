@@ -643,10 +643,19 @@ impl Machine {
         std::mem::replace(&mut self.vram_dirty, false)
     }
 
-    /// NE2000を挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
-    /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる
+    /// NICを挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
+    /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる。
+    ///
+    /// **どのバスに挿さるかは機械の世代が決める。** 16bit機はISAの0x300、
+    /// PCIを積む機械 (32bit) はスロット3のRTL8029になる。装置の実体は
+    /// どちらも同じDP8390で、皮 (番地の見つかり方) だけが違う
     pub fn net_attach(&mut self, mac: [u8; 6]) {
-        self.devices.net = Some(dev::Ne2000::new(mac));
+        let mut nic = dev::Ne2000::new(mac);
+        if let Some(pci) = &mut self.devices.pci {
+            nic.flatten_prom(); // PCIのドライバはPROMを連続バイトで読む
+            pci.plug(dev::pci::NET_SLOT, dev::pci::rtl8029(IRQ_NET));
+        }
+        self.devices.net = Some(nic);
     }
 
     /// 外の世界 (WebSocket等) から届いたEthernetフレームを受信リングへ。
