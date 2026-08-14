@@ -33,7 +33,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'elks',
-    label: 'ELKS 0.9.1',
+    label: 'ELKS',
     sub: 'フロッピー1枚のUNIX',
     image: './fd2880.img',
     status: 'ok',
@@ -50,7 +50,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'freedos',
-    label: 'FreeDOS 1.4',
+    label: 'FreeDOS',
     sub: 'DOS',
     image: './fd14boot.img',
     status: 'ok',
@@ -88,7 +88,7 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'linux',
-    label: 'Linux 6.18',
+    label: 'Linux',
     sub: 'bzImage + initramfs',
     // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
     // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
