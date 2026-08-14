@@ -838,9 +838,13 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
 
 /// 0F AE グループ: FXSAVE/FXRSTOR/LDMXCSR/STMXCSR。
 ///
-/// FXSAVE/FXRSTOR は**カーネルがコンテキストスイッチでXMMを退避する**ための命令。
-/// CPUIDでFXSRを名乗った以上、これが動かないとプロセス間でXMMが混線する。
-/// 512バイトの決められた配置 (FCW@0, MXCSR@24, ST@32.., XMM@160..) に書く
+/// FXSAVE/FXRSTOR は**カーネルがコンテキストスイッチとシグナルフレームで
+/// FPU/XMMを退避する**ための命令。CPUIDでFXSRを名乗った以上、これが
+/// 完全でないとプロセス間でレジスタが混線する。x87も必ず入れる —
+/// 入れ忘れていた時代、**浮動小数点の計算中にシグナルが届くと
+/// x87スタックが消えていた** (sigreturnが空を書き戻すため)。
+/// 512バイトの決められた配置 (FCW@0, FSW@2, FTW@4, MXCSR@24,
+/// ST@32.. 16バイト刻み, XMM@160..) に書く
 pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
     let (kind, rm) = modrm(m, d);
     match (kind, rm) {
@@ -851,11 +855,28 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
             }
             let cw = m.cpu.fpu_cw;
             m.write16(addr, cw);
-            m.write16(addr.wrapping_add(2), 0); // FSW
-            m.write8(addr.wrapping_add(4), 0); // FTW (空)
+            let sw = m.cpu.fpu.status();
+            m.write16(addr.wrapping_add(2), sw);
+            // FTW (簡約タグ): bit i = st(i) が空でない。FSAVEの2bit表と違い
+            // FXSAVEは1bitで、TOPはFSWから復元される
+            let mut ftw = 0u8;
+            for i in 0..8 {
+                if !m.cpu.fpu.st_empty(i) {
+                    ftw |= 1 << i;
+                }
+            }
+            m.write8(addr.wrapping_add(4), ftw);
             let mx = m.cpu.mxcsr;
             m.write32(addr.wrapping_add(24), mx);
             m.write32(addr.wrapping_add(28), 0xFFFF); // MXCSR_MASK
+            for i in 0..8 {
+                let v = m.cpu.fpu.st_raw(i);
+                let (mant, se) = crate::cpu::fpu::f64_to_f80(v);
+                let at = addr.wrapping_add(32 + i as u32 * 16);
+                m.write32(at, mant as u32);
+                m.write32(at.wrapping_add(4), (mant >> 32) as u32);
+                m.write16(at.wrapping_add(8), se);
+            }
             for i in 0..8 {
                 let v = m.cpu.xmm[i];
                 write_m128(m, addr.wrapping_add(160 + i as u32 * 16), v);
@@ -865,6 +886,17 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
         // FXRSTOR
         (1, Operand::Mem { addr, .. }) => {
             m.cpu.fpu_cw = m.read16(addr);
+            let sw = m.read16(addr.wrapping_add(2));
+            let ftw = m.read8(addr.wrapping_add(4));
+            m.cpu.fpu.top = ((sw >> 11) & 7) as u8;
+            m.cpu.fpu.cond = sw & 0x4700;
+            for i in 0..8 {
+                let at = addr.wrapping_add(32 + i as u32 * 16);
+                let mant = m.read32(at) as u64 | (m.read32(at.wrapping_add(4)) as u64) << 32;
+                let se = m.read16(at.wrapping_add(8));
+                let v = crate::cpu::fpu::f80_to_f64(mant, se);
+                m.cpu.fpu.set_st_raw(i, v, ftw & (1 << i) != 0);
+            }
             m.cpu.mxcsr = m.read32(addr.wrapping_add(24));
             for i in 0..8 {
                 m.cpu.xmm[i] = read_m128(m, addr.wrapping_add(160 + i as u32 * 16));

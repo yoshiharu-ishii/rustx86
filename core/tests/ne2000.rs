@@ -250,3 +250,53 @@ fn snapshot_roundtrip_keeps_the_nic() {
     m2.io_write8(BASE, 0x62);
     assert_eq!(m2.io_read8(BASE + 0x07), 0x48);
 }
+
+#[test]
+fn page_switch_without_start_keeps_the_receiver_running() {
+    // **STA/STPは状態ではなくコマンド。** Linuxの8390.cは割り込みのたびに
+    // 0x20 (素のNODMA、STAもSTPも無し) を書いてページ0を選ぶ。これで受信機が
+    // 止まったことにすると、割り込みの後に来たフレームを全部落とす
+    // (実際にARP応答が返らなかった)
+    let mut m = Machine::new();
+    m.net_attach(MAC);
+    init_nic(&mut m);
+    m.io_write8(BASE, 0x20); // ページ切替だけ。走行状態は変えない
+    let mut frame = vec![0xFF; 6];
+    frame.extend_from_slice(&MAC);
+    frame.resize(60, 0x11);
+    assert!(m.net_inject_frame(&frame), "0x20の後も受信できること");
+    m.io_write8(BASE, 0x21); // 明示のSTOP
+    assert!(!m.net_inject_frame(&frame), "STOPでは受信しない");
+}
+
+/// PCI機 (32bit) での顔: 設定空間に見え、BARの窓で応え、ISAの0x300窓は閉じる
+#[test]
+fn pci_machine_wears_the_rtl8029_face() {
+    use rustx86_core::MachineProfile;
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(4));
+    m.net_attach(MAC);
+
+    // 設定空間: スロット3に 10EC:8029 が見える
+    m.io_write32(0xCF8, 0x8000_0000 | (3 << 11));
+    assert_eq!(m.io_read32(0xCFC), 0x8029_10EC, "RTL8029の身元");
+
+    // COMMANDのI/O許可を下ろしたまま触っても、誰も応えない
+    assert_eq!(m.io_read8(0xC000), 0xFF, "許可前は名乗らない");
+
+    // 許可を出すと、BARの窓 (0xC000) にDP8390のレジスタが現れる
+    m.io_write32(0xCF8, 0x8000_0000 | (3 << 11) | 0x04);
+    m.io_write32(0xCFC, 0x0001); // COMMAND.IO
+    m.io_write8(0xC000 + 0x0E, 0x49); // DCR — 書けること
+                                      // PROMは**平ら** (ne2k-pciは連続バイトをMACとして読む)
+    m.io_write8(0xC000 + 0x08, 0); // RSAR
+    m.io_write8(0xC000 + 0x09, 0);
+    m.io_write8(0xC000 + 0x0A, 16); // RBCR
+    m.io_write8(0xC000 + 0x0B, 0);
+    m.io_write8(0xC000, 0x0A); // リモート読み + 開始
+    let prom: Vec<u8> = (0..16).map(|_| m.io_read8(0xC000 + 0x10)).collect();
+    assert_eq!(&prom[..6], &MAC, "MACは各バイト1度ずつ");
+    assert_eq!((prom[14], prom[15]), (0x57, 0x57), "印は14/15に移る");
+
+    // **ISAの0x300窓は開かない** — 同じ実体が両方の窓で応えると2枚に数えられる
+    assert_eq!(m.io_read8(BASE + 0x07), 0xFF, "PCI機に0x300のカードは無い");
+}

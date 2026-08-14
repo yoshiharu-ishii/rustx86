@@ -52,6 +52,11 @@ pub struct Ne2000 {
     /// このカードのMACアドレス
     pub mac: [u8; 6],
     cr: u8,
+    /// 受信機が回っているか。**STA/STPは状態ではなくコマンド**で、
+    /// どちらも立てずにCRを書いてもこの状態は変わらない。Linuxの8390.cは
+    /// ページ切替のたびに 0x20 (素のNODMA) を書くので、crの生値で判定すると
+    /// 割り込みのたびに受信機が止まって見える (実際にARPを取りこぼした)
+    running: bool,
     isr: u8,
     imr: u8,
     dcr: u8,
@@ -94,6 +99,7 @@ impl Ne2000 {
         Self {
             mac,
             cr: CR_STP, // 電源投入時は停止
+            running: false,
             isr: ISR_RST,
             imr: 0,
             dcr: 0,
@@ -113,6 +119,19 @@ impl Ne2000 {
             tx_out: VecDeque::new(),
             trace: Vec::new(),
         }
+    }
+
+    /// PROMを**平らに**する (PCIの皮 = RTL8029 用)。
+    ///
+    /// 各バイトを2度ずつ置くのはISAの8bitデータ経路の癖で、PCIのドライバ
+    /// (ne2k-pci) は連続バイトをそのままMACとして読む。倍幅のままだと
+    /// 52:54:00:… が 52:52:54:… と化ける (実際に化けた)。
+    /// 0x57 の印の位置も 14/15 に移る — QEMUのne2000も同じ使い分けをする
+    pub fn flatten_prom(&mut self) {
+        self.mem[..32].fill(0);
+        self.mem[..6].copy_from_slice(&self.mac);
+        self.mem[14] = 0x57;
+        self.mem[15] = 0x57;
     }
 
     /// 割り込みを上げるべきか。ISRとIMRの重なりがある間は上げ続ける
@@ -139,6 +158,7 @@ impl Ne2000 {
                 // ドライバは「リセットを掛けてRSTが立つか」で存在確認をする
                 self.isr |= ISR_RST;
                 self.cr = (self.cr & !CR_STA) | CR_STP;
+                self.running = false;
                 0
             }
             _ => match (self.cr >> 6, off) {
@@ -172,8 +192,10 @@ impl Ne2000 {
                 // Crynwrは行儀よくISRに0xFFを書いて掃除するので気づけなかった)
                 if val & CR_STA != 0 {
                     self.isr &= !ISR_RST;
+                    self.running = true;
                 } else if val & CR_STP != 0 {
                     self.isr |= ISR_RST;
+                    self.running = false;
                 }
                 if val & CR_TXP != 0 {
                     self.transmit();
@@ -182,6 +204,7 @@ impl Ne2000 {
             0x10..=0x17 => self.dma_write(val),
             0x18..=0x1F => {
                 self.isr |= ISR_RST;
+                self.running = false;
             }
             _ => match (self.cr >> 6, off) {
                 (0, 0x01) => self.pstart = val,
@@ -251,7 +274,7 @@ impl Ne2000 {
     /// (TCPや再送) が拾い直す。それで済むから安いカードが作れた
     pub fn inject_frame(&mut self, frame: &[u8]) -> bool {
         // 受信機が動いていない (STP中・リング未設定) なら黙って落とす
-        if self.cr & CR_STA == 0 || self.pstart >= self.pstop {
+        if !self.running || self.pstart >= self.pstop {
             return false;
         }
         // 宛先の選別。自分宛・ブロードキャスト・(RCRの無差別ビット) だけ通す。
@@ -313,6 +336,7 @@ impl Ne2000 {
 impl Ne2000 {
     pub fn save(&self, w: &mut crate::snapshot::Writer) {
         w.bytes(&self.mac);
+        w.bool(self.running);
         for v in [
             self.cr,
             self.isr,
@@ -347,6 +371,7 @@ impl Ne2000 {
             .try_into()
             .map_err(|_| "NE2000のMACが6バイトでない".to_string())?;
         let mut n = Self::new(mac);
+        n.running = r.bool()?;
         for v in [
             &mut n.cr,
             &mut n.isr,

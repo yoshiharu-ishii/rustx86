@@ -46,6 +46,12 @@ pub struct MachineProfile {
     /// CMOVを使い始めた事故がある。名乗るものを1ビット間違えるだけで、
     /// 相手は別の道を歩き出す
     pub has_cpuid: bool,
+    /// PCIバス (ホストブリッジ) を積んでいるか。
+    /// 16bit機は**積んでいない** — PCIは1992年で、ELKS/FreeDOSが動く機械の
+    /// 世代には無い。積むと装置探索が走って起動の命令列が変わるので、
+    /// 「NIC無し起動はビット同一」([ADR-0017] の不変条件) の意味でも
+    /// 世代で分けるのが正しい
+    pub has_pci: bool,
 }
 
 impl MachineProfile {
@@ -55,6 +61,7 @@ impl MachineProfile {
         ram_bytes: MEM_SIZE,
         has_fpu: false,
         has_cpuid: false,
+        has_pci: false,
     };
 
     /// 32bit PC (Linux用)。`mb` MB。任意のMB数を取れる (物理は折り返さず、
@@ -65,6 +72,7 @@ impl MachineProfile {
             ram_bytes: mb << 20,
             has_fpu: true,
             has_cpuid: true,
+            has_pci: true,
         }
     }
 }
@@ -305,7 +313,16 @@ impl Machine {
             pic_service: false,
             pending_fault: std::cell::Cell::new(None),
             sys_access: std::cell::Cell::new(false),
-            devices: Devices::new(),
+            devices: {
+                let mut d = Devices::new();
+                // **PCIは世代で決まる。** 32bit機にだけホストブリッジを挿す
+                if profile.has_pci {
+                    let mut host = dev::PciHost::new();
+                    host.plug(0, dev::pci::host_bridge());
+                    d.pci = Some(host);
+                }
+                d
+            },
             unhandled_io: std::collections::BTreeSet::new(),
             vram_dirty: false,
             prefixed_ops: std::collections::BTreeSet::new(),
@@ -626,10 +643,19 @@ impl Machine {
         std::mem::replace(&mut self.vram_dirty, false)
     }
 
-    /// NE2000を挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
-    /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる
+    /// NICを挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
+    /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる。
+    ///
+    /// **どのバスに挿さるかは機械の世代が決める。** 16bit機はISAの0x300、
+    /// PCIを積む機械 (32bit) はスロット3のRTL8029になる。装置の実体は
+    /// どちらも同じDP8390で、皮 (番地の見つかり方) だけが違う
     pub fn net_attach(&mut self, mac: [u8; 6]) {
-        self.devices.net = Some(dev::Ne2000::new(mac));
+        let mut nic = dev::Ne2000::new(mac);
+        if let Some(pci) = &mut self.devices.pci {
+            nic.flatten_prom(); // PCIのドライバはPROMを連続バイトで読む
+            pci.plug(dev::pci::NET_SLOT, dev::pci::rtl8029(IRQ_NET));
+        }
+        self.devices.net = Some(nic);
     }
 
     /// 外の世界 (WebSocket等) から届いたEthernetフレームを受信リングへ。
@@ -944,8 +970,16 @@ impl Machine {
                 return elapsed;
             }
             // HLT中でも装置は動き続ける。タイマ割り込みで目を覚ますため、
-            // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する
-            if self.halted && self.pending_irq.is_none() && !self.devices.pit.counters[0].running {
+            // 「保留が無ければ終わり」ではなく「タイマも止まっていれば終わり」で判定する。
+            // **PICの挙手も見る** — ワンショットのタイマは鳴った瞬間に止まる
+            // (running=false) ので、鳴らした割り込みがまだPICに居るうちに
+            // ここで抜けると、配られないまま機械が永眠する (Linuxのhresティックで
+            // 実際に眠った。周期モードのOSでは running が真のままで起きない)
+            if self.halted
+                && self.pending_irq.is_none()
+                && !self.devices.pit.counters[0].running
+                && !self.devices.pic[0].has_pending()
+            {
                 break;
             }
             if self.trap.is_some() {

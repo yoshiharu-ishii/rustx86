@@ -143,12 +143,14 @@ function syncControls() {
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
-  // 16bit (ELKS/DOS) はISAのNE2000。32bitのLinuxはISAを知らないので
-  // PCIのRTL8029になる — こちらはまだ無い (ADR-0017 5c)
+  // 16bit (ELKS/DOS) はISAのNE2000、32bitのLinuxはPCIのRTL8029。
+  // 中身は同じDP8390で、皮 (番地の見つかり方) だけが違う
   const nic = nicFor(!!linux);
   $('netSel').querySelector('option[value="on"]').textContent = nic.label;
-  $('netSel').disabled = !nic.usable;
-  $('netSel').title = nic.usable ? NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off : nic.why;
+  $('netSel').title = NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off;
+  // 左のデバイス欄も同じ判断で書き直す — ランプの状態変化しか見ていないと、
+  // マシンを切り替えた瞬間だけ前のNICの名前が残る (実際に残った)
+  setNetLamp(link?.state);
   syncSidebar();
   if (linux) {
     $('boot').disabled = linux.busy;
@@ -594,6 +596,9 @@ const dbg = new Debugger({
 function netConnect(url) {
   link?.close();
   link = new NetLink(url);
+  // Linuxのワーカーが受け取り側なら、新しい線にも同じ配線を張り直す
+  // (張り忘れるとフレームがinboxに黙って積もる)
+  if (linux) link.onFrame = f => linux?.netInject(f);
   setNetLamp('wait');
   link.onState = (s, reason) => {
     setNetLamp(s);
@@ -644,8 +649,9 @@ function setNetLamp(state) {
   $('netSel').title = NET_LABEL[state] ?? NET_LABEL.off;
   // 選択そのものも状態に追従させる (「設定…」を選んだ後に戻す用でもある)
   $('netSel').value = link ? 'on' : 'off';
+  const nicName = nicFor(!!linux).label;
   $('devNic').textContent = link
-    ? { up: 'NE2000 (0x300)', wait: '接続中…', down: 'リンク無し' }[state] ?? 'NE2000 (0x300)'
+    ? { up: nicName, wait: '接続中…', down: 'リンク無し' }[state] ?? nicName
     : '未接続';
 }
 
@@ -783,7 +789,12 @@ $('netForm').addEventListener('submit', e => {
 $('power').addEventListener('click', async () => {
   speaker.mute();
   if (linux) {
-    if (linux.booted) linux.destroy(), (linux = null), $('linuxScreen').setAttribute('hidden', '');
+    if (linux.booted) {
+      linux.destroy();
+      linux = null;
+      $('linuxScreen').setAttribute('hidden', '');
+      if (link) link.onFrame = null; // 受け取りをVGA機のpump経由に戻す
+    }
     else await linux.boot();
     syncControls();
     return;
@@ -1214,7 +1225,15 @@ async function select(m, { autoBoot = true } = {}) {
       onState: syncControls,
       onDbgStop: (why) => dbg.onStop(why),
       onTone: hz => speaker.update(hz),
+      // NICを挿すのは電源の瞬間 (VGA機の attachNet と同じ判断)。
+      // 線が来ていればRTL8029が挿さって出る — MACも16bit機と同じ
+      mac: () => (link ? [0x52, 0x54, 0x00, 0x12, 0x34, 0x56] : undefined),
+      // ゲストが送ったフレームは線へ (無ければ捨てる — 抜けたケーブル)
+      onNetTx: f => link?.send(f),
     });
+    // 届いたフレームはワーカーへ直行 (inboxで寝かせない — ワーカー側に
+    // 自分のスライス境界の受信箱がある)
+    if (link) link.onFrame = f => linux?.netInject(f);
     dbg.reset();
     syncControls();
     // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)。

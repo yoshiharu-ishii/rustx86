@@ -320,3 +320,28 @@ fn shifted_characters_are_wrapped_with_shift() {
         "Shift押下, 2押下, 2離す, Shift離す"
     );
 }
+
+/// prefetch (0F 18) と多バイトNOP (0F 1F) はヒント命令 — ModRMを読んで
+/// IPを進め、演算はしない。**未実装だとIPが止まって無限ループになる。**
+/// Linuxの udp_queue_rcv_one_skb が prefetchnta [reg+disp32] を使い、
+/// DNS応答の処理でwgetがフリーズした真因 (2026-08-14)。
+/// リアルモードで叩き、trapせずIPが進むことだけ確かめる
+#[test]
+fn prefetch_and_multibyte_nop_are_hints() {
+    let mut m = Machine::new();
+    // CS=0, IP=0x600 に命令列を置く (ブートセクタ領域の手前を避けた任意番地)
+    let base = 0x0600u32;
+    let code: &[u8] = &[
+        0x0F, 0x18, 0x08, // prefetch [bx+si] (/1)
+        0x0F, 0x18, 0x00, // prefetchnta [bx+si] (/0)
+        0x0F, 0x1F, 0x00, // nop [bx+si] (多バイトNOP)
+        0xF4, // hlt で締め
+    ];
+    for (i, b) in code.iter().enumerate() {
+        m.write8(base + i as u32, *b);
+    }
+    m.cpu.ip = base as u16 as u32;
+    m.run(4);
+    assert!(m.trap.is_none(), "prefetch/nopでtrap: {:?}", m.trap);
+    assert!(m.halted, "hltまで到達せず (IPが止まった疑い)");
+}

@@ -27,7 +27,34 @@ cp "$work/bin/busybox" "$work/root/bin/busybox"
 cp "$work/lib/ld-musl-i386.so.1" "$work/root/lib/"
 cp "$work/lib/libc.musl-x86.so.1" "$work/root/lib/" 2>/dev/null || true
 cp tools/guest/snake "$work/root/bin/snake"
-chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"*
+# ネットワークのモジュール。Alpineのinitramfsから3つだけ借りる —
+# カーネルと同じ荷物から取るので vermagic が必ず合う。
+#   8390 + ne2k-pci  NICのドライバ (RTL8029 = PCI版NE2000)
+#   af_packet        生ソケット (udhcpc がDHCPを喋るのに要る)
+mod_dir=$(dirname "$(find -L "$work/lib" "$work/usr/lib" -name ne2k-pci.ko 2>/dev/null | head -1)")
+pkt=$(find -L "$work/lib" "$work/usr/lib" -name af_packet.ko 2>/dev/null | head -1)
+mkdir -p "$work/root/lib/modules"
+cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
+chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
+# udhcpc がリースを**実際に適用する**スクリプト。busybox の udhcpc は
+# 取ったリースを自分では適用せず、このスクリプトに渡すだけである
+# (無いと「取れたのにアドレスが付かない」になる)
+mkdir -p "$work/root/usr/share/udhcpc"
+cat > "$work/root/usr/share/udhcpc/default.script" <<'DHCP'
+#!/bin/busybox sh
+# $1: deconfig | bound | renew。変数は udhcpc が環境で渡す
+case "$1" in
+  deconfig) busybox ifconfig "$interface" 0.0.0.0 ;;
+  bound|renew)
+    busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}"
+    [ -n "$router" ] && busybox route add default gw "$router" dev "$interface"
+    [ -n "$dns" ] && echo "nameserver $dns" > /etc/resolv.conf
+    ;;
+esac
+DHCP
+chmod 755 "$work/root/usr/share/udhcpc/default.script"
+mkdir -p "$work/root/etc"
+
 cat > "$work/root/init" <<'INIT'
 #!/bin/busybox sh
 /bin/busybox mount -t proc proc /proc
@@ -38,11 +65,41 @@ cat > "$work/root/init" <<'INIT'
 # 作法を選べるように、素直なxtermを名乗っておく
 export TERM=xterm
 /bin/busybox stty rows 24 cols 80
+# NICのドライバを挿す。**カードが無くてもエラーにはならない** — ドライバは
+# 載るがbindする相手が居ないだけ (実機にカードを挿していないのと同じ)。
+# 依存の順: ne2k-pci は 8390 の上に建つ
+/bin/busybox insmod /lib/modules/af_packet.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/8390.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/ne2k-pci.ko 2>/dev/null
+# カードが挿さっていればDHCPを裏で回す (ELKSの rc.sys が ktcp を上げるのと
+# 同じ作法)。**挿さっていなければ何もしない** — NIC無し起動は素のまま。
+# -b: リースが取れるまで裏で粘る (線が後から生きても拾える)
+if [ -e /sys/class/net/eth0 ]; then
+  /bin/busybox ifconfig eth0 up
+  /bin/busybox udhcpc -i eth0 -b -q -s /usr/share/udhcpc/default.script >/dev/null 2>&1
+fi
 echo
 echo "  rustx86 mini initramfs — busybox shell"
 echo "  ゲーム: snake   エディタ: vi"
 echo
-exec /bin/busybox sh
+# **シェルはexecせずforkで起こす。** 2つ理由がある:
+#
+# 1. 制御端末: initから直接execすると制御端末が無く、^CのSIGINTを配る
+#    相手が居ない (pingが止められなかった)。setsidで新セッションを起こし、
+#    そのリーダーに実体の /dev/ttyS0 を開かせて制御端末にする
+#    (/dev/console は制御端末になれない。cttyhackはAlpineのbusyboxに無い)
+# 2. **シェルがPID 1のままだと ^Z が永久に効かない。** カーネルの孤児
+#    プロセスグループ判定は「親が global init のメンバーは数えない」
+#    (is_global_init(p->real_parent)) ので、シェル=PID1だと全ジョブが
+#    孤児扱いになり、TSTP/TTIN/TTOU は仕様で捨てられる (SIGSTOPだけ効く
+#    という奇妙な姿になる — 実際になった)。forkすれば親はPID1でなくなる
+#
+# シェルが死んだら起こし直す (getty代わり)。孤児の回収はPID1のashが
+# 子待ちのついでにやる
+while :; do
+  /bin/busybox setsid /bin/busybox sh -c \
+    'exec /bin/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'
+done
 INIT
 chmod 755 "$work/root/init"
 # cpioは自前で書く (tools/images/mkcpio.py) — /dev/console ノードを非rootで

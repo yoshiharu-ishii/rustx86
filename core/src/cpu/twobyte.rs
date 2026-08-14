@@ -50,6 +50,14 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
         m.op_counts[256 + op2 as usize] += 1;
     }
     match op2 {
+        // 0F 18-0x1F: prefetch (0x18) と多バイトNOP群 (0x1F ほか)。
+        // **どれもヒントで、ModRMを読んで進めるだけ。演算はしない。**
+        // 実装しないと、Linuxの udp_queue_rcv_one_skb が使う
+        // prefetchnta [esi+0x98] でIPが止まり、DNS応答の処理が空転した
+        // (wgetがフリーズした真因。CPUがその番地で1歩も動いていなかった)
+        0x18..=0x1F => {
+            let _ = modrm(m, d); // 実効アドレスを読み飛ばす (IPを正しく進める)
+        }
         // LLDT/LTR系。ModRMのreg欄が「何をするか」を選ぶ
         0x00 => {
             let (reg, rm) = modrm(m, d);
