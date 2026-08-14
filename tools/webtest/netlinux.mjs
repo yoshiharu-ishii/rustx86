@@ -31,6 +31,8 @@ const initrd = new Uint8Array(readFileSync(join(root, 'images/initramfs-mini')))
 const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
 // NICを挿すのは電源の瞬間 (ブラウザのワーカーと同じ手順)
 emu.net_attach(new Uint8Array([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]));
+// RTCを実時刻に (ブラウザのワーカーと同じ)。TLSの証明書検証は時計が前提
+emu.set_rtc_unix(Date.now() / 1000);
 
 const ws = new WebSocket(url);
 ws.binaryType = 'arraybuffer';
@@ -129,5 +131,10 @@ await waitFor('inet addr:10.0.2.15', 200, 'DHCPでアドレス取得 (10.0.2.15)
 // 本物のインターネットからHTMLを引く (DNS → TCP → HTTP、全部wsslirp経由)
 type('wget -q -O - http://example.com/ | grep -o "<title>.*</title>"\n');
 await waitFor('<title>Example Domain</title>', 600, 'example.com からHTMLが引けた');
+// https — TLSの壁3枚 (MMX・RTC実時刻・ssl_client+CA同梱) が全部越えられて
+// いる証明。実物のPNGを引き、シグネチャ (89504e47) をゲスト内で確かめる。
+// センチネルは分割して書く — コマンドのエコー自体に誤反応しない (1敗)
+type("wget -q -O /tmp/i.png https://pocraft.net/wp-content/uploads/2026/08/wsslirp-eyecatch-s1.png && head -c4 /tmp/i.png | od -An -tx1 | tr -d ' \\n' && echo :GOT''PNG\n");
+await waitFor('89504e47:GOTPNG', 1200, 'httpsで本物のPNGが引けた (TLS成立)');
 ws.close();
 process.exit(0);
