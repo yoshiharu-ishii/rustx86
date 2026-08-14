@@ -120,6 +120,11 @@ function syncControls() {
   // 「今どこに居るか」を引き受けたので、なおさら要らない)
   const start = $('machines').querySelector('[data-id="start"]');
   if (start) start.hidden = !onWelcome;
+  // **一覧の点灯はライブラリから起動したときだけ。** 落としたカーネルでも
+  // Linux機の組み立てには select() を通るので、そのままだと一覧の
+  // 「Linux 6.18」が点いてしまう — 走っているのは持ち込みのカーネルであって、
+  // 一覧のそれではない
+  if (bootOrigin && bootOrigin !== 'library') markCurrent(null);
   syncVmCard();
   if (onWelcome) return;
   // 電源の灯り。**入っていれば緑** — 機械が居るかどうかがそのまま状態である
