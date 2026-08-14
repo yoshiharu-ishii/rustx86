@@ -174,6 +174,12 @@ impl Emulator {
         Ok(())
     }
 
+    /// RTCをUNIX時刻 (UTC秒) に合わせる。電源投入時にJSが Date.now()/1000 を
+    /// 渡す入力口。呼ばなければ既定の固定時刻 (決定的なまま)
+    pub fn set_rtc_unix(&mut self, secs: f64) {
+        self.m.set_rtc_unix(secs as u64);
+    }
+
     /// 外 (WebSocket) から届いたEthernetフレームを受信リングへ
     pub fn net_inject_frame(&mut self, frame: &[u8]) -> bool {
         self.m.net_inject_frame(frame)

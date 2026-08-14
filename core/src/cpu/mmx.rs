@@ -101,7 +101,12 @@ fn shift_count(b: u64, width: u32) -> Option<u32> {
     }
 }
 
-/// MMX命令の一歩。管轄外なら false (sse.rs に回る)
+/// MMX命令の一歩。管轄外なら false (sse.rs に回る)。
+/// cold + inline(never): 呼び手 (twobyte::step) は最ホットの関数で、
+/// この大きなmatchが巻き込まれると**MMXを1命令も踏まない起動が遅くなる**
+/// (交互A/Bで +4.9% を観測した)。ホットパスから隔離する
+#[cold]
+#[inline(never)]
 pub(crate) fn step_mmx(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
     // mmレジスタはFPUの別名 — FPUを挿していない16bit機にMMXは存在しない
     if !m.profile.has_fpu {
