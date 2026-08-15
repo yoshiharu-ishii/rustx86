@@ -47,7 +47,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const pkg = process.env.PKG || join(root, 'web/pkg');
 const mod = await import(pathToFileURL(join(pkg, 'rustx86_wasm.js')).href);
 await mod.default({ module_or_path: readFileSync(join(pkg, 'rustx86_wasm_bg.wasm')) });
-mod.install_panic_hook?.(); // 止まった理由を見えるようにする
+// 止まった理由を名前で受け取る (受け口が無いと理由が捨てられる)
+globalThis.__rustx86_panic ??= (msg) => console.error('[panic]', msg);
+mod.install_panic_hook();
 const kernel = new Uint8Array(readFileSync(join(root, 'images/vmlinuz-lts')));
 const initrd = new Uint8Array(readFileSync(join(root, 'images/initramfs-mini')));
 const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
