@@ -100,6 +100,12 @@ Node しか持たない日に「node20 を指しているが node24 で走らせ
 **確かめ方は推測ではなく実物**: `gh api repos/OWNER/REPO/contents/action.yml?ref=TAG`
 を base64 デコードして `using:` を見る。リリースノートの文言より確実である。
 
+`create-github-app-token` v3 は `app-id` を非推奨にして `client-id` を求める。
+**Secretを増やす必要は無い** — この入力は JWT の発行者 (`iss`) にそのまま渡り、
+GitHubは App ID と Client ID のどちらも受け付けるので、既存の `CI_APP_ID`
+(App ID) をそのまま `client-id` に渡せばよい。Client IDに寄せたくなったら
+Secretの値だけ差し替える (ワークフローは触らない)。
+
 github-script だけは中身がESMになった影響があり、v9 では
 `require('@actions/github')` が失敗する。publish-check の script は
 `require('fs')` を **`await import('node:fs')`** に直してある — 道具の側の

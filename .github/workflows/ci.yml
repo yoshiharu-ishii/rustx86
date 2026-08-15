@@ -176,7 +176,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -266,7 +270,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -335,7 +343,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -434,7 +446,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -519,7 +535,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -621,7 +641,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -715,7 +739,11 @@ jobs:
         if: ${{ always() && env.HAVE_APP == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
