@@ -119,6 +119,48 @@ fn receive_lands_in_the_ring_with_header() {
     assert!(got[46..64].iter().all(|b| *b == 0), "パディングが0でない");
 }
 
+/// **束で届いても取りこぼさない。**
+///
+/// 外の世界 (WebSocket) はTCPの1ウィンドウを一度に落としてくる。リングは
+/// 6.6KB (フル長なら4枚) しか無いので、届いた場で全部押し込もうとすると
+/// 残りが消える — 実測でブラウザの受信フレームの6〜9%が消え、TCPの再送と
+/// 輻輳制御でwgetの実効速度が半分以下になっていた。線 (rx_queue) で待たせ、
+/// ドライバがBNRYを進めるたびに詰めれば1枚も落ちない
+#[test]
+fn a_burst_bigger_than_the_ring_is_not_lost() {
+    let mut m = Machine::new();
+    m.net_attach(MAC);
+    init_nic(&mut m);
+
+    // フル長フレーム12枚 = リングの3倍。中身の先頭バイトで通し番号を振る
+    let frames: Vec<Vec<u8>> = (0..12u8)
+        .map(|i| {
+            let mut f = MAC.to_vec();
+            f.extend_from_slice(&MAC);
+            f.resize(1514, i);
+            f[14] = i; // ヘッダの後ろ = 通し番号 (読み出して照合する)
+            f
+        })
+        .collect();
+    for (i, f) in frames.iter().enumerate() {
+        assert!(m.net_inject_frame(f), "{i}枚目を線で待たせずに落とした");
+    }
+
+    // ドライバのように読み出す: ヘッダの「次ページ」を辿り、読み終えたら
+    // BNRYを進める。12枚が順番どおり全部出てくること
+    let mut page = 0x47u16; // CURRの初期値 = 最初のフレームが居るページ
+    for i in 0..12u8 {
+        let head = dma_read(&mut m, page << 8, 24);
+        assert_eq!(head[0], 0x01, "{i}枚目の受信状態が正常でない");
+        assert_eq!(head[4 + 14], i, "{i}枚目の中身が違う (順番が入れ替わった)");
+        let next = head[1] as u16;
+        // 読み終えたページを返す (BNRY = 次ページの1つ手前)
+        let bnry = if next == 0x46 { 0x5F } else { next - 1 };
+        m.io_write8(BASE + 0x03, bnry as u8);
+        page = next;
+    }
+}
+
 #[test]
 fn foreign_unicast_is_filtered_out() {
     let mut m = Machine::new();
