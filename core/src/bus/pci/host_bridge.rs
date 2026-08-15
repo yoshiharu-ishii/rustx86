@@ -21,7 +21,7 @@ pub fn host_bridge() -> PciFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::pci::reg;
+    use crate::bus::pci::reg;
 
     /// 440FXの名乗り。**OSはスロット0のここを見てPCIバスの存在を確かめる**ので、
     /// 値が変わると「PCIの無いマシン」に見える

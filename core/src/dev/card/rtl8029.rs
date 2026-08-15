@@ -13,8 +13,8 @@
 //! Linuxのドライバ (ne2k-pci) もISA版 (ne) とコアの `lib8390.c` を共有している。
 //! **皮だけ替わるのが正しい姿**である。
 
+use crate::bus::pci::{Bar, PciFunction};
 use crate::dev::chip::Dp8390;
-use crate::dev::pci::{Bar, PciFunction};
 
 /// PCIのRTL8029ASカードを1枚組み立てる。**PROMは平坦**
 pub fn build(mac: [u8; 6]) -> Dp8390 {
@@ -50,7 +50,7 @@ pub fn pci_function(irq_line: u8) -> PciFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dev::pci::reg;
+    use crate::bus::pci::reg;
 
     /// RTL8029ASの名乗り — **ne2k-pci ドライバはこの値でカードを選ぶ**。
     /// 1つでも違うとLinuxはNICを見つけられない

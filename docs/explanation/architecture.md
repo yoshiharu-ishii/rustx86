@@ -45,7 +45,7 @@ I/Oポート空間があり、`IN`/`OUT` という専用命令だけがそこへ
 間に立って経路を決める者は要らない。装置を数える仕組み (PCIの設定空間) が
 要るのは virtio を載せる Tier 4 からになる。
 
-`decode_mem` / `decode_io` は [`core/src/bus.rs`](../../core/src/mem/bus.rs) にある。
+`decode_mem` / `decode_io` は [`core/src/bus/`](../../core/src/bus/mod.rs) にある。
 
 ### 未接続のポートは 0xFF を返す
 

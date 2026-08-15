@@ -402,7 +402,7 @@ impl Machine {
             None
         };
         m.devices.pci = if r.bool()? {
-            Some(crate::dev::PciHost::load(&mut r)?)
+            Some(crate::bus::pci::PciHost::load(&mut r)?)
         } else {
             None
         };
