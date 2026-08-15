@@ -21,17 +21,17 @@
 name: CI Actions
 
 on:
+  # **paths-ignore は使わない。** docsだけの変更でワークフローごと止めると、
+  # 「OK (全層)」が永久にpendingのまま残り、**必須チェックにした瞬間に
+  # docsのPRがマージできなくなる** (GitHubの定番の罠)。
+  #
+  # 代わりに**中で絞る**: 重い検査 (CPU照合・互換) は paths-filter の
+  # `cpu` が false なら skip され、OK は skipped を成功として数える。
+  # docsだけのPRで実際に走るのは軽い土台のジョブ1つだけで、
+  # 結果として「必ず緑の OK が出る」ことと「重い検査を払わない」が両立する
   pull_request:
-    # docsだけの変更に重い検査を回さない (コードに触れないため)。
-    # ci.yml自身とツール類は対象のまま
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
   workflow_dispatch:
 
 permissions:
