@@ -15,7 +15,5 @@ web/vmlinux-lts.gz
 # 起動回帰の証跡 (CIアーティファクト用の一時出力)
 regress-out/
 dist/
-# イメージ焼きの一時作業場 (make-gcc-disk.sh がリポジトリ内に組む — コンテナから見える場所が要る)
-.imgbuild.*/
 # 焼いたディスクイメージ (配布物)
 web/disk-gcc.img

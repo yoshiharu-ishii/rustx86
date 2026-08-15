@@ -14,19 +14,18 @@
 # 圧縮はgzip — ゲストのカーネル (Alpine lts) が確実に読める方式。
 set -e
 cd "$(dirname "$0")/../.."
-# 木は**リポジトリの中**に組む — mksquashfsはコンテナ越しで、コンテナには
-# リポジトリしか見えていない (/var/folders のmktempは向こうに存在しない。
-# 「Cannot stat source directory」で実際に踏んだ)
-work=$PWD/.imgbuild.$$; trap 'rm -rf "$work"' EXIT
-mkdir -p "$work"
+# イメージ焼きは道具箱 (Linuxコンテナ) の中で。スクリプトごと中に入るので、
+# mktempもmksquashfsも同じ世界に居る (以前はmksquashfsだけコンテナ越しで、
+# ホストのmktempが向こうから見えず「Cannot stat source directory」を踏んだ)
+[ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sh tools/images/make-gcc-root.sh "$work/root"
 
 # ディスクから起きたことの印。initはこれを見て「もう移り住んだ」と知る
 # (無いと、ディスクの中のinitがまたディスクを探しに行って輪になる)
 touch "$work/root/.rustx86-disk"
 
-# mksquashfsはLinuxの道具なのでコンテナから借りる (tools/images/in-linux.sh)。
-# -all-root: 所有者を全部rootに (macOSのuidを持ち込まない)
-tools/images/in-linux.sh mksquashfs ".imgbuild.$$/root" images/disk-gcc.img \
+# -all-root: 所有者を全部rootに (ホストのuidを持ち込まない)
+mksquashfs "$work/root" images/disk-gcc.img \
   -comp gzip -all-root -no-xattrs -noappend -quiet
 echo "images/disk-gcc.img: $(du -h images/disk-gcc.img | cut -f1) (squashfs)"

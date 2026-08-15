@@ -17,6 +17,10 @@ RUN apk add --no-cache \
     e2fsprogs \
     cpio \
     tar \
-    python3
+    python3 \
+ && cp /usr/share/apk/keys/x86/* /etc/apk/keys/
+# 最後のcp: x86 (32bit) のパッケージ署名鍵。コンテナは自分の石の鍵しか
+# 鍵輪に持たないが、うちが組むrootfsはx86 — 鍵が無いと署名検証を
+# 切る羽目になる (--allow-untrusted)。鍵は同梱の alpine-keys から写すだけ
 
 WORKDIR /w
