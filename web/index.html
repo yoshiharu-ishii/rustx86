@@ -457,6 +457,17 @@
         <option value="jp">JIS</option>
         <option value="us">US</option>
       </select>
+      <!-- Linuxの機械だけに出る。中身は machines.js の ROOTFS から作る -->
+      <span class="lbl" id="rootLbl" hidden>ルートFS</span>
+      <select id="rootSel" hidden></select>
+      <span class="lbl" id="ramLbl" hidden>RAM</span>
+      <select id="ramSel" hidden>
+        <option value="auto">自動</option>
+        <option value="128">128 MB</option>
+        <option value="256">256 MB</option>
+        <option value="512">512 MB</option>
+        <option value="1024">1024 MB</option>
+      </select>
       <span class="spacer"></span>
       <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>
       <span class="pill" id="pillHist">履歴 0 行</span>

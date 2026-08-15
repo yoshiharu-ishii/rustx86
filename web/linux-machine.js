@@ -19,12 +19,38 @@ import { AnsiTerminal } from './ansi.js';
 let sharedTerm = null;
 
 /**
+ * initramfs の実物から、要るRAM (MB) を決める。
+ *
+ * **「置けたか」ではなく「展開しきれるか」で決まる。** カーネルは initramfs を
+ * tmpfs へ展開するので、圧縮イメージと展開後の中身がしばらく同時にRAMに載る。
+ * 足りないとカーネルは落ちずに "rootfs image is not initramfs (write error)"
+ * と言って途中でやめ、**尻切れのルートFSのままシェルまで来てしまう**。
+ *
+ * gzipなら展開後の大きさは末尾4バイト (ISIZE) に書いてある。Rust側の
+ * `initrd_ram_needed` と同じ算数 — 68MiBはカーネルの取り分で実測から決めた値。
+ * 下限ちょうどに寄せず25%足すのは、**ぴったりだと「4ファイルだけ欠ける」**
+ * という一番気づけない壊れ方を引くため (docs/explanation/pitfalls.md #14)。
+ */
+function autoRam(initrd) {
+  const n = initrd.length;
+  const gz = n > 18 && initrd[0] === 0x1f && initrd[1] === 0x8b;
+  const unpacked = gz
+    ? ((initrd[n - 4] | (initrd[n - 3] << 8) | (initrd[n - 2] << 16) | (initrd[n - 1] << 24)) >>> 0)
+    : n;
+  const need = n + unpacked + (68 << 20);
+  const mb = Math.ceil((need * 1.25) / (64 << 20)) * 64;
+  return Math.max(128, Math.min(2048, mb));
+}
+
+/**
  * Linux 一式を `canvas` に組み立てる。
  *
  * @param {HTMLCanvasElement} canvas シリアル端末を描く先
  * @param {object} opts
  *   onStatus(msg, err)  状態表示の依頼 (ページの status 欄へ)
  *   onState()           起動/停止など、ボタンの見た目に関わる変化の通知
+ *   rootfs()            電源を入れる瞬間に呼ぶ。{name, ramMb} を返す
+ *                       (ramMb が 0/未指定なら実物から自動で決める)
  * @returns 操作するための取っ手
  */
 export function mountLinux(canvas, opts = {}) {
@@ -41,6 +67,10 @@ export function mountLinux(canvas, opts = {}) {
   /** 実際に読んだイメージの名前。**画面の「起動元」に出す** —
       前の機械のラベル (fd2880.img) が残ると、別物を見ていることになる */
   let imageName = '';
+  // **表示は実物に合わせる。** つまみ (?initrd= / ?ram=) を足したのに
+  // ラベルが固定だと、画面が嘘をつく
+  let usedInitrd = 'initramfs-mini';
+  let usedRam = 128;
   let booted = false;
   let paused = false;
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
@@ -154,6 +184,14 @@ export function mountLinux(canvas, opts = {}) {
     const snapshot = given; // ファイルからの復元 (Tier 3g) だけがここを通る
     let kernel = null;
     let initrd = null;
+    // **どのルートFSを載せるかは、電源を入れるこの瞬間に決まる** (NICと同じ)。
+    // 選ぶのは画面 (main.js のツールバー) で、URL (`?initrd=` / `?ram=`) は
+    // その初期値。RAMは 'auto' なら initrd の実物から決める (下の autoRam)
+    const want = opts.rootfs?.() ?? {};
+    const initrdName = want.name || 'initramfs-mini';
+    usedInitrd = initrdName;
+    // RAMの確定は initrd を読んだ後 (自動のときは中身の大きさが要る)
+    let ramMb = want.ramMb || 0;
 
     if (!snapshot && givenKernel) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
@@ -162,7 +200,7 @@ export function mountLinux(canvas, opts = {}) {
       imageName = kernelName || 'カーネル';
       status(`${imageName} を起動します`);
       try {
-        initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+        initrd = await fetchWithProgress(`./${initrdName}`, initrdName);
       } catch {
         initrd = null;
       }
@@ -187,7 +225,7 @@ export function mountLinux(canvas, opts = {}) {
         }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
-          initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+          initrd = await fetchWithProgress(`./${initrdName}`, initrdName);
         } catch {
           initrd = null;
         }
@@ -203,6 +241,10 @@ export function mountLinux(canvas, opts = {}) {
       }
     }
     if (!alive) return; // fetch の間に別のマシンへ切り替えられた
+
+    // **RAMは実物を見てから決める。** 自動 (ramMb未指定) のときだけ効く
+    if (!ramMb) ramMb = initrd ? autoRam(initrd) : 128;
+    usedRam = ramMb;
 
     status(
       snapshot
@@ -234,7 +276,7 @@ export function mountLinux(canvas, opts = {}) {
                 kernel: kernel.buffer,
                 initrd: initrd?.buffer,
                 cmdline: 'console=ttyS0',
-                ramMb: 128,
+                ramMb,
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
@@ -363,6 +405,14 @@ export function mountLinux(canvas, opts = {}) {
       if (worker && booted) worker.postMessage({ type: 'net-rx', frames: [frame.buffer] }, [frame.buffer]);
     },
     /** 実際に読んだイメージの名前 (まだ読んでいなければ空) */
+    /** 実際に使った initramfs の名前 (?initrd= で差し替わる) */
+    get initrdName() {
+      return usedInitrd;
+    },
+    /** 実際に渡したRAM (MB。?ram= で変わる) */
+    get ramMb() {
+      return usedRam;
+    },
     get imageName() {
       return imageName;
     },
