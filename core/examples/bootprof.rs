@@ -31,6 +31,9 @@ fn main() {
         if m.trap.is_some() {
             panic!("trap: {:?}", m.trap);
         }
+        if m.halted {
+            break; // 起こせない眠り (デッドハルト) — run() は0命令で返り続ける
+        }
         samples.push(m.cpu.ip);
         if samples.len().is_multiple_of(8192) {
             let s = String::from_utf8_lossy(&m.devices.uart.tx);

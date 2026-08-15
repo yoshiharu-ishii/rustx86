@@ -185,14 +185,6 @@ impl Emulator {
         self.m.net_inject_frame(frame)
     }
 
-    /// デバッグ用: NE2000のI/Oトレースを取り出す (一時計測)
-    pub fn net_trace(&mut self) -> Vec<u32> {
-        match &mut self.m.devices.net {
-            Some(net) => std::mem::take(&mut net.trace),
-            None => Vec::new(),
-        }
-    }
-
     /// NICの中の様子 (詰まりの診断用。netbench.mjs の NICDBG=1)
     pub fn net_debug(&self) -> String {
         match &self.m.devices.net {
