@@ -688,13 +688,13 @@ function syncSidebar() {
   $('devCon').textContent = linux ? 'シリアル (ttyS0)' : conJp;
   // Linuxのときは自分が読んだ名前を使う (前の機械のラベルを引きずらない)
   const imageLabel = linux ? linux.imageName : lastLabel;
-  $('devDisk').textContent = linux ? 'initramfs-mini' : lastLabel || '—';
+  $('devDisk').textContent = linux ? linux.initrdName : lastLabel || '—';
   $('infoImage').textContent = imageLabel || '—';
   // 機種とRAMは機械自身に聞く (デバッガと同じ出どころ)
   try {
     const j = JSON.parse(machine?.emu.cpu_json() ?? 'null');
     $('infoMachine').textContent = j?.machine ?? (linux ? 'PC (32bit)' : '—');
-    $('infoRam').textContent = j ? `${j.ramMb} MB` : linux ? '128 MB' : '—';
+    $('infoRam').textContent = j ? `${j.ramMb} MB` : linux ? `${linux.ramMb} MB` : '—';
     $('infoArch').textContent = j?.pe ? 'i386 (プロテクトモード)' : 'i386 (リアルモード)';
   } catch {
     /* 起動直後などで読めなくても、表示が古いだけなので黙って見送る */
