@@ -89,7 +89,8 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | JITの語彙と生成器 | [`core/src/cpu/dcache/jit.rs`](../core/src/cpu/dcache/jit.rs) / [`wasm/src/jit.rs`](../wasm/src/jit.rs) |
 | フラグ計算の実体 (8/16/32bit) | [`core/src/cpu/alu.rs`](../core/src/cpu/alu.rs) |
 | 電源投入時にBIOSがやること | [`core/src/bios.rs`](../core/src/bios.rs) |
-| 装置 (PIC / PIT / UART / 8042 / CMOS / CRTC) | [`core/src/dev/`](../core/src/dev/) |
+| 装置 — 素子と基板 (PIC / PIT / UART / 8042 / CMOS / CRTC / DP8390) | [`core/src/dev/`](../core/src/dev/) |
+| バス — 番地の地図と配線 (ISAの固定番地・PCIの設定空間) | [`core/src/bus/`](../core/src/bus/) |
 | IBM PCの文字集合 | [`core/src/cp437.rs`](../core/src/cp437.rs) |
 | 検証ハーネス | [`cosim/tests/alu.rs`](../cosim/tests/alu.rs) / [`tools/webtest/`](../tools/webtest/) |
 | 実OSが起動するかのテスト | [`core/tests/elks.rs`](../core/tests/elks.rs) / [`freedos.rs`](../core/tests/freedos.rs) |
