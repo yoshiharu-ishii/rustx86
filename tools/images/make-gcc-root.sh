@@ -9,6 +9,8 @@
 # ディスク (squashfs) にするのも、この木が同じ出発点になる。
 set -e
 cd "$(dirname "$0")/../.."
+# イメージ焼きは道具箱 (Linuxコンテナ) の中で (make-mini-initramfs.shと同じ判断)
+[ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
 [ -f images/initramfs-mini ] || { echo "images/initramfs-mini が無い (tools/images/make-mini-initramfs.sh)"; exit 1; }
 root=$1
 [ -n "$root" ] || { echo "使い方: make-gcc-root.sh <出力dir>"; exit 1; }
@@ -17,15 +19,28 @@ case "$root" in /*) ;; *) root="$PWD/$root" ;; esac
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
-# 1. Alpine v3.24 x86 から依存の閉包ごと取ってくる (ダウンロード71MB)
-python3 tools/images/fetch-gcc-pkgs.py "$work/pkg"
+# 1. Alpine v3.24 x86 の gcc 一式を**apk本人に**引かせる。依存の閉包も署名も
+#    apkの仕事で、こちらはパッケージ名を3つ言うだけ (以前はAPKINDEXを自前で
+#    読むPythonが100行あった — 道具箱に本物が居るなら借りる)。
+#    --arch x86: コンテナ (arm64/x86_64) と違う石のrootfsを組むための指定。
+#    --no-scripts: post-installはx86バイナリの実行なので、ここでは走らせない
+# --keys-dir: apkは鍵輪を**組み立て先root側**から読む (--rootの罠)。
+# 空のrootに鍵は無いので、道具箱の鍵輪 (x86の鍵は焼き込み済み) を指す
+apk --arch x86 --root "$work/pkg" --initdb -U --no-scripts \
+  --keys-dir /etc/apk/keys \
+  -X https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
+  -X https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
+  add gcc musl-dev binutils
+# apkの帳簿とキャッシュはゲストに運ばない (apkの無い世界なので意味を持たない)
+rm -rf "$work/pkg/lib/apk" "$work/pkg/var" "$work/pkg/etc/apk" "$work/pkg/dev"
 
 # 2. ゲストに運ぶものだけ選ぶ。**削るのは「開発者向けの荷物」だけ** で、
 #    コンパイルの通り道 (cc1・cpp・as・ld・collect2・crt・ヘッダ・libc.a) は
 #    全部残す。ここを削りすぎて `cannot execute 'cc1'` や
 #    `undefined reference to __stack_chk_fail_local` を順に踏んだ
-python3 tools/images/mkcpio.py --extract images/initramfs-mini "$root"
-(cd "$work/pkg" && find . -depth 1 -exec cp -R {} "$root/" \;)
+mkdir -p "$root"
+(cd "$root" && gunzip -c "$OLDPWD/images/initramfs-mini" | cpio -idm --quiet 2>/dev/null)
+(cd "$work/pkg" && cp -a . "$root/")
 cd "$root"
 # GCCプラグイン開発用のヘッダ (479ファイル・使わない)
 rm -rf usr/lib/gcc/*/*/plugin usr/libexec/gcc/*/*/plugin usr/lib/bfd-plugins

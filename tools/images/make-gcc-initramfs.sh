@@ -13,13 +13,15 @@
 # 使い方: tools/images/make-gcc-initramfs.sh
 set -e
 cd "$(dirname "$0")/../.."
+# イメージ焼きは道具箱 (Linuxコンテナ) の中で (make-mini-initramfs.shと同じ判断)
+[ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 sh tools/images/make-gcc-root.sh "$work/root"
 
-# 1本のcpioに詰め直す。実行ビットは mkcpio.py が元ファイルから拾う。
-# /dev/console のノードはミニ側と同じく自前で足す (無いとinitが盲目で走る)
-python3 tools/images/mkcpio.py "$work/gcc.cpio" "$work/root" --console
-gzip -c "$work/gcc.cpio" > images/initramfs-gcc
+# 1本のcpioに詰め直す。/dev/console のノードはミニ側と同じ理由で足す
+mkdir -p "$work/root/dev"
+mknod -m 600 "$work/root/dev/console" c 5 1 2>/dev/null || true
+(cd "$work/root" && find . | sort | cpio -o -H newc --quiet | gzip) > images/initramfs-gcc
 cp images/initramfs-gcc web/initramfs-gcc
 echo "images/initramfs-gcc: $(du -h images/initramfs-gcc | cut -f1) (web/ へも複製)"
 python3 - <<'SIZES'
