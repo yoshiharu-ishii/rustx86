@@ -40,6 +40,12 @@ const mod = await import(pathToFileURL(join(root, 'web/pkg/rustx86_wasm.js')).hr
 await mod.default({
   module_or_path: readFileSync(join(root, 'web/pkg/rustx86_wasm_bg.wasm')),
 });
+// **パニックの理由を名前で受け取る。** これが無いとJS側には
+// `RuntimeError: unreachable` としか見えない (wasm/src/lib.rs の
+// install_panic_hook の説明どおり)。CIで間欠的に踏んだとき、
+// 名前が出るかどうかが「追える/追えない」の分かれ目になる
+globalThis.__rustx86_panic ??= (msg) => console.error('[panic]', msg);
+mod.install_panic_hook();
 const kernel = new Uint8Array(readFileSync(join(root, 'images/vmlinuz-lts')));
 const initrd = new Uint8Array(readFileSync(join(root, 'images/initramfs-mini')));
 const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
