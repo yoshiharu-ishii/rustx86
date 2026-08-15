@@ -1001,10 +1001,21 @@ impl Machine {
             // (running=false) ので、鳴らした割り込みがまだPICに居るうちに
             // ここで抜けると、配られないまま機械が永眠する (Linuxのhresティックで
             // 実際に眠った。周期モードのOSでは running が真のままで起きない)
+            // **IFが下りたままHLTしたら、誰も起こせない** (デッドハルト)。
+            // HLTから抜ける道は割り込みだけで、それにはIFが要る。この機械に
+            // NMIは無いので、IFが下りていれば挙手もタイマも配送されない —
+            // つまり上の3つを見ても意味が無く、待つだけ無駄になる。
+            //
+            // これを見ていなかったため、asm/bench.asm の終端 (PITを止めてHLT)
+            // で抜けられず、上限20G命令まで空回りしていた。固定369M命令の
+            // ワークロードを測っているつもりが、終端の `hlt; jmp` を19.6G回
+            // 回した数字を見ていたことになる。**決定的な命令数という前提は、
+            // 終端で止まれて初めて成り立つ**
             if self.halted
-                && self.pending_irq.is_none()
-                && !self.devices.pit.counters[0].running
-                && !self.devices.pic[0].has_pending()
+                && (!self.cpu.flag(cpu::IF)
+                    || (self.pending_irq.is_none()
+                        && !self.devices.pit.counters[0].running
+                        && !self.devices.pic[0].has_pending()))
             {
                 break;
             }
