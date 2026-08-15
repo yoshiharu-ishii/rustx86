@@ -476,7 +476,12 @@ impl Machine {
         if self.devices.uart.irq_pending {
             self.devices.pic[0].raise(IRQ_COM1);
         }
-        if let Some(net) = &self.devices.net {
+        if let Some(net) = &mut self.devices.net {
+            // 線で待っているフレームを、リングの空きぶんだけ入れる。
+            // **ここで詰めるのが要点** — 外から束で届いたフレームを注入の場で
+            // 全部入れようとすると溢れた分が消えるが、ドライバがBNRYを進めた
+            // 直後のこの刻みで詰め直せば、束のまま届いても取りこぼさない
+            net.drain_rx();
             if net.irq_pending() {
                 self.devices.pic[0].raise(IRQ_NET);
             }
