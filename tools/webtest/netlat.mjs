@@ -80,7 +80,7 @@ async function linux(slice) {
 
   const step = async () => {
     const s0 = performance.now();
-    emu.run_slice(slice);
+    const ran = emu.run_slice(slice);
     pump();
     const out = emu.serial_out();
     if (out.length) serial += Buffer.from(out).toString('latin1');
@@ -91,7 +91,7 @@ async function linux(slice) {
       realSliceMs += dt;
       slices++;
     }
-    virtualMs += slice / INSTR_PER_GUEST_MS;
+    virtualMs += ran / INSTR_PER_GUEST_MS;
     const realMs = performance.now() - t0;
     if (virtualMs < realMs - 100) virtualMs = realMs - 100;
     for (;;) {
