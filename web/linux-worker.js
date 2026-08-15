@@ -203,6 +203,7 @@ function wakeNow() {
 function loop() {
   if (!running || !emu) return;
   const t0 = performance.now();
+  let ran = 0;
 
   // 届いたフレームをスライス境界で注入する (受信リングが詰まっていたら
   // 落ちるが、それは実機でも同じ)
@@ -212,13 +213,15 @@ function loop() {
   }
 
   try {
-    emu.run_slice(sliceSize);
+    // **返るのは「実際に進んだ量」** — 送信フレームが出ると早く戻るので、
+    // 頼んだ量で勘定するとゲストの時計が速く回る (pitfalls 7 の型)
+    ran = emu.run_slice(sliceSize);
   } catch (err) {
     running = false;
     postMessage({ type: 'trap', reason: 'wasm panic: ' + err });
     return;
   }
-  instrs += sliceSize;
+  instrs += ran;
 
   // ゲストが送ったフレームを外へ (1メッセージにまとめ、中身は移送する)
   {
@@ -282,7 +285,7 @@ function loop() {
   // 中に入っている。両方足すと仮想時間が実際の倍のペースで溜まり、その借りを
   // 実時間で返すので **ゲストの1秒が実時間2秒になる** (sleep 5 が10秒かかった)。
   // skippedMs はアイドル判定 (上の idle) にだけ使う
-  virtualMs += sliceSize / INSTR_PER_GUEST_MS;
+  virtualMs += ran / INSTR_PER_GUEST_MS;
   const realMs = now - clockT0;
   if (virtualMs < realMs - 100) virtualMs = realMs - 100;
   const aheadMs = virtualMs - realMs;

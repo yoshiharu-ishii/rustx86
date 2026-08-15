@@ -225,7 +225,7 @@ impl Emulator {
     /// 呼ぶ側 (machine.js) の「頼んだ分だけ進んだ」という勘定が壊れて、
     /// アイドル中のゲストの時計だけが実時間の百倍で流れる —
     /// ELKSのtetrisの駒が一瞬で積み上がった原因はこれだった
-    pub fn run_slice(&mut self, instructions: f64) {
+    pub fn run_slice(&mut self, instructions: f64) -> f64 {
         let budget = instructions as u64;
         let start = self.m.cpu.tsc;
         loop {
@@ -240,6 +240,10 @@ impl Emulator {
                 break;
             }
         }
+        // **実際に進んだ量を返す。** 早く戻ることがある以上、呼ぶ側が
+        // 「頼んだ分だけ進んだ」と勘定すると、ゲストの時計が速く回る
+        // (pitfalls 7「予算に含まれるものを外から足すな」と同じ型)
+        self.m.cpu.tsc.wrapping_sub(start) as f64
     }
 
     /// TSC (実行した仮想命令数の累計)。決定性の精密な物差し。
