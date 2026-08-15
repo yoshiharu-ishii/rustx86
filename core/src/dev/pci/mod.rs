@@ -45,12 +45,10 @@
 //! 同居させていた頃は「PCIを直す」と「装置を足す」が同じ場所の編集になっていた。
 
 mod host_bridge;
-mod rtl8029;
 
 // 呼ぶ側 (Machine) にとって装置がどのファイルに住んでいるかは関係ない。
-// `dev::pci::rtl8029(irq)` の見え方は分割の前後で変えない
+// 装置の名乗り (RTL8029等) は基板側 (dev::card) に居る
 pub use host_bridge::host_bridge;
-pub use rtl8029::{rtl8029, NET_IO_BASE, NET_SLOT};
 
 /// 設定空間のオフセット (よく使うものだけ)
 pub mod reg {
@@ -139,6 +137,12 @@ impl PciFunction {
     }
 
     /// COMMANDレジスタの今の値
+    /// 設定空間の生バイト (読み出しのみ)。**基板が自分の名乗りを確かめる**ための口。
+    /// 書けるのは組み立て時の with_* だけで、走行中に変わるのはバス側の仕事である
+    pub fn config(&self) -> &[u8; 256] {
+        &self.cfg
+    }
+
     pub fn command(&self) -> u16 {
         u16::from_le_bytes([self.cfg[reg::COMMAND], self.cfg[reg::COMMAND + 1]])
     }
