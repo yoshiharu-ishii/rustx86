@@ -39,7 +39,7 @@ cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
 #   virtio + virtio_ring     リングの共通機構
 #   virtio_pci (+legacy/modern_dev)  PCIの上に建つ口
 #   virtio_blk               ブロック装置本体 → /dev/vda
-for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk squashfs overlay; do
   ko=$(find -L "$work/lib" "$work/usr/lib" -name "$mod.ko" 2>/dev/null | head -1)
   [ -n "$ko" ] && cp "$ko" "$work/root/lib/modules/"
 done
@@ -104,9 +104,39 @@ export TERM=xterm
 # ディスクのドライバ。**カードが無くてもエラーにならない**のはNICと同じ。
 # 依存の順は .ko の depends= の実測から: ring が土台で virtio がその上
 # (直感と逆。逆順で挿すと virtio_blk が Unknown symbol で落ちる — 実際に落ちた)
-for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk squashfs overlay; do
   /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
 done
+#
+# --- ディスクがあれば、そちらを根にして移り住む ---
+#
+# /dev/vda がsquashfsなら、それが本当のrootfs (Live CDと同じ立て付け)。
+# squashfsは読み専用なので、**tmpfsを上に重ねて (overlayfs) 書ける根にする**。
+# initramfsは「ディスクを見つけて移る係」に戻る — 実機Linuxの標準の姿。
+#
+# .rustx86-disk はディスク側の木に焼いてある印。**この印が無いときだけ探す**
+# — ディスクの中のinit (同じこのスクリプト) がまたディスクを探すと輪になる。
+# 移る前に /proc /sys /dev を返す (置いたままだと古い根に縛られて消せない)
+if [ ! -e /.rustx86-disk ] && [ -b /dev/vda ]; then
+  /bin/busybox mkdir -p /disk /overlay
+  if /bin/busybox mount -t squashfs -o ro /dev/vda /disk 2>/dev/null; then
+    /bin/busybox mount -t tmpfs tmpfs /overlay
+    /bin/busybox mkdir -p /overlay/up /overlay/work /overlay/root
+    if /bin/busybox mount -t overlay overlay \
+        -o lowerdir=/disk,upperdir=/overlay/up,workdir=/overlay/work \
+        /overlay/root 2>/dev/null; then
+      echo "  rootfs: /dev/vda (squashfs + tmpfsのoverlay)"
+      /bin/busybox umount /proc /sys 2>/dev/null
+      /bin/busybox umount /dev 2>/dev/null
+      exec /bin/busybox switch_root /overlay/root /init
+    fi
+    # overlayが挿せない世界でも、読み専用の根のまま進める (書けないだけ)
+    echo "  rootfs: /dev/vda (squashfs, 読み専用)"
+    /bin/busybox umount /proc /sys 2>/dev/null
+    /bin/busybox umount /dev 2>/dev/null
+    exec /bin/busybox switch_root /disk /init
+  fi
+fi
 # カードが挿さっていればDHCPを裏で回す (ELKSの rc.sys が ktcp を上げるのと
 # 同じ作法)。**挿さっていなければ何もしない** — NIC無し起動は素のまま。
 # -b: リースが取れるまで裏で粘る (線が後から生きても拾える)
