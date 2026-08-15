@@ -1,17 +1,22 @@
-//! NE2000 (DP8390) — ISAのEthernetカード。
+//! DP8390 (NIC) — Ethernetコントローラの**素子**。
 //!
-//! Novellが1987年に出した安物カードが、あまりに安くて全メーカーがレジスタ配置
-//! ごと真似た結果、**「NE2000互換」がISA時代のネットワークの共通語**になった。
-//! ELKSのne2kドライバも、DOSのパケットドライバ (NE2000.COM) も、そして
-//! PCI時代のRTL8029すらこの配置を引きずっている — ここで作る8390コアは
-//! PCI段でそのまま皮を替えて使い回す ([ADR-0017](../../../../docs/adr/0017-network-isa-first.md))。
+//! Nationalの8390は、Novellが1987年に出した安物カード NE2000 に載って
+//! ISA時代のネットワークの共通語になった。あまりに安くて全メーカーがレジスタ配置
+//! ごと真似た結果、ELKSのne2kドライバも、DOSのパケットドライバ (NE2000.COM) も、
+//! そしてPCI時代のRTL8029すらこの配置を引きずっている。
+//!
+//! **このファイルは素子だけを持つ。** どの番地の窓から覗かれるか、MACの並びを
+//! PROMにどう置くか、設定空間でどう名乗るかは**基板の都合**なので
+//! [`card`](crate::dev::card) 側にある — 同じ素子に別の基板を着せたのが
+//! NE2000 (ISA) と RTL8029 (PCI) で、実物のRTL8029ASも「NE2000互換であること」を
+//! 売りにした廉価チップだった。Linuxのドライバも `lib8390.c` を共有している。
 //!
 //! ## 構造は「共有メモリ + 窓口」
 //!
 //! カードは16KBのSRAM (アドレス 0x4000-0x7FFF) を持ち、CPUとはリモートDMA
 //! という名の窓口 (データポート) 越しにやり取りする。DMAと言っても
 //! バスマスタではなく、**CPUが IN/OUT を叩くたびに1バイトずつ進む**だけの
-//! アドレスカウンタである。
+//! アドレスカウンタである。その下 (0x4000未満) に基板のPROMが重なって見える。
 //!
 //! - 送信: ドライバがフレームをリモートDMAでSRAMへ書き、CRのTXPを立てる
 //! - 受信: カードがSRAM内のリング (PSTART-PSTOP) にフレームを積み、
@@ -21,8 +26,8 @@
 //! ## 境界の流儀
 //!
 //! フレームの出入りはUARTのバイト列と同じ形にする: 外から来たフレームは
-//! [`Ne2000::inject_frame`] でリングに積まれ、ゲストが送ったフレームは
-//! [`Ne2000::tx_out`] に溜まって外側 (WebSocket等の非決定な世界) が回収する。
+//! [`Dp8390::inject_frame`] で線に並び、ゲストが送ったフレームは
+//! [`Dp8390::tx_out`] に溜まって外側 (WebSocket等の非決定な世界) が回収する。
 //! coreは時計もソケットも知らないので、**NICを繋いでも決定性は壊れない**
 //! (同じフレーム列を同じタイミングで入れれば同じ実行になる)。
 
@@ -52,7 +57,7 @@ const ISR_RDC: u8 = 0x40; // リモートDMA完了
 const ISR_RST: u8 = 0x80; // リセット済み
 
 #[derive(Debug)]
-pub struct Ne2000 {
+pub struct Dp8390 {
     /// このカードのMACアドレス
     pub mac: [u8; 6],
     cr: u8,
@@ -100,18 +105,11 @@ pub struct Ne2000 {
     pub trace: Vec<u32>,
 }
 
-impl Ne2000 {
+impl Dp8390 {
+    /// 素子を1つ。**PROMは空のまま** — MACをどう並べ、どこに 'W' の印を置くかは
+    /// 基板ごとに違う ([`crate::dev::card`] が [`write_prom`](Self::write_prom) で書く)
     pub fn new(mac: [u8; 6]) -> Self {
-        let mut mem = vec![0u8; RAM_END];
-        // PROM: MACの各バイトを2度ずつ (16bitカードは偶数バイトしか読まないため
-        // 倍幅で置くのが慣例)。末尾の 0x57 'W' はドライバのNE2000判定の印
-        for (i, b) in mac.iter().enumerate() {
-            mem[i * 2] = *b;
-            mem[i * 2 + 1] = *b;
-        }
-        for i in [14, 15, 28, 29, 30, 31] {
-            mem[i] = 0x57;
-        }
+        let mem = vec![0u8; RAM_END];
         Self {
             mac,
             cr: CR_STP, // 電源投入時は停止
@@ -138,17 +136,18 @@ impl Ne2000 {
         }
     }
 
-    /// PROMを**平らに**する (PCIの皮 = RTL8029 用)。
+    /// PROM (リモートDMAのアドレス0から見える領域) を基板が書く。
     ///
-    /// 各バイトを2度ずつ置くのはISAの8bitデータ経路の癖で、PCIのドライバ
-    /// (ne2k-pci) は連続バイトをそのままMACとして読む。倍幅のままだと
-    /// 52:54:00:… が 52:52:54:… と化ける (実際に化けた)。
-    /// 0x57 の印の位置も 14/15 に移る — QEMUのne2000も同じ使い分けをする
-    pub fn flatten_prom(&mut self) {
-        self.mem[..32].fill(0);
-        self.mem[..6].copy_from_slice(&self.mac);
-        self.mem[14] = 0x57;
-        self.mem[15] = 0x57;
+    /// 素子から見ればここはただの読み出し専用の窓で、**中身の並べ方は基板の都合**
+    /// である。ISAの8bit経路では各バイトが2度ずつ並び、PCI版は連続バイトで読む —
+    /// 倍幅のまま渡すとMACが `52:52:54:…` に化ける (実際に化けた)
+    pub fn write_prom(&mut self, prom: &[u8; 32]) {
+        self.mem[..32].copy_from_slice(prom);
+    }
+
+    /// 基板が焼いたPROM (基板側のテストが自分の並べ方を確かめるための読み口)
+    pub fn prom(&self) -> &[u8] {
+        &self.mem[..32]
     }
 
     /// 詰まりを覗く窓 — 線の待ち枚数・ISR/IMR・CURR/BNRY・受信機の状態。
@@ -420,7 +419,7 @@ impl Ne2000 {
     }
 }
 
-impl Ne2000 {
+impl Dp8390 {
     pub fn save(&self, w: &mut crate::snapshot::Writer) {
         w.bytes(&self.mac);
         w.bool(self.running);
@@ -456,7 +455,7 @@ impl Ne2000 {
         let mac: [u8; 6] = r
             .bytes()?
             .try_into()
-            .map_err(|_| "NE2000のMACが6バイトでない".to_string())?;
+            .map_err(|_| "DP8390のMACが6バイトでない".to_string())?;
         let mut n = Self::new(mac);
         n.running = r.bool()?;
         for v in [
@@ -480,14 +479,14 @@ impl Ne2000 {
         n.par = r
             .bytes()?
             .try_into()
-            .map_err(|_| "NE2000のPARが6バイトでない".to_string())?;
+            .map_err(|_| "DP8390のPARが6バイトでない".to_string())?;
         n.mar = r
             .bytes()?
             .try_into()
-            .map_err(|_| "NE2000のMARが8バイトでない".to_string())?;
+            .map_err(|_| "DP8390のMARが8バイトでない".to_string())?;
         n.mem = r.rle()?;
         if n.mem.len() != RAM_END {
-            return Err(format!("NE2000のSRAMの大きさが合わない ({})", n.mem.len()));
+            return Err(format!("DP8390のSRAMの大きさが合わない ({})", n.mem.len()));
         }
         let frames = r.u32()?;
         for _ in 0..frames {

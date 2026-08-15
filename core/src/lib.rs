@@ -669,16 +669,20 @@ impl Machine {
     /// NICを挿す。呼ばなければ機械にNICは無く、起動はビット同一のまま
     /// (ADR-0017の不変条件)。macはゲストのDHCP/ARPでそのまま名乗られる。
     ///
-    /// **どのバスに挿さるかは機械の世代が決める。** 16bit機はISAの0x300、
-    /// PCIを積む機械 (32bit) はスロット3のRTL8029になる。装置の実体は
-    /// どちらも同じDP8390で、皮 (番地の見つかり方) だけが違う
+    /// **どのバスに挿さるかは機械の世代が決める。** 16bit機はISAのNE2000、
+    /// PCIを積む機械 (32bit) はスロット3のRTL8029になる。素子はどちらも同じ
+    /// DP8390で、違うのは基板の都合 (PROMの並べ方) と番地の見つかり方だけである
     pub fn net_attach(&mut self, mac: [u8; 6]) {
-        let mut nic = dev::Ne2000::new(mac);
-        if let Some(pci) = &mut self.devices.pci {
-            nic.flatten_prom(); // PCIのドライバはPROMを連続バイトで読む
-            pci.plug(dev::pci::NET_SLOT, dev::pci::rtl8029(IRQ_NET));
-        }
-        self.devices.net = Some(nic);
+        self.devices.net = Some(match &mut self.devices.pci {
+            Some(pci) => {
+                pci.plug(
+                    dev::card::rtl8029::NET_SLOT,
+                    dev::card::rtl8029::pci_function(IRQ_NET),
+                );
+                dev::card::rtl8029::build(mac)
+            }
+            None => dev::card::ne2000::build(mac),
+        });
     }
 
     /// RTCの時計をUNIX時刻 (UTC秒) に合わせる。net_attachと同じ入力口の

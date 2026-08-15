@@ -375,7 +375,7 @@ mod tests {
         let mut c = Cmos::new();
         c.write_index(0x00);
         assert_eq!(c.read_data(), to_bcd(0));
-        c.tick(crate::dev::isa::pit::CLOCK_HZ - 1);
+        c.tick(crate::dev::chip::pit::CLOCK_HZ - 1);
         assert_eq!(c.read_data(), to_bcd(0), "1クロック足りない");
         c.tick(1);
         assert_eq!(c.read_data(), to_bcd(1), "ちょうど1秒");
