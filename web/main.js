@@ -10,7 +10,7 @@
 
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
-import { MACHINES, byGroup } from './machines.js';
+import { MACHINES, ROOTFS, byGroup } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
@@ -140,6 +140,8 @@ function syncControls() {
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
   $('layout').hidden = !!linux;
   $('layout').previousElementSibling.hidden = !!linux;
+  // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
+  for (const id of ['rootLbl', 'rootSel', 'ramLbl', 'ramSel']) $(id).hidden = !linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
@@ -270,6 +272,52 @@ setInterval(() => {
 // 既定はJIS。**スキャンコードはキーの位置なので配列とは無関係**だが、
 // ゲスト (ELKS) はUS配列の対応表しか持たないため、JIS配列の実機では
 // 見たままの文字が入らない。JISのときは位置ではなく文字を送って辻褄を合わせる。
+
+// --- ルートFSとRAM (Linuxの機械) ---
+//
+// **つまみを画面に出す。** URL (`?initrd=` / `?ram=`) だけだと、後で自分の
+// 設定の理由が分からなくなる — 「なぜこの機械でgccが使えるのか」「なぜRAMが
+// 256MBなのか」が、選べるものの一覧として見えているのが一番効く。
+// URLは初期値、選び直したら憶える。**効くのは次の電源ONから** (機械の構成なので)
+const ROOT_KEY = 'rustx86.rootfs';
+const RAM_KEY = 'rustx86.ram';
+const rootSel = $('rootSel');
+const ramSel = $('ramSel');
+for (const r of ROOTFS) {
+  const o = document.createElement('option');
+  o.value = r.name;
+  o.textContent = r.label;
+  o.title = r.note;
+  rootSel.append(o);
+}
+const q0 = new URLSearchParams(location.search);
+rootSel.value =
+  q0.get('initrd') || localStorage.getItem(ROOT_KEY) || ROOTFS[0].name;
+if (!rootSel.value) rootSel.value = ROOTFS[0].name; // URLに知らない名前が来たとき
+ramSel.value = q0.get('ram') || localStorage.getItem(RAM_KEY) || 'auto';
+if (!ramSel.value) ramSel.value = 'auto';
+for (const [sel, key] of [
+  [rootSel, ROOT_KEY],
+  [ramSel, RAM_KEY],
+]) {
+  sel.addEventListener('change', () => {
+    localStorage.setItem(key, sel.value);
+    syncRootfsHint();
+    focusScreen();
+  });
+}
+
+/** 選択の理由を画面に出す。selectのtitleと、状態欄への一言 */
+function syncRootfsHint() {
+  const r = ROOTFS.find(x => x.name === rootSel.value);
+  rootSel.title = r ? `${r.sub} — ${r.note}` : '';
+  ramSel.title =
+    ramSel.value === 'auto'
+      ? 'initramfsの展開後の大きさから決める (足りないと中身が黙って欠ける)'
+      : `${ramSel.value}MB を明示する`;
+  // 走っている機械の構成は変えられない — 次の電源ONから効くことを言う
+  if (linux?.booted) setStatus('ルートFS/RAMの変更は次の電源ONから効きます');
+}
 
 const LAYOUT_KEY = 'rustx86.layout';
 const layoutSel = $('layout');
@@ -1228,6 +1276,8 @@ async function select(m, { autoBoot = true } = {}) {
       // NICを挿すのは電源の瞬間 (VGA機の attachNet と同じ判断)。
       // 線が来ていればRTL8029が挿さって出る — MACも16bit機と同じ
       mac: () => (link ? [0x52, 0x54, 0x00, 0x12, 0x34, 0x56] : undefined),
+      // どのルートFSを何MBで載せるかも電源の瞬間に決まる (上のNICと同じ)
+      rootfs: () => ({ name: rootSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
       // ゲストが送ったフレームは線へ (無ければ捨てる — 抜けたケーブル)
       onNetTx: f => link?.send(f),
     });

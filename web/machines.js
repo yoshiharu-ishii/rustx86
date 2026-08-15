@@ -129,6 +129,35 @@ export function byGroup(machines = MACHINES) {
   return out;
 }
 
+/**
+ * Linux機に載せられるルートFS (initramfs)。実物は `web/` の隣に置く。
+ *
+ * **なぜ画面に出すのか** — つまみをURL (`?initrd=`) にしか置かないと、
+ * 「なぜこの機械はgccが使えるのか」「なぜRAMが256MBなのか」が画面から消え、
+ * 後で自分の設定の理由が分からなくなる。**選べるものが並んでいれば、
+ * 選ばなかった方も含めて理由が見える。**
+ *
+ * `ram` は空なら自動 (initrdの展開後の大きさから決める。linux-machine.js)。
+ */
+export const ROOTFS = [
+  {
+    name: 'initramfs-mini',
+    label: 'ミニ',
+    sub: 'busybox + snake/vi',
+    note: '3.6MB。まっすぐシェルに出る既定のルートFS。128MBで動く',
+  },
+  {
+    name: 'initramfs-gcc',
+    label: 'gcc入り',
+    sub: 'gcc + binutils + musl-dev',
+    note:
+      '35MB (展開88MB)。中で `gcc hello.c && ./a.out` が通る。' +
+      '展開した中身がそのままtmpfsに載るので、RAMは自動で256MBになる ' +
+      '(足りないと起動はするのにcollect2だけ落ちる)。' +
+      'tools/images/make-gcc-initramfs.sh で作る',
+  },
+];
+
 /** @param {Status} s */
 export function statusLabel(s) {
   return { ok: '動く', partial: '途中まで', todo: 'これから' }[s] ?? s;
