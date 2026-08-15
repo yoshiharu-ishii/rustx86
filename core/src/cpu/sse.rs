@@ -705,6 +705,20 @@ pub(crate) fn step_sse(m: &mut Machine, d: &Decoder, op2: u8) -> bool {
             let imm = (fetch8(m) & 7) as usize;
             m.cpu.regs[reg] = to16(m.cpu.xmm[r])[imm] as u32;
         }
+        // shufpd (66 C6 + imm8) — **64bitレーンを2つ選ぶ**。
+        // 低位レーンは自分の2択、高位レーンは相手の2択で、shufpsの32bit版とは
+        // 選び方の粒度だけが違う。
+        //
+        // **gccのcc1がここで#UDになっていた** (2026-08-15)。shufps (プレフィクス
+        // 無し) は実装済みで、66付きの兄弟だけが抜けていた — 語彙の歯抜けは
+        // 「使うゲストが来て初めて見える」ことの実例である
+        0xC6 if p == Pfx::P66 => {
+            let (reg, rm) = modrm(m, d);
+            let b = rm128(m, &rm);
+            let imm = fetch8(m) as usize;
+            let (x, y) = (to64(m.cpu.xmm[reg]), to64(b));
+            m.cpu.xmm[reg] = from64([x[imm & 1], y[(imm >> 1) & 1]]);
+        }
         // shufps (C6 + imm8)
         0xC6 if p == Pfx::None => {
             let (reg, rm) = modrm(m, d);
