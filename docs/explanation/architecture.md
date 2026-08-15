@@ -3,6 +3,66 @@
 現代のPCは、40年分の後方互換が地層になってできている。このドキュメントは
 rustx86の構造を説明しながら、**なぜPCがこの形をしているのか**を辿る。
 
+## 0. 今の接続構成 (2026-08 全体図)
+
+以降の章は16bitの最小構成から歴史の順に積み上げていくが、先に**現在の全体像**を
+1枚に描いておく。32bit PC (Linuxが動く方の機械) の配線がこれである:
+
+```mermaid
+flowchart TB
+    subgraph cpu["CPU (i586相当: 32bit + ページング + FPU/MMX/SSE)"]
+        core["デコード → 実行<br>(dcache: デコード済みの写し)"]
+    end
+
+    subgraph mem["メモリ空間 (bus/memmap)"]
+        ram["RAM 128〜512MB"]
+        vram["テキストVRAM 0xB8000"]
+    end
+
+    subgraph io["I/Oポート空間 (bus/isa: 定数のmatch)"]
+        pic["8259 PIC ×2"]
+        pit["8254 PIT"]
+        uart["16550 UART 0x3F8<br>= シリアルコンソール"]
+        kbd["8042 KBD"]
+        cmos["CMOS RTC"]
+        cf8["PCI設定窓 0xCF8/0xCFC"]
+    end
+
+    subgraph pci["PCIバス0 (bus/pci: 設定空間で数える)"]
+        hb["slot0: 440FX<br>ホストブリッジ"]
+        nic["slot3: RTL8029 NIC<br>I/O 0xC000, IRQ3"]
+        blk["slot4: virtio-blk<br>I/O 0xC040, IRQ5"]
+    end
+
+    subgraph chips["素子 (dev/chip — バスを知らない)"]
+        dp["DP8390"]
+        vio["VirtioPci (リング)"]
+    end
+
+    core --> mem
+    core -->|"IN/OUT"| io
+    cf8 --> pci
+    nic -.->|"基板 dev/card/rtl8029"| dp
+    blk -.->|"基板 dev/card/virtio_blk"| vio
+
+    uart <--> term["端末 (ネイティブ: stdout / ブラウザ: ansi.js)"]
+    dp <--> ws["WebSocket ⇄ wsslirpd<br>(1メッセージ=1フレーム)"]
+    vio <--> img["ディスクイメージ<br>disk-gcc.img (squashfs)"]
+    vram --> screen["画面"]
+```
+
+読み方の要点:
+
+- **バスは3つの「見つかり方」**: メモリ空間 (memmap)・固定番地のI/O (isa)・
+  数えて見つけるPCI ([ADR-0018](../adr/0018-devices-chip-card-bus.md))。
+  16bit機はPCIを積まない (この図から右下の島が消える)
+- **素子と基板は別**: DP8390はISAのNE2000としてもPCIのRTL8029としても挿せる。
+  皮 (窓の番地・PROMの並び・設定空間の名乗り) だけが基板の持ち物
+- **外の世界との継ぎ目は3本だけ**: シリアル (文字)・WebSocket (フレーム)・
+  ディスクイメージ (バイト列)。どれも決定的に再生できる形 —
+  NICもディスクも挿さなければ起動はビット同一 (ADR-0017)
+- ネットワークの先は [network.md](network.md)、ディスクの中身は [disk.md](disk.md)
+
 ## 1. 今ここ: 16bitリアルモードの最小構成
 
 現在動いているのは、CPUとメモリ、それにBIOSの一部を肩代わりするフックだけである。
