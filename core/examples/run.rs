@@ -26,6 +26,10 @@ fn main() {
             .into_owned()
     });
     let initrd = std::fs::read(&initrd_path).ok();
+    // DISK=path でvirtio-blkのディスクを挿す (ゲストからは /dev/vda)
+    let disk = std::env::var("DISK")
+        .ok()
+        .map(|p| std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}")));
     let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| "console=ttyS0".into());
 
     // RAMは指定が無ければ**initrdに合わせて自動で決める**。initramfsは展開後の
@@ -47,17 +51,22 @@ fn main() {
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(mb));
     // bzImage / vmlinux は中身で自動判別。vmlinux (tools/images/extract-vmlinux.sh) なら
     // 自己解凍ステブが無いぶん起動が4割速い
+    if let Some(img) = disk {
+        m.blk_attach(img);
+    }
     if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, initrd.as_deref()) {
         // RAM不足はここで出る。パニックの体裁だと本文が読みにくい
         eprintln!("起動できない: {e}");
         std::process::exit(1);
     }
     eprintln!(
-        "rustx86: {path} ({}MB, initrd {}) — Ctrl-] で終了",
+        "rustx86: {path} ({}MB, initrd {}{}) — Ctrl-] で終了",
         mb,
         initrd
             .as_ref()
             .map_or("なし".into(), |d| format!("{}K", d.len() / 1024)),
+        m.blk_image()
+            .map_or(String::new(), |d| format!(", disk {}K", d.len() / 1024)),
     );
 
     // 標準入力を生モードに。終了時に戻す

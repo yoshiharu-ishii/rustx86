@@ -477,6 +477,22 @@ impl Machine {
                 self.devices.pic[0].raise(bus::isa::IRQ_NET);
             }
         }
+        // virtio-blk: 呼び鈴が鳴っていたら袋をさばく。**要求はこの刻みで完結する**
+        // (実機のディスクは遅いが、うちの中身はメモリなので待たせる理由が無い。
+        // シーク時間の再現は嘘のリアリズムで、速い方が正しい)
+        let mut blk_irq = false;
+        if let Some(blk) = &mut self.devices.blk {
+            if blk.vio.take_notify() {
+                // DMAで書いた場所はdcacheへ申告 — バスマスタは自己書き換え
+                // 検出 (write_phys8) の横を通るので、黙って書くと写しが腐る
+                let dcache = &mut self.dcache;
+                blk.process(&mut self.mem, |a, n| dcache.note_write_range(a, n as usize));
+            }
+            blk_irq = blk.vio.irq_pending();
+        }
+        if blk_irq {
+            self.devices.pic[0].raise(dev::card::virtio_blk::IRQ_BLK);
+        }
         // キーボードは割り込み駆動。**1バイトにつき1回だけ**挙手する
         if self.devices.keyboard.take_irq() {
             self.devices.pic[0].raise(bus::isa::IRQ_KEYBOARD);
@@ -674,6 +690,26 @@ impl Machine {
             }
             None => dev::card::ne2000::build(mac),
         });
+    }
+
+    /// virtio-blkのディスクを挿す。呼ばなければ機械にディスクは無く、
+    /// 起動はビット同一のまま (NICと同じ入力口の流儀)。**PCIの機械にしか
+    /// 挿せない** — virtioはPCIの上に建つので、16bit機では黙って何もしない
+    /// (エラーにしないのは、NIC無し16bit機の起動列を変えないのと同じ判断)
+    pub fn blk_attach(&mut self, image: Vec<u8>) {
+        let Some(pci) = &mut self.devices.pci else {
+            return;
+        };
+        pci.plug(
+            dev::card::virtio_blk::BLK_SLOT,
+            dev::card::virtio_blk::pci_function(dev::card::virtio_blk::IRQ_BLK),
+        );
+        self.devices.blk = Some(dev::VirtioBlk::new(image));
+    }
+
+    /// ディスクの中身を覗く (テスト・検証用)。ゲストが書いた結果を外から確かめる
+    pub fn blk_image(&self) -> Option<&[u8]> {
+        self.devices.blk.as_ref().map(|b| b.image.as_slice())
     }
 
     /// RTCの時計をUNIX時刻 (UTC秒) に合わせる。net_attachと同じ入力口の

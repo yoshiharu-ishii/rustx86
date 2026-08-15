@@ -31,7 +31,7 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 // v10: NE2000に受信機のラッチ (running) が加わった — STA/STPはコマンドで、
 //      crの生値からは走行状態を再現できない
 /// v11: x87に80bit原本サイドバンド (raw) が加わった — MMXがここに住む
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -300,6 +300,13 @@ impl Machine {
             }
             None => w.bool(false),
         }
+        match &self.devices.blk {
+            Some(blk) => {
+                w.bool(true);
+                blk.save(&mut w);
+            }
+            None => w.bool(false),
+        }
 
         // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
         w.rle(&self.mem);
@@ -403,6 +410,11 @@ impl Machine {
         };
         m.devices.pci = if r.bool()? {
             Some(crate::bus::pci::PciHost::load(&mut r)?)
+        } else {
+            None
+        };
+        m.devices.blk = if r.bool()? {
+            Some(crate::dev::VirtioBlk::load(&mut r)?)
         } else {
             None
         };
