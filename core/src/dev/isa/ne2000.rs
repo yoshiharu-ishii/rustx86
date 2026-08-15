@@ -34,6 +34,10 @@ const RAM_START: usize = 0x4000;
 const RAM_END: usize = 0x8000;
 /// 1ページ = 256バイト。リングの通貨単位
 const PAGE: usize = 256;
+/// 線の上で待たせておけるフレーム数。**ここを超えたら本当に落とす** —
+/// 受け取り手が居ない (ドライバが止まっている・遅すぎる) のに溜め続けると、
+/// 遅延だけが伸びて誰も得をしない。実機の線とスイッチのバッファも有限である
+const RX_QUEUE_MAX: usize = 256;
 
 // CR (コマンドレジスタ) のビット
 const CR_STP: u8 = 0x01; // 停止
@@ -80,6 +84,18 @@ pub struct Ne2000 {
     mem: Vec<u8>,
     /// ゲストが送信したフレーム。外側 (トランスポート) が回収する
     pub tx_out: VecDeque<Vec<u8>>,
+    /// **まだリングに入れていない受信フレーム = 線の上に居るぶん。**
+    ///
+    /// 外の世界 (WebSocket) はフレームを**束で**届ける — TCPの1ウィンドウが
+    /// 一度に落ちてくる。ところが受信リングは16KBしかなく、フル長フレームなら
+    /// 9枚で満杯になる。届いた束をその場で全部リングへ押し込もうとすると、
+    /// 入らなかった分がそこで消える (実測で受信フレームの6〜9%が消え、
+    /// TCPは再送と輻輳制御の縮小で応じて実効速度が半分以下になった)。
+    ///
+    /// 実機では束は消えない — 10Mbpsの線を1枚ずつ流れてくるので、
+    /// カードは自分のペースで受け取れる。**その「線」をここで表す**。
+    /// リングに空きができるたび (tick ごと) に前から詰めていく
+    rx_queue: VecDeque<Vec<u8>>,
     /// デバッグ用I/Oトレース (一時計測。1 = 書き込み<<31 | off<<16 | 値)
     pub trace: Vec<u32>,
 }
@@ -117,6 +133,7 @@ impl Ne2000 {
             mar: [0; 8],
             mem,
             tx_out: VecDeque::new(),
+            rx_queue: VecDeque::new(),
             trace: Vec::new(),
         }
     }
@@ -209,7 +226,13 @@ impl Ne2000 {
             _ => match (self.cr >> 6, off) {
                 (0, 0x01) => self.pstart = val,
                 (0, 0x02) => self.pstop = val,
-                (0, 0x03) => self.bnry = val,
+                // BNRYを進める = ドライバが1枚読み終えてページを返した瞬間。
+                // **リングに空きができるのはここ**なので、線で待っている次の
+                // フレームをすぐ入れる (待たせると次の割り込みまで遅れる)
+                (0, 0x03) => {
+                    self.bnry = val;
+                    self.drain_rx();
+                }
                 (0, 0x04) => self.tpsr = val,
                 (0, 0x05) => self.tbcr = (self.tbcr & 0xFF00) | val as u16,
                 (0, 0x06) => self.tbcr = (self.tbcr & 0x00FF) | (val as u16) << 8,
@@ -266,14 +289,16 @@ impl Ne2000 {
         self.isr |= ISR_PTX;
     }
 
-    /// 外から来たフレームを受信リングへ積む。積めたら true。
+    /// 外から来たフレームを受け取る。**受け取れたら true**。
     ///
-    /// 4バイトのヘッダ (受信状態・次ページ・長さ) を付け、PSTART-PSTOP の
-    /// リングにページ単位で書く。**リングが一杯なら落として OVW を立てる** —
-    /// Ethernetはもともと「届かないことがある」層なので、落ちても上位
-    /// (TCPや再送) が拾い直す。それで済むから安いカードが作れた
+    /// 受け取ったフレームはまず線 ([`rx_queue`](Self::rx_queue)) に並び、
+    /// 入るぶんだけリングへ移る。false になるのは「カードが止まっている」
+    /// 「宛先が自分でない」「線も一杯」の3つだけで、**リングが満杯なだけなら
+    /// 落とさない** — 束で届くのは外の世界の都合で、線の上ではまだ流れている
     pub fn inject_frame(&mut self, frame: &[u8]) -> bool {
-        // 受信機が動いていない (STP中・リング未設定) なら黙って落とす
+        // 受信機が動いていない (STP中・リング未設定) なら黙って落とす。
+        // 線に溜めても意味が無い — 電源の入っていないカードの前に届いた
+        // フレームは実機でも消える
         if !self.running || self.pstart >= self.pstop {
             return false;
         }
@@ -285,6 +310,37 @@ impl Ne2000 {
                 return false;
             }
         }
+        // 線も一杯 = 本当の取りこぼし。カードの受信オーバーランとして
+        // ドライバに知らせる (8390のOVW。回復手順はドライバが持っている)
+        if self.rx_queue.len() >= RX_QUEUE_MAX {
+            self.isr |= ISR_OVW;
+            return false;
+        }
+        self.rx_queue.push_back(frame.to_vec());
+        self.drain_rx();
+        true
+    }
+
+    /// 線で待っているフレームを、入るだけリングへ移す。
+    /// **リングに空きができる契機 (tick) ごとに呼ぶ** — ドライバがBNRYを
+    /// 進めた直後に次が入るので、束で届いても取りこぼしが出ない
+    pub fn drain_rx(&mut self) {
+        while let Some(frame) = self.rx_queue.pop_front() {
+            if !self.ring_put(&frame) {
+                self.rx_queue.push_front(frame);
+                break;
+            }
+        }
+    }
+
+    /// 受信リングへ1枚積む。積めなければ false (状態は変えない)。
+    ///
+    /// 4バイトのヘッダ (受信状態・次ページ・長さ) を付け、PSTART-PSTOP の
+    /// リングにページ単位で書く
+    fn ring_put(&mut self, frame: &[u8]) -> bool {
+        if !self.running || self.pstart >= self.pstop {
+            return false;
+        }
         // 実機は60バイト未満を受け取らない (コリジョンの破片と区別できない)。
         // 短いフレームはパディングして通す — wsslirpのARP応答は42バイトで来る
         let len = frame.len().max(60);
@@ -295,7 +351,6 @@ impl Ne2000 {
         let used = (self.curr + ring_pages - self.bnry) % ring_pages;
         let free = ring_pages - used;
         if pages_needed + 1 > free {
-            self.isr |= ISR_OVW;
             return false;
         }
         let next = {
