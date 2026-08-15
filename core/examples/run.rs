@@ -28,15 +28,30 @@ fn main() {
     let initrd = std::fs::read(&initrd_path).ok();
     let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| "console=ttyS0".into());
 
+    // RAMは指定が無ければ**initrdに合わせて自動で決める**。initramfsは展開後の
+    // 中身がRAMに載るので、大きいイメージ (gcc入りは展開後91MiB) を既定の128MBで
+    // 起動すると**中身が黙って欠ける**。64MB刻みに切り上げるので、
+    // これまでの initramfs-lts / -mini は 128MB のまま変わらない
     let mb: usize = std::env::var("RAM_MB")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(128);
+        .unwrap_or_else(|| {
+            // 断りの閾値 (initrd_ram_needed) は**下限**なので、自動で選ぶときは
+            // 25%足してから64MB刻みに切り上げる。ぴったりに寄せると、gccイメージ
+            // (下限190.7MiB) に192MBを選んで**末尾のcollect2だけ落ちる**という、
+            // 一番気づきにくい壊れ方をする (実測済み)
+            let need = initrd.as_deref().map_or(0, rustx86_core::initrd_ram_needed);
+            let mb = (need + need / 4).div_ceil(64 << 20) as usize * 64;
+            mb.max(128)
+        });
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(mb));
     // bzImage / vmlinux は中身で自動判別。vmlinux (tools/images/extract-vmlinux.sh) なら
     // 自己解凍ステブが無いぶん起動が4割速い
-    m.boot_linux_with_initrd(&data, &cmdline, initrd.as_deref())
-        .expect("boot");
+    if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, initrd.as_deref()) {
+        // RAM不足はここで出る。パニックの体裁だと本文が読みにくい
+        eprintln!("起動できない: {e}");
+        std::process::exit(1);
+    }
     eprintln!(
         "rustx86: {path} ({}MB, initrd {}) — Ctrl-] で終了",
         mb,
