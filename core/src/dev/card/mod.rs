@@ -5,6 +5,7 @@
 //!
 //! - [`ne2000`] NE2000 (ISA) = [`Dp8390`](super::chip::Dp8390) + 倍幅PROM + 0x300の窓
 //! - [`rtl8029`] RTL8029AS (PCI) = 同じ素子 + 平坦PROM + BARの窓 + 10EC:8029 の名乗り
+//! - [`virtio_blk`] virtio-blk (PCI) = [`VirtioPci`](super::chip::VirtioPci) + ディスクの中身 + 1AF4:1001 の名乗り
 //!
 //! **どちらも素子は同じ1つ**である。実装を2つ持たないのはこのリポジトリの原則
 //! (意味論の原本は1つ) だが、ここでは歴史の方が先にそう作っている — 実物の
@@ -21,3 +22,4 @@
 
 pub mod ne2000;
 pub mod rtl8029;
+pub mod virtio_blk;

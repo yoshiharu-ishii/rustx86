@@ -12,6 +12,7 @@
 //! - [`pit`] 8254 — 時を刻む
 //! - [`uart`] 16550 — シリアルコンソール
 //! - [`dp8390`] DP8390 — Ethernet。**ISAのNE2000もPCIのRTL8029も中身はこれ1つ**
+//! - [`virtio`] virtio (legacy) — 準仮想化の共通の口。リングとレジスタ窓
 //!
 //! 素子は機械を組まずに単体で試せる ([`Dp8390`] のテストが `Machine` を要らないのが
 //! その形)。「なにか」と「どう見つかるか」を分けた効き目がここに出る。
@@ -26,6 +27,7 @@ pub mod kbd;
 pub mod pic;
 pub mod pit;
 pub mod uart;
+pub mod virtio;
 
 pub use cmos::Cmos;
 pub use crtc::Crtc;
@@ -34,3 +36,4 @@ pub use kbd::Kbd8042;
 pub use pic::Pic8259;
 pub use pit::Pit8254;
 pub use uart::Uart16550;
+pub use virtio::VirtioPci;

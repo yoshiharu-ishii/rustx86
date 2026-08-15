@@ -22,4 +22,5 @@
 pub mod card;
 pub mod chip;
 
+pub use card::virtio_blk::VirtioBlk;
 pub use chip::{Cmos, Crtc, Dp8390, Kbd8042, Pic8259, Pit8254, Uart16550};
