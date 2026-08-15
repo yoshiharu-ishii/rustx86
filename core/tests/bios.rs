@@ -139,7 +139,7 @@ fn int16_translates_control_combinations() {
     ] {
         let mut m = machine();
         // 8042へは「Ctrlを押す → キーを押す → 離す」の順で流れる
-        let (sc, _) = rustx86_core::dev::isa::kbd::scancode_shift(match want {
+        let (sc, _) = rustx86_core::dev::chip::kbd::scancode_shift(match want {
             0x03 => 'c',
             0x04 => 'd',
             0x1a => 'z',

@@ -397,7 +397,7 @@ impl Machine {
         m.devices.cmos.load(&mut r)?;
         m.devices.crtc.load(&mut r)?;
         m.devices.net = if r.bool()? {
-            Some(crate::dev::Ne2000::load(&mut r)?)
+            Some(crate::dev::Dp8390::load(&mut r)?)
         } else {
             None
         };

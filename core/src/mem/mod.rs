@@ -701,14 +701,14 @@ impl Machine {
     fn pci_slot_read(&mut self, slot: usize, off: u16) -> u8 {
         match (slot, &mut self.devices.net) {
             // RTL8029: 皮はPCIでも中身はISA版と同じDP8390
-            (crate::dev::pci::NET_SLOT, Some(net)) => net.read(off),
+            (crate::dev::card::rtl8029::NET_SLOT, Some(net)) => net.read(off),
             _ => 0xFF,
         }
     }
 
     /// PCIの装置への書き
     fn pci_slot_write(&mut self, slot: usize, off: u16, val: u8) {
-        if let (crate::dev::pci::NET_SLOT, Some(net)) = (slot, &mut self.devices.net) {
+        if let (crate::dev::card::rtl8029::NET_SLOT, Some(net)) = (slot, &mut self.devices.net) {
             net.write(off, val);
         }
     }
