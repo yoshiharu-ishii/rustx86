@@ -82,7 +82,7 @@ cargo install wasm-pack                    # JSとの繋ぎを自動生成する
 OS が無いというのが大事で、**OS が提供するものは使えない**。
 このリポジトリで実際にぶつかったのがこれである。
 
-```rust:core/src/dev/cmos.rs
+```rust:core/src/dev/chip/cmos.rs
 //! - **決定的でなければスナップショットが再現しない。** 同じ状態から再開したら
 //!   同じ時刻でなければ困る。ホストの時計を読むと再開のたびに違う値になる
 //! - `core` は時計を持てない。`std::time::Instant` は wasm32 では動かない

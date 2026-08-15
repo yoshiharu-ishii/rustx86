@@ -3,9 +3,7 @@
 //! 読み出しは最も回数の多い経路なので分岐を足さない、書き込み側に
 //! 仕掛けを寄せる (VRAM検出・自己書き換え検出)、という非対称が設計の芯。
 
-pub mod bus;
-
-use crate::{cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
+use crate::{bus, cpu, debug, IoTarget, Machine, PageFault, TlbEntry, TLB_INVALID, TLB_SLOTS};
 
 /// ページウォーク1回の結果。物理先頭・権限に加えて、
 /// A/Dビットの書き戻し先 (表の側の物理番地) も運ぶ
@@ -667,7 +665,7 @@ impl Machine {
                 // **PCI機ではISAの0x300窓は開かない。** カードはPCIスロット側に
                 // 居て、番地はBARが決める — 同じ実体が両方の窓で応えると、
                 // OSが2枚あると数えてしまう
-                Some(net) if !self.profile.has_pci => net.read(port - 0x300),
+                Some(net) if !self.profile.has_pci => net.read(port - bus::isa::NET_BASE),
                 // カードが挿さっていなければ、ただの空きスロットである
                 _ => {
                     self.unhandled_io.insert(port);
@@ -770,7 +768,7 @@ impl Machine {
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
             IoTarget::Net => match &mut self.devices.net {
-                Some(net) if !self.profile.has_pci => net.write(port - 0x300, val),
+                Some(net) if !self.profile.has_pci => net.write(port - bus::isa::NET_BASE, val),
                 _ => {
                     self.unhandled_io.insert(port);
                 }
