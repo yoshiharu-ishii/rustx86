@@ -123,7 +123,7 @@ pub struct Devices {
     pub sysctl: u8,
     /// NE2000 (0x300-0x31F)。**挿さっていないのが既定** — NIC無し起動の
     /// ビット同一 (ADR-0017の不変条件) は、装置が居ないことで自明に守られる
-    pub net: Option<crate::dev::Ne2000>,
+    pub net: Option<crate::dev::Dp8390>,
     /// PCIのホストブリッジ。**16bit機には挿さない** — 1980年代の機械に
     /// PCIは無く、挿すと起動の命令列が変わる。世代で分けるのが史実にも合う
     pub pci: Option<crate::dev::PciHost>,
