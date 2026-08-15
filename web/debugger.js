@@ -43,56 +43,79 @@
  */
 
 const CSS = `
-  .rx-dbg { background: #0b0e14; color: #c9d1d9;
-            font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
-            /* 縦に伸ばす。**下に地の色が覗くのを防ぐ** — 子ウインドウでは
-               パネルが窓より短いと、下半分が白いままになる */
-            display: flex; flex-direction: column; min-height: 100vh; }
+  /* **色は本体のトークンから借りる。** デバッガだけ別の色を持つと、
+     ライト/ダークを切り替えたときにここだけ取り残される (実際そうなっていた)。
+     var() の第2引数は**子ウインドウ用の落としどころ** — 別documentには
+     本体の :root が無いので、そこでは暗い既定で立ち上がる
+     (開くときに親の実際の値を写すので、通常は第1引数が効く) */
+  .rx-dbg {
+    --d-bg: var(--card, #101310);
+    --d-head: var(--card-head, #151915);
+    --d-line: var(--line, #232a23);
+    --d-fg: var(--fg, #d7ddd7);
+    --d-dim: var(--dim, #7d867d);
+    --d-key: var(--link, #7fb2ff);
+    --d-hit: var(--amber, #fbbf24);
+    --d-ok: var(--green, #4ade80);
+    --d-btn: var(--btn, #141814);
+    --d-btn-hover: var(--btn-hover, #1a201a);
+    --d-field: var(--field, #0d100d);
+    --d-radius: var(--radius, .6rem);
+    background: var(--d-bg); color: var(--d-fg);
+    font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    /* 縦に伸ばす。**下に地の色が覗くのを防ぐ** — 子ウインドウでは
+       パネルが窓より短いと、下半分が地のままになる */
+    display: flex; flex-direction: column; min-height: 100vh;
+  }
   /* 余った高さを食う欄。いちばん下に置いて、メモリダンプで埋める */
   .rx-dbg .grow { flex: 1 1 auto; display: flex; flex-direction: column;
                   min-height: 0; border-bottom: none; }
   .rx-dbg .grow pre { flex: 1 1 auto; overflow: auto; min-height: 0; }
-  .rx-dbg .note { color: #6e7681; font-size: 11.5px; margin: 0 0 8px; }
-  .rx-dbg h2 { margin: 0 0 8px; font-size: 12px; color: #8b949e; font-weight: 600;
+  .rx-dbg .note { color: var(--d-dim); font-size: 11.5px; margin: 0 0 8px; }
+  .rx-dbg h2 { margin: 0 0 8px; font-size: 12px; color: var(--d-dim); font-weight: 600;
                letter-spacing: .04em; }
-  .rx-dbg header { position: sticky; top: 0; background: #0b0e14; padding: 10px 12px 6px;
-                   border-bottom: 1px solid #1f2733; z-index: 1; }
+  .rx-dbg header { position: sticky; top: 0; background: var(--d-head); padding: 10px 12px 6px;
+                   border-bottom: 1px solid var(--d-line); z-index: 1; }
   /* ヘッダを掴んで動かせる。ボタンや入力の上では掴ませない */
   .rx-dbg.panel header { cursor: move; }
   .rx-dbg.panel header button, .rx-dbg.panel header input { cursor: pointer; }
   .rx-dbg.dragging { user-select: none; }
   .rx-dbg .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .rx-dbg button { background: #1f2733; color: #c9d1d9; border: 1px solid #30363d;
-                   border-radius: 5px; padding: 4px 10px; font: inherit; cursor: pointer; }
-  .rx-dbg button:hover { background: #2b3441; }
-  .rx-dbg input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
-                  border-radius: 5px; padding: 4px 6px; font: inherit; width: 8em; }
-  .rx-dbg section { padding: 10px 12px; border-bottom: 1px solid #1f2733; }
+  /* ボタンは本体の op ボタンと同じ顔 — アイコン + ラベルを横に並べる */
+  .rx-dbg button { background: var(--d-btn); color: var(--d-fg); border: 1px solid var(--d-line);
+                   border-radius: var(--d-radius); padding: .35rem .6rem; font: inherit;
+                   cursor: pointer; display: inline-flex; align-items: center; gap: .35rem; }
+  .rx-dbg button:hover { background: var(--d-btn-hover); border-color: var(--line-lit, #2f3a2f); }
+  .rx-dbg button svg { width: 1rem; height: 1rem; flex: none; }
+  .rx-dbg input { background: var(--d-field); color: var(--d-fg); border: 1px solid var(--d-line);
+                  border-radius: var(--d-radius); padding: .3rem .45rem; font: inherit; width: 8em; }
+  /* **プレースホルダが切れない幅**。"0x7c00 or 07c0:0000" が入る */
+  .rx-dbg input.wide { width: 13em; }
+  .rx-dbg section { padding: 10px 12px; border-bottom: 1px solid var(--d-line); }
   .rx-dbg .state { font-weight: 600; }
-  .rx-dbg .state.stopped { color: #f0883e; }
-  .rx-dbg .state.running { color: #3fb950; }
+  .rx-dbg .state.stopped { color: var(--d-hit); }
+  .rx-dbg .state.running { color: var(--d-ok); }
   .rx-dbg table { border-collapse: collapse; }
   .rx-dbg td { padding: 1px 10px 1px 0; white-space: pre; }
-  .rx-dbg .k { color: #8b949e; }
-  .rx-dbg .v { color: #79c0ff; }
-  .rx-dbg .changed { color: #f0883e; }
-  .rx-dbg .hex { color: #6e7681; font-size: 12px; }
-  .rx-dbg .asm { color: #7ee787; }
-  .rx-dbg .state.stopped { color: #f0883e; }
+  .rx-dbg .k { color: var(--d-dim); }
+  .rx-dbg .v { color: var(--d-key); }
+  .rx-dbg .changed { color: var(--d-hit); }
+  .rx-dbg .hex { color: var(--d-dim); font-size: 12px; }
+  .rx-dbg .asm { color: var(--d-ok); }
   /* **必ず1行。** 折り返すと下の欄が丸ごとずれる */
-  .rx-dbg .why { margin: 6px 0 0; color: #f0883e; height: 1.4em;
+  .rx-dbg .why { margin: 6px 0 0; color: var(--d-hit); height: 1.4em;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .rx-dbg .hint { color: #6e7681; margin: 6px 0 0; font-size: 12px; }
+  .rx-dbg .hint { color: var(--d-dim); margin: 6px 0 0; font-size: 12px; }
   .rx-dbg pre { margin: 0; white-space: pre; overflow-x: auto; }
-  .rx-dbg .list { color: #8b949e; margin: 6px 0 0; }
-  .rx-dbg code { color: #79c0ff; }
+  .rx-dbg .list { color: var(--d-dim); margin: 6px 0 0; }
+  .rx-dbg code { color: var(--d-key); }
 
   /* ページ内に落ちたときだけ効く。画面の右に浮かせる */
   .rx-dbg.panel { position: fixed; top: 12px; right: 12px; width: 480px;
                   /* 子ウインドウ用の min-height:100vh を打ち消す。
                      残すと max-height と競合して窓からはみ出す */
                   min-height: 0; height: calc(100vh - 24px); overflow: auto;
-                  z-index: 9999; border: 1px solid #30363d; border-radius: 8px;
+                  z-index: 9999; border: 1px solid var(--d-line); border-radius: 8px;
                   box-shadow: 0 8px 32px rgba(0,0,0,.5); }
   /* 最小化: ヘッダ (タイトル+状態+操作ボタン) だけ残して畳む。
      裏の画面を覗きたいとき用。操作ボタンは残るので畳んだまま Step もできる */
@@ -107,23 +130,37 @@ const CSS = `
   .rx-dbg .resize.y { left: 0; bottom: -3px; width: 100%; height: 8px; cursor: ns-resize; }
   .rx-dbg .resize.xy { left: -3px; bottom: -3px; width: 14px; height: 14px;
                        cursor: nesw-resize; }
-  .rx-dbg .resize:hover { background: #2563eb44; }
+  .rx-dbg .resize:hover { background: color-mix(in srgb, var(--d-ok) 30%, transparent); }
   /* スクロールバーをデバッガの地の色に合わせる。既定の明るいバーが
-     ダークなパネルから浮くので */
+     暗いパネルから浮くので */
   .rx-dbg, .rx-dbg pre, .rx-dbg .grow pre {
-    scrollbar-width: thin; scrollbar-color: #5b6673 transparent;
+    scrollbar-width: thin; scrollbar-color: var(--d-dim) transparent;
   }
   .rx-dbg ::-webkit-scrollbar, .rx-dbg::-webkit-scrollbar { width: 11px; height: 11px; }
   .rx-dbg ::-webkit-scrollbar-track, .rx-dbg::-webkit-scrollbar-track { background: transparent; }
   .rx-dbg ::-webkit-scrollbar-thumb, .rx-dbg::-webkit-scrollbar-thumb {
-    background: #5b6673; border-radius: 5px; border: 2px solid #0b0e14;
+    background: var(--d-dim); border-radius: 5px; border: 2px solid var(--d-bg);
   }
   .rx-dbg ::-webkit-scrollbar-thumb:hover, .rx-dbg::-webkit-scrollbar-thumb:hover {
-    background: #79879a;
+    background: var(--d-fg);
   }
-  .rx-dbg .hbtn { padding: 2px 8px; margin-left: 4px; }
+  .rx-dbg .hbtn { padding: .2rem .45rem; margin-left: 4px; }
   .rx-dbg .close { margin-left: auto; }
 `;
+
+/** 本体と同じ描き方のアイコン (24x24・線・currentColor)。**絵はここ1箇所** */
+const ICON = (d, extra = '') =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"` +
+  ` stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}${extra}</svg>`;
+const I = {
+  play: ICON('<path d="M7 4.5v15l12-7.5z"/>'),
+  pause: ICON('<path d="M9 5v14M15 5v14"/>'),
+  step: ICON('<path d="M5 5l9 7-9 7z"/><path d="M19 5v14"/>'),
+  restart: ICON('<path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v5h5"/>'),
+  close: ICON('<path d="M6 6l12 12M18 6L6 18"/>'),
+  min: ICON('<path d="M6 12h12"/>'),
+};
+
 
 const HTML = `
   <header>
@@ -132,14 +169,14 @@ const HTML = `
     <div class="row">
       <h2 style="margin:0">rustx86 debugger</h2>
       <span class="state" id="rxState">—</span>
-      <button class="hbtn" id="rxMin" title="最小化 (裏の画面を覗く)">–</button>
-      <button class="close" id="rxClose" hidden>Close</button>
+      <button class="hbtn" id="rxMin" title="最小化 (裏の画面を覗く)">${I.min}</button>
+      <button class="close" id="rxClose" hidden>${I.close}Close</button>
     </div>
     <div class="row" style="margin-top:8px">
-      <button id="rxPause">Pause</button>
-      <button id="rxStep">Step 1</button>
-      <button id="rxCont">Continue</button>
-      <button id="rxRestart" hidden>Restart</button>
+      <button id="rxCont">${I.play}Continue</button>
+      <button id="rxPause">${I.pause}Pause</button>
+      <button id="rxStep">${I.step}Step 1</button>
+      <button id="rxRestart" hidden>${I.restart}Restart</button>
     </div>
     <p class="why" id="rxWhy"></p>
   </header>
@@ -189,7 +226,7 @@ const HTML = `
     <h2>Watchpoints</h2>
     <p class="note">機械を止めて、<strong>どの命令がやったか</strong>まで言う。</p>
     <div class="row">
-      <input id="rxBp" placeholder="0x7c00 or 07c0:0000">
+      <input id="rxBp" class="wide" placeholder="0x7c00 or 07c0:0000">
       <button id="rxAddBp">Break on execute</button>
     </div>
     <div class="row" style="margin-top:6px">
@@ -322,6 +359,10 @@ export class Debugger {
       this.doc = w.document;
       w.document.title = 'rustx86 デバッガ';
       w.document.head.innerHTML = '<meta charset="utf-8">';
+      // **色は親から写す。** 子ウインドウには本体の :root が無いので、
+      // そのままだと var() の落としどころ (暗い既定) で固まり、
+      // 本体をライトにしてもここだけ暗いままになる
+      this.mirrorTheme(w.document);
       this.root = this.mount(w.document, w.document.body);
       w.document.body.style.margin = '0';
       w.addEventListener('unload', () => this.hide());
@@ -339,7 +380,11 @@ export class Debugger {
     this.host.emu()?.set_counting(true);
     // 走っている間も見えるように、人間が読める速さで更新する。
     // 毎フレームは要らない — レジスタは1秒に数回読めれば足りる
-    this.timer = setInterval(() => this.render(), 100);
+    this.timer = setInterval(() => {
+      // 本体のテーマ切替に追随する (子ウインドウは親の :root を見られない)
+      if (this.win) this.mirrorTheme(this.win.document);
+      this.render();
+    }, 100);
     this.render();
   }
 
@@ -431,6 +476,36 @@ export class Debugger {
     };
     this.doc.addEventListener('mousemove', move);
     this.doc.addEventListener('mouseup', up);
+  }
+
+  /**
+   * 親のテーマを子ウインドウへ写す。
+   *
+   * **色の原本は index.html の :root 1箇所**にしておきたい。子documentに
+   * パレットを書き写すと二重管理になるので、**今の計算値をそのまま**
+   * 子の :root へ流し込む。テーマを切り替えたら次の更新で追随する
+   * (呼び直すだけで済むのが、この方式の利点)
+   */
+  mirrorTheme(doc) {
+    const cs = getComputedStyle(document.documentElement);
+    const names = [
+      '--bg', '--card', '--card-head', '--line', '--line-lit', '--fg', '--dim',
+      '--green', '--amber', '--red', '--sink', '--hover', '--btn', '--btn-hover',
+      '--field', '--link', '--radius',
+    ];
+    const body = names
+      .map((n) => `${n}:${cs.getPropertyValue(n).trim()}`)
+      .filter((d) => !d.endsWith(':'))
+      .join(';');
+    if (!body) return;
+    let st = doc.getElementById('rxTheme');
+    if (!st) {
+      st = doc.createElement('style');
+      st.id = 'rxTheme';
+      (doc.head || doc.body).appendChild(st);
+    }
+    // 子の地の色も本体に合わせる (窓の余白が白いままだと浮く)
+    st.textContent = `:root{${body}} body{background:var(--bg);margin:0}`;
   }
 
   /** 中身を組み立てる。**子ウインドウかページ内かをここは知らない** */
