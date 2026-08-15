@@ -55,10 +55,10 @@ jobs:
     outputs:
       cpu: ${{ steps.filter.outputs.cpu }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # CPUの意味論に触れた変更か (L0 CPU照合を回すかの判定)。
       # core/cosim以外 (web/tools等) だけのPRでは重いUnicornビルドを省く
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -174,9 +174,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -240,7 +244,7 @@ jobs:
     # Unicorn のビルドが刺さったときの番人。通常はキャッシュが効いて数分で終わる
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
 
       - name: Unicornとの突き合わせ
@@ -264,9 +268,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -292,14 +300,14 @@ jobs:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
 
       # ROMはリポジトリに置かず毎回ビルドする (入手経路はfetch-images.sh一つ、
       # OSイメージと同じ理由)。nasmが要るのはROMを焼き直すときだけ
       - name: test386 ROMのキャッシュ
         id: rom-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             images/test386.bin
@@ -333,9 +341,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -362,9 +374,9 @@ jobs:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -373,7 +385,7 @@ jobs:
       # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: images
           key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
@@ -432,9 +444,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -474,7 +490,7 @@ jobs:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
 
       # **同じキーなら同じ中身にする。** 3つのジョブが同じキーで別々の組を
@@ -482,7 +498,7 @@ jobs:
       # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: images
           key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
@@ -517,9 +533,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -546,7 +566,7 @@ jobs:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
 
       # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
@@ -557,7 +577,7 @@ jobs:
       # キャッシュを掴んだジョブで貼り付け検査が落ちて気づいた (2026-08-14)
       - name: イメージのキャッシュ
         id: img-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: images
           key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
@@ -586,7 +606,7 @@ jobs:
       # 「シェル到達までの命令数」も「シリアル出力全文」もビット同一かを見張る。
       # 命令数決定性 (docs/perf.md の柱) をJITが崩したら即赤くする
       - name: Node の用意
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: wasm-pack の用意
@@ -601,7 +621,7 @@ jobs:
       - name: ブートログを証跡に残す
         id: logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: boot-logs
           path: regress-out/
@@ -619,9 +639,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()
@@ -658,19 +682,19 @@ jobs:
       HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       # SLiRP backend (wsslirp) はGoで書かれた別リポジトリ。ここで建てる
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
 
       - name: イメージのキャッシュ
         id: img-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: images
           key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
@@ -713,9 +737,13 @@ jobs:
       - name: 掲示板トークン
         id: app
         if: ${{ always() && env.HAVE_APP == 'true' }}
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - uses: ./.github/actions/publish-check
         if: always()

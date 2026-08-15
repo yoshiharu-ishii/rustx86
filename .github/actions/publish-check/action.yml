@@ -33,7 +33,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/github-script@v7
+    - uses: actions/github-script@v9
       env:
         CHECK_NAME: ${{ inputs.name }}
         CHECK_TITLE: ${{ inputs.title }}
@@ -42,7 +42,11 @@ runs:
       with:
         github-token: ${{ inputs.token }}
         script: |
-          const fs = require('fs');
+          // **import で取る。** github-script v9 の中身はESMになり、
+          // require が使える保証が無くなった (v9の破壊的変更は
+          // require('@actions/github') の禁止だが、道具の側の都合に
+          // 寄りかからない書き方にしておく)
+          const fs = await import('node:fs');
           const file = process.env.REPORT_FILE;
           let summary = '(レポートなし)';
           if (file && fs.existsSync(file)) {
