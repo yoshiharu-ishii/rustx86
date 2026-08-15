@@ -239,10 +239,15 @@ Tier 5 の Linux でも Tier 6 の GUI でもそのまま使う。
 - [x] **4b: ブートプロトコル** — BIOSは作らず bzImage / vmlinux + initrd を
       直接ロードして32bitエントリへ (QEMUの `-kernel` 方式)。
       ブラウザで Linux 6.18 (Alpine) が起動し、busybox のシェルで遊べる
-- ~~4c: virtio-blk~~ → **Tier 8 へ移した** (2026-08-15)。理由が2つとも消えた —
-      「PCIを実装せずに済む」はPCIを作ったので無意味になり (ADR-0017)、そもそも
-      **Linuxはinitramfsで起動するのでディスクを1バイトも使わない**。
-      永続ストレージが要るのはmicroVM段である
+- ~~4c: virtio-blk~~ → **Tier 4 からは外した** (2026-08-15)。**起動には要らない** —
+      Linuxはinitramfsで起動するのでディスクを1バイトも使わないし、「PCIを実装せずに
+      済む」という当初の理由もPCIを作った時点で消えた (ADR-0017)。
+      **ただし用途が来たら前倒しする**: ディスクにrootfsを置きたく
+      なった瞬間 (gccを入れる・Tiny CoreでXを動かす) に要る。
+      **PCIができた今、virtio-blk-pci はATAより安い** — 実測でnetbootの
+      initramfs-lts に `virtio_pci.ko` と `virtio_blk.ko` が入っており、
+      ne2k-pci と同じ手口 (モジュールを抜いてminiに足す) がそのまま使える。
+      置き場は Tier 6 のメディア段 (6c/6d の隣) が正しい
 - [x] **4d: x87 (FPU)** — f64裏打ちで実装 (2026-08-14、QEMU-tiny/v86と同じ
       割り切り)。スタブが演算のESCを黙って流していた時代、muslのstrtodが壊れ
       `sleep 3` の「3」がbusyboxのparse_durationで20msに化け、ゲストのpingが
