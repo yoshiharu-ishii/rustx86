@@ -105,6 +105,60 @@ fn halt_stays_asleep_while_interrupts_are_disabled() {
     assert!(m.halted, "IFが下りていれば起きない");
 }
 
+/// **その眠りから覚めないなら、`run()` は終わりと認めなければならない。**
+///
+/// 上の `halt_stays_asleep_...` は step 単位で「起きない」ことを見ている。
+/// だが `run()` の側は「PICに挙手があるならまだ配られるかもしれない」と
+/// 待ち続ける作りだった。IFが下りていれば配送は起きないので (この機械にNMIは
+/// 無い)、抜ける条件が永久に成立しない。
+///
+/// `asm/bench.asm` の終端がこの形だった。PITを止めてHLTするので設計どおり
+/// 止まるはずが、配られずに残った挙手のせいで上限20G命令まで空回りし、
+/// 固定369M命令のはずのベンチが**終端の `hlt; jmp` を19.6G回まわした数字**を
+/// 出していた。決定的な命令数という前提は、終端で止まれて初めて成り立つ
+#[test]
+fn a_dead_halt_ends_the_run() {
+    let mut m = load("hello.bin");
+    // HLTだけを置いてそこへ飛ばす — 終端で寝るワークロードの最小形
+    m.write8(0x7C00, 0xF4);
+    m.cpu.set_cs_ip(0x0000, 0x7C00);
+    m.cpu.set_flag(IF, false);
+    // 配られないまま残った挙手。bench.asm ではPITが挙げたものだった
+    m.devices.pic[0].raise(0);
+    assert!(m.devices.pic[0].has_pending(), "前提: 挙手が残っている");
+
+    const LIMIT: u64 = 1_000_000;
+    let n = m.run(LIMIT);
+
+    assert!(m.halted, "HLTして寝ている");
+    assert!(
+        n < LIMIT,
+        "誰も起こせないのに上限まで走った ({n}命令)。デッドハルトを終わりと認めていない"
+    );
+}
+
+/// 逆に**IFが立っていれば割り込みはまだ配られる**ので、そこで抜けてはいけない。
+/// 抜けてしまうと、鳴らした割り込みが配られないまま機械が永眠する
+/// (ワンショットのタイマは鳴った瞬間に止まるので、`pit.running` だけを見ていると
+/// 取りこぼす — Linuxのhresティックで実際に眠った)。
+/// デッドハルトの判定がこちらを巻き込まないこと
+#[test]
+fn a_pending_irq_still_wakes_a_halted_machine() {
+    let mut m = load("hello.bin");
+    m.halted = true;
+    m.cpu.set_flag(IF, true);
+    m.raise_irq(0x08);
+
+    m.run(100);
+
+    // 配られていれば保留は解ける。**抜けてしまっていたら Some のまま残る** —
+    // ハンドラへ飛んだ後は iret で戻ってくるので、CSを見ても判別できない
+    assert!(
+        m.pending_irq.is_none(),
+        "IFが立っていれば、HLT中でも割り込みは配られる (run()がここで抜けてはいけない)"
+    );
+}
+
 /// トラップフラグ: 1命令実行してから INT 1。
 /// 「実行してから止まる」のでデバッガが1命令ずつ進められる
 #[test]
