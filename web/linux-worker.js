@@ -81,6 +81,13 @@ self.onmessage = (e) => {
       break;
     case 'net-rx':
       for (const f of msg.frames) netInbox.push(new Uint8Array(f));
+      // **寝ている間に届いたら、待たずに起こす。**
+      // 時計の轡で最大50ms寝るので、そのままだと届いたフレームが最大50ms
+      // 待たされる。**遅延の定数項の正体がこれだった** — 実測で ping の
+      // RTT が 20.2ms → 13.7ms (-32%、刻み30万命令。tools/webtest/netlat.mjs)。
+      // 轡は壊れない: 早送りで進めた分は既に仮想時間に計上済みで、
+      // 早く起きても借りは増えない (寝るのを短く切り上げるだけ)
+      wakeNow();
       break;
     case 'save': {
       if (!emu) break;
@@ -173,6 +180,24 @@ const wake = new MessageChannel();
 wake.port1.onmessage = () => loop();
 function scheduleNext() {
   wake.port2.postMessage(0);
+}
+
+// **寝ているタイマの札。** 時計の轡で実時間を待っている間にフレームが届いたら、
+// 待たずに起こすために覚えておく (下の nap / wakeNow)
+let napTimer = null;
+/** 実時間で ms だけ寝てから続きを回す */
+function nap(ms) {
+  napTimer = setTimeout(() => {
+    napTimer = null;
+    loop();
+  }, ms);
+}
+/** 寝ている最中なら、今すぐ起こす。寝ていなければ何もしない */
+function wakeNow() {
+  if (napTimer === null) return;
+  clearTimeout(napTimer);
+  napTimer = null;
+  loop();
 }
 
 function loop() {
@@ -277,13 +302,13 @@ function loop() {
     // 返しきるまでは次のループでもここへ来るので、借りは消えない。
     // 次のスライスは短く戻す — 5Mのまま寝ると65ms待ちになり打鍵が鈍る
     sliceSize = Math.round(INSTR_PER_GUEST_MS * 16);
-    setTimeout(loop, Math.max(0, Math.min(50, aheadMs)));
+    nap(Math.max(0, Math.min(50, aheadMs)));
     return;
   }
 
   // 忙しくても時計が先行したら実時間に合わせる (wasmが想定より速いとき)
   if (aheadMs > 8) {
-    setTimeout(loop, Math.min(50, aheadMs));
+    nap(Math.min(50, aheadMs));
     return;
   }
 
