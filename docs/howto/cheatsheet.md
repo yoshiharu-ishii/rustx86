@@ -11,7 +11,8 @@ tools/images/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
 tools/images/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
 tools/images/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
 tools/images/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
-tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
+tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む (Docker道具箱の中で走る)
+tools/images/make-gcc-disk.sh           # gcc入りのディスク (squashfs)。焼き方の詳細は howto/images.md
 ```
 
 ## 走らせる
@@ -19,6 +20,8 @@ tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む
 | やりたいこと | コマンド |
 |---|---|
 | Linuxを対話起動 (シリアルをターミナルへ) | `cargo run --release --example run -- images/vmlinux` |
+| ディスク付きでLinux起動 (gccが打てる) | `DISK=images/disk-gcc.img cargo run --release --example run -- images/vmlinuz-lts` |
+| ゲストに1コマンド流して検証 (必ず終わる) | `GUEST_CMD='ls; printf "DONE%s\n" MARK' cargo run --release --example guestcmd` |
 | ディスクからOS起動 | `cargo run --release --example boot -- images/fd2880.img` |
 | 起動して1コマンド打って結果を見る | `cargo run --release --example boot -- images/fd2880.img 50000000 root "uname -a"` |
 | gdb風デバッガで追う | `cargo run --release --example dbg -- images/fd14games.img` |
