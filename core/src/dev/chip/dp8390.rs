@@ -101,8 +101,6 @@ pub struct Dp8390 {
     /// カードは自分のペースで受け取れる。**その「線」をここで表す**。
     /// リングに空きができるたび (tick ごと) に前から詰めていく
     rx_queue: VecDeque<Vec<u8>>,
-    /// デバッグ用I/Oトレース (一時計測。1 = 書き込み<<31 | off<<16 | 値)
-    pub trace: Vec<u32>,
 }
 
 impl Dp8390 {
@@ -132,7 +130,6 @@ impl Dp8390 {
             mem,
             tx_out: VecDeque::new(),
             rx_queue: VecDeque::new(),
-            trace: Vec::new(),
         }
     }
 
@@ -178,11 +175,7 @@ impl Dp8390 {
 
     /// I/O読み出し。offはカードのベース (0x300) からのオフセット
     pub fn read(&mut self, off: u16) -> u8 {
-        let v = self.read_inner(off);
-        if self.trace.len() < 4096 {
-            self.trace.push((off as u32) << 16 | v as u32);
-        }
-        v
+        self.read_inner(off)
     }
 
     fn read_inner(&mut self, off: u16) -> u8 {
@@ -214,9 +207,6 @@ impl Dp8390 {
 
     /// I/O書き込み
     pub fn write(&mut self, off: u16, val: u8) {
-        if self.trace.len() < 4096 {
-            self.trace.push(1 << 31 | (off as u32) << 16 | val as u32);
-        }
         match off {
             0x00 => {
                 // TXPは「実行した」ら消える1回きりのビット。送信は瞬時に済む
