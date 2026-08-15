@@ -19,12 +19,38 @@ import { AnsiTerminal } from './ansi.js';
 let sharedTerm = null;
 
 /**
+ * initramfs の実物から、要るRAM (MB) を決める。
+ *
+ * **「置けたか」ではなく「展開しきれるか」で決まる。** カーネルは initramfs を
+ * tmpfs へ展開するので、圧縮イメージと展開後の中身がしばらく同時にRAMに載る。
+ * 足りないとカーネルは落ちずに "rootfs image is not initramfs (write error)"
+ * と言って途中でやめ、**尻切れのルートFSのままシェルまで来てしまう**。
+ *
+ * gzipなら展開後の大きさは末尾4バイト (ISIZE) に書いてある。Rust側の
+ * `initrd_ram_needed` と同じ算数 — 68MiBはカーネルの取り分で実測から決めた値。
+ * 下限ちょうどに寄せず25%足すのは、**ぴったりだと「4ファイルだけ欠ける」**
+ * という一番気づけない壊れ方を引くため (docs/explanation/pitfalls.md #14)。
+ */
+function autoRam(initrd) {
+  const n = initrd.length;
+  const gz = n > 18 && initrd[0] === 0x1f && initrd[1] === 0x8b;
+  const unpacked = gz
+    ? ((initrd[n - 4] | (initrd[n - 3] << 8) | (initrd[n - 2] << 16) | (initrd[n - 1] << 24)) >>> 0)
+    : n;
+  const need = n + unpacked + (68 << 20);
+  const mb = Math.ceil((need * 1.25) / (64 << 20)) * 64;
+  return Math.max(128, Math.min(2048, mb));
+}
+
+/**
  * Linux 一式を `canvas` に組み立てる。
  *
  * @param {HTMLCanvasElement} canvas シリアル端末を描く先
  * @param {object} opts
  *   onStatus(msg, err)  状態表示の依頼 (ページの status 欄へ)
  *   onState()           起動/停止など、ボタンの見た目に関わる変化の通知
+ *   rootfs()            電源を入れる瞬間に呼ぶ。{name, ramMb} を返す
+ *                       (ramMb が 0/未指定なら実物から自動で決める)
  * @returns 操作するための取っ手
  */
 export function mountLinux(canvas, opts = {}) {
@@ -158,15 +184,14 @@ export function mountLinux(canvas, opts = {}) {
     const snapshot = given; // ファイルからの復元 (Tier 3g) だけがここを通る
     let kernel = null;
     let initrd = null;
-    // **initramfs は差し替えられる。** `?initrd=initramfs-gcc` のように名前で指す
-    // (置き場は web/ の隣、カーネルと同じ)。gccを焼いた大きいinitramfsを試すときに使う。
-    // `?ram=512` で機械のRAMも増やせる — 展開した中身がそのままtmpfsに載るので、
-    // 大きいinitramfsは相応のRAMが要る (77MBの中身で512MB使った)
-    const q = new URLSearchParams(location.search);
-    const initrdName = q.get('initrd') || 'initramfs-mini';
-    const ramMb = Math.max(16, Math.min(2048, Number(q.get('ram')) || 128));
+    // **どのルートFSを載せるかは、電源を入れるこの瞬間に決まる** (NICと同じ)。
+    // 選ぶのは画面 (main.js のツールバー) で、URL (`?initrd=` / `?ram=`) は
+    // その初期値。RAMは 'auto' なら initrd の実物から決める (下の autoRam)
+    const want = opts.rootfs?.() ?? {};
+    const initrdName = want.name || 'initramfs-mini';
     usedInitrd = initrdName;
-    usedRam = ramMb;
+    // RAMの確定は initrd を読んだ後 (自動のときは中身の大きさが要る)
+    let ramMb = want.ramMb || 0;
 
     if (!snapshot && givenKernel) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
@@ -216,6 +241,10 @@ export function mountLinux(canvas, opts = {}) {
       }
     }
     if (!alive) return; // fetch の間に別のマシンへ切り替えられた
+
+    // **RAMは実物を見てから決める。** 自動 (ramMb未指定) のときだけ効く
+    if (!ramMb) ramMb = initrd ? autoRam(initrd) : 128;
+    usedRam = ramMb;
 
     status(
       snapshot
