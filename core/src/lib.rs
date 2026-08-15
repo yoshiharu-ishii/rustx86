@@ -11,7 +11,7 @@ pub mod snapshot;
 
 // 移動前のパス (rustx86_core::bzimage 等) を保つ再エクスポート。
 // テスト・wasm・cosim の参照はこれで壊れない
-pub use boot::{bzimage, elf};
+pub use boot::{bzimage, elf, initrd_ram_needed};
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
