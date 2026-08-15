@@ -164,3 +164,61 @@ fn zero_pageが物理0x10000に載る() {
     // zero page のマジックが物理0x10000+0x202に載っている
     assert_eq!(&[m.read_phys8(0x1_0202), m.read_phys8(0x1_0203)], b"Hd");
 }
+
+/// initramfsの見かけの大きさ (gzip) を持つダミー。中身は問わない —
+/// [`initrd_ram_needed`] が読むのは magic と末尾のISIZEだけ
+fn fake_gz_initrd(compressed: usize, unpacked: u32) -> Vec<u8> {
+    let mut b = vec![0u8; compressed];
+    b[0] = 0x1F;
+    b[1] = 0x8B;
+    let n = b.len();
+    b[n - 4..].copy_from_slice(&unpacked.to_le_bytes());
+    b
+}
+
+#[test]
+fn 展開しきれないinitrdは起動前に断る() {
+    // gcc入りイメージの実寸 (圧縮35.2MiB・展開後91.2MiB)。
+    // **192MBでは黙って中身が欠ける** — collect2 が落ちて「-c は通るのに
+    // リンクだけ失敗する」機械になった。置けてしまうぶん質が悪いので断る
+    let initrd = fake_gz_initrd(36_943_298, 95_600_000);
+    let img = fake_bzimage_with_kernel(&[0xF4], 0x0010_0000);
+
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(192));
+    let err = m
+        .boot_linux_with_initrd(&img, "", Some(&initrd))
+        .expect_err("192MBは足りないので断るはず");
+    assert!(err.contains("展開しきれない"), "{err}");
+
+    // 256MBなら通る
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(256));
+    m.boot_linux_with_initrd(&img, "", Some(&initrd))
+        .expect("256MBなら載る");
+}
+
+#[test]
+fn 既存のイメージは128mbのまま通る() {
+    // initramfs-lts (圧縮19.8MiB・展開後38.5MiB) と -mini。
+    // **今まで動いていた組み合わせを新しい判定で締め出さない**ことの確認
+    let img = fake_bzimage_with_kernel(&[0xF4], 0x0010_0000);
+    for (comp, unpacked, name) in [
+        (20_785_357usize, 40_400_000u32, "initramfs-lts"),
+        (3_624_334, 7_100_000, "initramfs-mini"),
+    ] {
+        let initrd = fake_gz_initrd(comp, unpacked);
+        let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
+        m.boot_linux_with_initrd(&img, "", Some(&initrd))
+            .unwrap_or_else(|e| panic!("{name} が128MBで断られた: {e}"));
+    }
+}
+
+#[test]
+fn 非gzipのinitrdは自分の大きさで見積もる() {
+    // 生cpio (圧縮していない) は展開後の大きさを名乗らない。
+    // 少なくとも自分の分は載る、として扱う
+    let raw = vec![0u8; 8 << 20];
+    assert_eq!(
+        rustx86_core::initrd_ram_needed(&raw),
+        (8 << 20) + (8 << 20) + (68 << 20)
+    );
+}
