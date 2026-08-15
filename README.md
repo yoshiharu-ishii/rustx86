@@ -156,6 +156,28 @@ python3 web/serve.py 8001
 # http://localhost:8001/ を開き、左からマシンを選ぶ
 ```
 
+Linuxの機械は**ルートFSとRAMを画面のツールバーで選ぶ** (NICの隣)。選んだものは
+覚えていて、効くのは次の電源ONから (機械の構成なので走っている機械は変えられない)。
+
+| ルートFS | 中身 |
+|---|---|
+| ミニ | busybox + snake/vi。3.6MB。まっすぐシェルに出る |
+| gcc入り | gcc + binutils + musl-dev。35MB。中で `gcc hello.c && ./a.out` が通る |
+
+RAMは既定が**自動** — initramfs の展開後の大きさ (gzip末尾のISIZE) から決める。
+展開した中身がそのまま tmpfs に載るので、gcc入り (展開88MB) は自動で256MBになる。
+**足りないとカーネルは落ちずに中身だけ欠ける**ので、手で減らすときは
+docs/explanation/pitfalls.md #14 を読んでからにする。
+
+URLのつまみ (Linuxの機械) — ツールバーの初期値になる:
+
+| | 何が変わるか |
+|---|---|
+| `?kernel=vmlinux` | 自己解凍ステブを飛ばす近道 (計測・経路比較用) |
+| `?initrd=<名前>` | ルートFSを名前で指す (`web/` の隣に置いた物) |
+| `?ram=<MB>` | 機械のRAM (無指定なら自動、16〜2048) |
+| `?net=off` / `?net=<wsのURL>` | NICを挿さない / 指定のSLiRP backendへ繋ぐ |
+
 - **`tools/build/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
   `serve.py` の `no-store` が全部引き受けるので、**かつてあった `?v=番号` は
   廃止した** — 手で番号を上げる方式は、上げ忘れ・片方だけ上げるという
