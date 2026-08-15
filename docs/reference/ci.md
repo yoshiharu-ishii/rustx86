@@ -74,7 +74,36 @@ CI Actions (ワークフローの束 — ∨で畳める。中身はログへの
 - **同じレポートはActionsのSummaryページにも掲示する** (`$GITHUB_STEP_SUMMARY`)。
   Checksタブ=PRレビュー時の掲示板、Actions Summary=実行を深掘りするときの一覧、
   という2面。OS起動回帰のSummaryには証跡 (boot-logsアーティファクト) への直リンクも付く
-  (`upload-artifact@v4` の `artifact-url` 出力)
+  (`upload-artifact` の `artifact-url` 出力)
+
+## アクションの版は node24 を指すものに揃える (2026-08-15)
+
+GitHub Actions は**アクションが動く Node のランタイムを、そのアクション自身が
+指定する** (`runs.using: node24`)。古い版を使い続けると、ランナー側が新しい
+Node しか持たない日に「node20 を指しているが node24 で走らせている」という
+警告が出て、いずれ動かなくなる。
+
+対処は版を上げることだけなので、**警告が出たらまとめて上げる**:
+
+| アクション | 版 | node24 になった版 |
+|---|---|---|
+| actions/checkout | v7 | v5 |
+| actions/setup-node | v7 | v5 |
+| actions/cache | v6 | v5 (ランナー 2.327.1 以上が要る) |
+| actions/upload-artifact | v7 | v5〜v6 |
+| actions/create-github-app-token | v3 | v3 |
+| actions/setup-go | v7 | v6 |
+| actions/github-script | v9 | v8 |
+| dorny/paths-filter | v4 | v4 |
+| Swatinem/rust-cache | v2 (据え置き) | v2.9 系で対応済み |
+
+**確かめ方は推測ではなく実物**: `gh api repos/OWNER/REPO/contents/action.yml?ref=TAG`
+を base64 デコードして `using:` を見る。リリースノートの文言より確実である。
+
+github-script だけは中身がESMになった影響があり、v9 では
+`require('@actions/github')` が失敗する。publish-check の script は
+`require('fs')` を **`await import('node:fs')`** に直してある — 道具の側の
+モジュール事情に寄りかからない書き方にしておくと、次の版でも壊れない。
 
 ## 層 — 関門の名前が示すもの (2026-08-14)
 
