@@ -74,6 +74,9 @@ def extract(src, root):
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
             with open(dest, "wb") as fh:
                 fh.write(body)
+            # **許可ビットを持ち帰る。** 忘れると busybox も init も 644 になり、
+            # 詰め直したイメージが "No working init found" で起動しない
+            os.chmod(dest, mode & 0o7777)
             count += 1
         elif kind == stat.S_IFLNK:
             links.append((dest, body.decode()))
@@ -85,6 +88,7 @@ def extract(src, root):
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
             with open(full, "rb") as s, open(dest, "wb") as d:
                 d.write(s.read())
+            os.chmod(dest, os.stat(full).st_mode & 0o7777)  # 実体の許可ビットを継ぐ
             count += 1
     print(f"{root}: {count} ファイルを展開")
 

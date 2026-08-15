@@ -116,6 +116,28 @@ echo
 #    孤児扱いになり、TSTP/TTIN/TTOU は仕様で捨てられる (SIGSTOPだけ効く
 #    という奇妙な姿になる — 実際になった)。forkすれば親はPID1でなくなる
 #
+# --- gcc入りイメージ (make-gcc-initramfs.sh) のための細工 ---
+#
+# **gccは自分の居場所を argv[0] から逆算する。** シェルが `gcc` という裸の
+# 名前で起動すると (PATHで見つけても argv[0] は "gcc" のまま)、gcc内部の
+# make_relative_prefix が相対形を返し、探索路が `../libexec/gcc/…` になる。
+# カレントが / なら `/../libexec` = `/libexec` で、存在しないので
+#
+#   gcc: fatal error: cannot execute 'cc1': posix_spawnp: No such file or directory
+#
+# になる (`/usr/bin/gcc` と絶対パスで呼べば当たる。同じ実体なのに呼び名で
+# 挙動が変わるので、原因に辿り着くまで遠回りした)。**環境変数で居場所を
+# 教えれば裸の名前でも通る**:
+#   GCC_EXEC_PREFIX  cc1 / collect2 / as / ld を探す起点
+#   LIBRARY_PATH     crtbegin.o・libgcc.a と libc の置き場
+# gccの入っていないミニイメージでは丸ごと無効 (ディレクトリが無い)
+if [ -d /usr/libexec/gcc ]; then
+  export GCC_EXEC_PREFIX=/usr/libexec/gcc/
+  for d in /usr/lib/gcc/*/*/; do
+    [ -d "$d" ] && export LIBRARY_PATH="$d:/usr/lib:/lib"
+  done
+fi
+#
 # シェルが死んだら起こし直す (getty代わり)。孤児の回収はPID1のashが
 # 子待ちのついでにやる
 while :; do
