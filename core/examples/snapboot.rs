@@ -30,6 +30,9 @@ fn boot_to_shell() -> Machine {
         if m.trap.is_some() {
             panic!("trap: {:?}", m.trap);
         }
+        if m.halted {
+            break; // 起こせない眠り (デッドハルト) — run() は0命令で返り続ける
+        }
         let s = String::from_utf8_lossy(&m.devices.uart.tx);
         if s.contains("busybox shell") {
             println!(
@@ -72,6 +75,9 @@ fn main() {
                 n += m.run(10_000_000);
                 if m.trap.is_some() {
                     panic!("trap: {:?}", m.trap);
+                }
+                if m.halted {
+                    break; // デッドハルト (run()は0命令で返り続ける)
                 }
                 let s = String::from_utf8_lossy(&m.devices.uart.tx[before..]);
                 if s.contains("bin") && s.contains("dev") {
