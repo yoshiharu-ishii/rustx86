@@ -185,9 +185,15 @@ export class Machine {
       this.executed = 0;
       this.lastMeasure = now;
     }
-    for (let done = 0; done < budget; done += CHUNK) {
+    for (let done = 0; done < budget; ) {
       try {
-        this.emu.run_slice(Math.min(CHUNK, budget - done));
+        // **実際に進んだ量で数える。** run_slice は送信フレームが出ると
+        // 予算を使い切る前に戻る (遅延を削るための早出し) ので、
+        // 頼んだ量で足すと進んでいない分まで勘定してしまう。
+        // 0 が返るのは「起こせない眠り」— そこで回り続けないよう抜ける
+        const ran = this.emu.run_slice(Math.min(CHUNK, budget - done));
+        if (ran <= 0) break;
+        done += ran;
         // デバッガが止めたら、そこで走るのをやめる。**画面は描き直す** —
         // 止まった瞬間の絵を見たいので (パニックのときと違い、続きがある)
         if (this.emu.is_stopped()) {
