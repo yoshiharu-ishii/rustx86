@@ -41,6 +41,10 @@ export function mountLinux(canvas, opts = {}) {
   /** 実際に読んだイメージの名前。**画面の「起動元」に出す** —
       前の機械のラベル (fd2880.img) が残ると、別物を見ていることになる */
   let imageName = '';
+  // **表示は実物に合わせる。** つまみ (?initrd= / ?ram=) を足したのに
+  // ラベルが固定だと、画面が嘘をつく
+  let usedInitrd = 'initramfs-mini';
+  let usedRam = 128;
   let booted = false;
   let paused = false;
   /** イメージ取得〜ワーカー起動の間。二度押しと再入を防ぐ */
@@ -154,6 +158,15 @@ export function mountLinux(canvas, opts = {}) {
     const snapshot = given; // ファイルからの復元 (Tier 3g) だけがここを通る
     let kernel = null;
     let initrd = null;
+    // **initramfs は差し替えられる。** `?initrd=initramfs-gcc` のように名前で指す
+    // (置き場は web/ の隣、カーネルと同じ)。gccを焼いた大きいinitramfsを試すときに使う。
+    // `?ram=512` で機械のRAMも増やせる — 展開した中身がそのままtmpfsに載るので、
+    // 大きいinitramfsは相応のRAMが要る (77MBの中身で512MB使った)
+    const q = new URLSearchParams(location.search);
+    const initrdName = q.get('initrd') || 'initramfs-mini';
+    const ramMb = Math.max(16, Math.min(2048, Number(q.get('ram')) || 128));
+    usedInitrd = initrdName;
+    usedRam = ramMb;
 
     if (!snapshot && givenKernel) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
@@ -162,7 +175,7 @@ export function mountLinux(canvas, opts = {}) {
       imageName = kernelName || 'カーネル';
       status(`${imageName} を起動します`);
       try {
-        initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+        initrd = await fetchWithProgress(`./${initrdName}`, initrdName);
       } catch {
         initrd = null;
       }
@@ -187,7 +200,7 @@ export function mountLinux(canvas, opts = {}) {
         }
         // initramfs は無くてもよい (無ければルートFS無しで止まる)
         try {
-          initrd = await fetchWithProgress('./initramfs-mini', 'initramfs');
+          initrd = await fetchWithProgress(`./${initrdName}`, initrdName);
         } catch {
           initrd = null;
         }
@@ -234,7 +247,7 @@ export function mountLinux(canvas, opts = {}) {
                 kernel: kernel.buffer,
                 initrd: initrd?.buffer,
                 cmdline: 'console=ttyS0',
-                ramMb: 128,
+                ramMb,
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
@@ -363,6 +376,14 @@ export function mountLinux(canvas, opts = {}) {
       if (worker && booted) worker.postMessage({ type: 'net-rx', frames: [frame.buffer] }, [frame.buffer]);
     },
     /** 実際に読んだイメージの名前 (まだ読んでいなければ空) */
+    /** 実際に使った initramfs の名前 (?initrd= で差し替わる) */
+    get initrdName() {
+      return usedInitrd;
+    },
+    /** 実際に渡したRAM (MB。?ram= で変わる) */
+    get ramMb() {
+      return usedRam;
+    },
     get imageName() {
       return imageName;
     },

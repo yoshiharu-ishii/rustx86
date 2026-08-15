@@ -156,6 +156,22 @@ python3 web/serve.py 8001
 # http://localhost:8001/ を開き、左からマシンを選ぶ
 ```
 
+URLのつまみ (Linuxの機械):
+
+| | 何が変わるか |
+|---|---|
+| `?kernel=vmlinux` | 自己解凍ステブを飛ばす近道 (計測・経路比較用) |
+| `?initrd=<名前>` | initramfs を差し替える (`web/` の隣に置いた物を名前で指す) |
+| `?ram=<MB>` | 機械のRAM (既定128MB、16〜2048) |
+| `?net=off` / `?net=<wsのURL>` | NICを挿さない / 指定のSLiRP backendへ繋ぐ |
+
+**大きい initramfs には相応のRAMが要る** — 展開した中身がそのまま tmpfs に載るので、
+例えば gcc を焼いた 35MB のイメージ (展開77MB) は 512MB で回した:
+
+```
+http://localhost:8001/?initrd=initramfs-gcc&ram=512
+```
+
 - **`tools/build/build-web.sh`** は wasm-pack の包み紙。キャッシュ対策は
   `serve.py` の `no-store` が全部引き受けるので、**かつてあった `?v=番号` は
   廃止した** — 手で番号を上げる方式は、上げ忘れ・片方だけ上げるという
