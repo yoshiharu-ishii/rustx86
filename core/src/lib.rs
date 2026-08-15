@@ -1,5 +1,6 @@
 pub mod bios;
 pub mod boot;
+pub mod bus;
 pub mod cp437;
 pub mod cpu;
 pub mod debug;
@@ -11,7 +12,6 @@ pub mod snapshot;
 // 移動前のパス (rustx86_core::bzimage 等) を保つ再エクスポート。
 // テスト・wasm・cosim の参照はこれで壊れない
 pub use boot::{bzimage, elf};
-pub use mem::bus;
 
 pub use bios::BIOS_SEG;
 pub use bus::{decode_io, decode_mem, Devices, IoTarget, MemRegion};
@@ -110,15 +110,6 @@ pub const INSTRUCTIONS_PER_TICK: u32 = 64;
 /// 1命令 ≒ 10ns → 64命令 ≒ 640ns。PITの入力は 1.193182 MHz (≒838ns周期) なので、
 /// 64命令あたり 1クロックに近い。実時間に大きくは外れない
 pub const PIT_CLOCKS_PER_TICK: u32 = 1;
-
-/// IRQ0 (PIT) の割り込み線
-pub const IRQ_TIMER: u8 = 0;
-/// IRQ1 (キーボード) の割り込み線
-pub const IRQ_KEYBOARD: u8 = 1;
-/// IRQ4 (COM1) の割り込み線
-pub const IRQ_COM1: u8 = 4;
-/// NE2000の定番IRQ。DOSのパケットドライバの既定値に合わせる
-pub const IRQ_NET: u8 = 3;
 
 /// マシン全体。メモリとBIOS HLE (高位エミュレーション) を持つ。
 /// 本物のBIOSは実装せず、INT命令をフックして最小限のサービスだけ提供する。
@@ -335,8 +326,8 @@ impl Machine {
                 let mut d = Devices::new();
                 // **PCIは世代で決まる。** 32bit機にだけホストブリッジを挿す
                 if profile.has_pci {
-                    let mut host = dev::PciHost::new();
-                    host.plug(0, dev::pci::host_bridge());
+                    let mut host = bus::pci::PciHost::new();
+                    host.plug(0, bus::pci::host_bridge());
                     d.pci = Some(host);
                 }
                 d
@@ -468,13 +459,13 @@ impl Machine {
     /// まとめて渡す。クロックはまとめても1回ずつでも同じ数だけ進む
     fn tick_devices(&mut self, ticks: u32) {
         if self.devices.pit.tick(ticks * PIT_CLOCKS_PER_TICK) > 0 {
-            self.devices.pic[0].raise(IRQ_TIMER);
+            self.devices.pic[0].raise(bus::isa::IRQ_TIMER);
         }
         // 時計もPITと同じクロックで進める。**ここで進めるのが要点**で、
         // INT 08h の中で進めるとOSが自前のハンドラを入れた瞬間に時計が止まる
         self.devices.cmos.tick(ticks * PIT_CLOCKS_PER_TICK);
         if self.devices.uart.irq_pending {
-            self.devices.pic[0].raise(IRQ_COM1);
+            self.devices.pic[0].raise(bus::isa::IRQ_COM1);
         }
         if let Some(net) = &mut self.devices.net {
             // 線で待っているフレームを、リングの空きぶんだけ入れる。
@@ -483,12 +474,12 @@ impl Machine {
             // 直後のこの刻みで詰め直せば、束のまま届いても取りこぼさない
             net.drain_rx();
             if net.irq_pending() {
-                self.devices.pic[0].raise(IRQ_NET);
+                self.devices.pic[0].raise(bus::isa::IRQ_NET);
             }
         }
         // キーボードは割り込み駆動。**1バイトにつき1回だけ**挙手する
         if self.devices.keyboard.take_irq() {
-            self.devices.pic[0].raise(IRQ_KEYBOARD);
+            self.devices.pic[0].raise(bus::isa::IRQ_KEYBOARD);
         }
         // **ここでは acknowledge しない。** ベクタ番号が決まるのは CPU が
         // INTA で受ける瞬間で、それより早くベクタを固定すると、OSがPICを
@@ -677,7 +668,7 @@ impl Machine {
             Some(pci) => {
                 pci.plug(
                     dev::card::rtl8029::NET_SLOT,
-                    dev::card::rtl8029::pci_function(IRQ_NET),
+                    dev::card::rtl8029::pci_function(bus::isa::IRQ_NET),
                 );
                 dev::card::rtl8029::build(mac)
             }
