@@ -151,6 +151,26 @@ impl Ne2000 {
         self.mem[15] = 0x57;
     }
 
+    /// 詰まりを覗く窓 — 線の待ち枚数・ISR/IMR・CURR/BNRY・受信機の状態。
+    ///
+    /// 受信が止まったとき、原因は必ずこの数字の組み合わせに出る
+    /// (「リング満杯 + ISR=0 + 線に行列」= 誰も割り込みを上げていない、など)。
+    /// 外から見えないと当てずっぽうになるので、道具として残してある
+    /// (tools/webtest/netbench.mjs の NICDBG=1 が使う)
+    pub fn debug_state(&self) -> String {
+        format!(
+            "q={} isr={:02x} imr={:02x} curr={:02x} bnry={:02x} pstart={:02x} pstop={:02x} run={}",
+            self.rx_queue.len(),
+            self.isr,
+            self.imr,
+            self.curr,
+            self.bnry,
+            self.pstart,
+            self.pstop,
+            self.running
+        )
+    }
+
     /// 割り込みを上げるべきか。ISRとIMRの重なりがある間は上げ続ける
     /// (レベルトリガの流儀。tick_devices が毎回見るのでこれで足りる)
     pub fn irq_pending(&self) -> bool {
@@ -328,6 +348,18 @@ impl Ne2000 {
         while let Some(frame) = self.rx_queue.pop_front() {
             if !self.ring_put(&frame) {
                 self.rx_queue.push_front(frame);
+                // **リングが満杯 = 読まれていないフレームがリングに居る。**
+                // その合図 (PRX) を立て直す。下ろすのはドライバの仕事で、
+                // 下ろした後もまだ残っていれば次のtickでまた立つ。
+                //
+                // 立て直さないと機械が止まる (実際に止まった): ドライバは
+                // 1回の割り込みで読む枚数に上限を持っていて、上限で降りると
+                // リングに未読が残ったままISRを下ろす。そこへ新しいフレームが
+                // 入れない (満杯) と、二度と割り込みが上がらない —
+                // リングは満杯・線には行列・ゲストはHLTで永眠、という三すくみ
+                if self.running {
+                    self.isr |= ISR_PRX;
+                }
                 break;
             }
         }

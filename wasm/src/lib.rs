@@ -193,6 +193,14 @@ impl Emulator {
         }
     }
 
+    /// NICの中の様子 (詰まりの診断用。netbench.mjs の NICDBG=1)
+    pub fn net_debug(&self) -> String {
+        match &self.m.devices.net {
+            Some(n) => n.debug_state(),
+            None => "no-nic".into(),
+        }
+    }
+
     /// ゲストが送信したフレームを1枚取り出す (空なら長さ0)。
     /// serial_out と同じ「読むと消える」作法。JSはスライスごとに空になるまで呼ぶ
     pub fn net_take_frame(&mut self) -> Vec<u8> {
