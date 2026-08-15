@@ -9,6 +9,44 @@ pub mod elf;
 
 use crate::{cpu, Disk, Machine};
 
+/// initramfs を積んで起動するのに要るRAM量 (バイト)。
+///
+/// **「置ければ足りる」ではない。** カーネルは initramfs を tmpfs へ展開する
+/// ので、圧縮イメージと展開後の中身がしばらく**同時にRAMに載る**。足りないと
+/// カーネルは途中で展開をやめ、**それでもシェルまで来てしまう** — 「gccはある
+/// のに cc1 が無い」半端なルートFSで (実際に踏んだ。ログにも何も出ない)。
+///
+/// gzip なら展開後の大きさは末尾4バイト (ISIZE) にそのまま書いてある。
+/// 残りの 68MiB はカーネル本体・ページテーブル・スラブの取り分で、
+/// **実測2点が値を挟み込んで決まった** (単位はMiB):
+///
+/// | イメージ | 圧縮 | 展開後 | 実測 | 効く不等式 |
+/// |---|---|---|---|---|
+/// | initramfs-gcc | 35.2 | 91.2 | 192で欠け、256で完全 | K > 65.6 |
+/// | initramfs-lts | 19.8 | 38.5 | 128で完全 | K ≤ 69.7 |
+///
+/// 192MBのgccイメージで欠けたのは `collect2`・`ld`・`liblto_plugin.so`・
+/// udhcpcのスクリプトだった — **`gcc -c` は通るのにリンクだけ落ち、DHCPが
+/// 黙って効かない**。挟まれた幅が狭いのは、この帯を実測が本当に決めている印。
+pub fn initrd_ram_needed(initrd: &[u8]) -> u64 {
+    const KERNEL_WORK: u64 = 68 << 20;
+    let unpacked = gzip_isize(initrd).unwrap_or(initrd.len() as u64);
+    initrd.len() as u64 + unpacked + KERNEL_WORK
+}
+
+/// gzip の末尾4バイト = 展開後の大きさ (mod 2^32)。gzipでなければ None。
+///
+/// 連結gzip (initramfs-games / -gcc のような継ぎ足し) では**最後の塊の分**しか
+/// 名乗らない。継ぎ足す側が本体なので実用上は足りるが、少なく出る向きの誤差は
+/// ここにあると承知しておく
+fn gzip_isize(data: &[u8]) -> Option<u64> {
+    if data.len() < 18 || data[0] != 0x1F || data[1] != 0x8B {
+        return None; // 非圧縮のcpioや他方式 (xz/zstd) — 大きさは名乗っていない
+    }
+    let n = data.len();
+    Some(u32::from_le_bytes([data[n - 4], data[n - 3], data[n - 2], data[n - 1]]) as u64)
+}
+
 impl Machine {
     /// ディスクイメージを入れ、その先頭セクタからブートする
     pub fn boot_from_disk(&mut self, image: Vec<u8>) -> Result<(), String> {
@@ -174,9 +212,20 @@ impl Machine {
             Some(data) => {
                 let size = data.len() as u32;
                 let top = self.mem.len() as u32;
-                if size + 0x0100_0000 > top {
+                // 置き場所ではなく**展開しきれるか**で判定する。カーネルは
+                // 足りなくても墜ちず、"rootfs image is not initramfs
+                // (write error); looks like an initrd" と言って中身が欠けた
+                // まま進む — 起動は成功して見えるので、ここで止めるしかない
+                let need = initrd_ram_needed(data);
+                if need > top as u64 {
+                    let mb = |b: u64| b as f64 / (1 << 20) as f64;
                     return Err(format!(
-                        "initrd ({size} バイト) がRAM ({top} バイト) に収まらない"
+                        "initrd を展開しきれない — 圧縮 {:.1}MB + 展開後 {:.1}MB \
+                         + カーネル作業域 64MB = {:.0}MB 必要 (いまのRAMは {}MB)",
+                        mb(size as u64),
+                        mb(need - size as u64 - (64 << 20)),
+                        mb(need).ceil(),
+                        top >> 20,
                     ));
                 }
                 let addr = (top - size - 0x0010_0000) & !0xFFF;
