@@ -13,6 +13,8 @@
 use rustx86_core::Machine;
 use wasm_bindgen::prelude::*;
 
+pub mod jit;
+
 #[wasm_bindgen]
 extern "C" {
     /// パニックの内容をJS側へ渡す口。ページが `globalThis.__rustx86_panic` を
@@ -46,12 +48,21 @@ pub fn install_panic_hook() {
 #[wasm_bindgen]
 pub struct Emulator {
     m: Machine,
+    /// JITランタイム (F1d世代のtry_enter駆動)。Boxで番地固定 —
+    /// enableでcoreのフックと結線する。据え付け待ちジョブの手渡しは
+    /// drain_job/install_block (instantiateはJSにしかできない)
+    jit_rt: Box<jit::JitRt>,
+    pending_job: Option<(u32, u32, u32)>,
 }
 
 impl Emulator {
     /// 全コンストラクタの共通出口
     fn wrap(m: Machine) -> Emulator {
-        Emulator { m }
+        Emulator {
+            m,
+            jit_rt: Box::new(jit::JitRt::new()),
+            pending_job: None,
+        }
     }
 }
 
@@ -257,6 +268,75 @@ impl Emulator {
     /// f64は2^53まで無損失で今回の桁は収まる
     pub fn tsc(&self) -> f64 {
         self.m.cpu.tsc as f64
+    }
+
+    // ---------- JIT (F1d世代 — try_enter駆動のwasmバックエンド) ----------
+
+    /// JITを有効化する。coreのフックに結線し、以後チェーン入口と
+    /// taken分岐の着地で焼けたブロックに任せる (無ければインタプリタ)
+    pub fn jit_enable(&mut self) {
+        unsafe { self.jit_rt.attach(&mut self.m as *mut Machine) };
+        self.m.jit = Some(rustx86_core::jit::JitHook {
+            try_enter: jit::try_enter,
+        });
+    }
+
+    /// JITを無効化する (据え付け済みブロックも捨てる — on/off比較の公平のため)
+    pub fn jit_disable(&mut self) {
+        self.m.jit = None;
+        self.jit_rt.flush();
+        self.pending_job = None;
+    }
+
+    pub fn jit_enabled(&self) -> bool {
+        self.m.jit.is_some()
+    }
+
+    /// 焼き上がってinstantiate待ちのジョブを1件取り出す (バイト列)。
+    /// JS側が WebAssembly.Instance を作り、関数テーブルへ table.set し、
+    /// そのスロット番号で install_block を呼ぶ
+    pub fn drain_job(&mut self) -> Option<js_sys::Uint8Array> {
+        let job = self.jit_rt.take_job()?;
+        let bytes = js_sys::Uint8Array::from(job.bytes.as_slice());
+        self.pending_job = Some((job.pa, job.gen, job.n));
+        Some(bytes)
+    }
+
+    /// JS が table.set したスロット番号を受け取り、直接マップへ据える
+    pub fn install_block(&mut self, slot: u32) {
+        if let Some((pa, gen, n)) = self.pending_job.take() {
+            self.jit_rt.install(pa, gen, n, slot);
+        }
+    }
+
+    /// instantiate に失敗したジョブを捨てる (coreはインタプリタで走り続ける)
+    pub fn discard_job(&mut self) {
+        self.pending_job = None;
+    }
+
+    pub fn jit_installed(&self) -> usize {
+        self.jit_rt.installed
+    }
+
+    /// 焼いた数 (据え付け前も含む — 発火診断用)
+    pub fn jit_baked(&self) -> f64 {
+        self.jit_rt.baked as f64
+    }
+
+    /// JITブロック内で実行された命令数の累計。tsc()に対する割合がカバレッジ
+    pub fn jit_instrs(&self) -> f64 {
+        self.m.jit_instrs as f64
+    }
+
+    pub fn jit_entries(&self) -> f64 {
+        self.m.jit_entries as f64
+    }
+
+    /// core が call_indirect で叩く関数テーブル (`__indirect_function_table`)。
+    /// JS はここへ生成ブロックの export "b" を table.set し、その添字を
+    /// install_block へ渡す — JS境界を介さずブロックが呼ばれる
+    pub fn jit_function_table(&self) -> JsValue {
+        wasm_bindgen::function_table()
     }
 
     /// テキストVRAM (80×25、文字と属性が交互) の先頭ポインタ。

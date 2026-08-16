@@ -31,6 +31,12 @@ if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown
 fi
 
 echo "==> wasm を作る"
+# JIT (F1d wasm、call_indirect): 間接呼び出しテーブルを growable にする。
+# 生成ブロックのwasm関数を JS が table.grow+set でここへ据え、core (Rust) は
+# 関数ポインタ経由の call_indirect で JS境界なしに呼ぶ (ADR-0008以来の作法)。
+# --growable-table が無いと既定は min=max で grow が RangeError になる
+# (2026-08-17 解凍時に再発して思い出した)
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=--growable-table"
 (cd wasm && wasm-pack build --release --target web --out-dir ../web/pkg)
 
 # どのブランチを焼いたかを pkg に刻む (webtest/ab.sh がラベルに使う —
