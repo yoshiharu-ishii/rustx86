@@ -164,7 +164,11 @@ build_linux() {
   fetch "$ALPINE_BASE/vmlinuz-lts" "$IMAGES/vmlinuz-lts"
   fetch "$ALPINE_BASE/initramfs-lts" "$IMAGES/initramfs-lts"
   # System.map (ブート解剖 bootprof 用)。ファイル名に版が入るので一覧から拾う
-  SYSMAP=$(curl -sL --max-time 30 "$ALPINE_BASE/" | grep -o 'System.map-[^"<]*' | head -1)
+  # head -1 が先にパイプを閉じ、まだ書いている側がSIGPIPE (141) を受ける。
+  # pipefailはそれを失敗と数える — GNU grepはバッファで隠れ、箱のbusybox
+  # grepで顕在化した (CIのmainで実際に落ちた)。System.mapは無くても
+  # 起動には困らない解剖用の素材なので、この行だけ失敗を飲む
+  SYSMAP=$(curl -sL --max-time 30 "$ALPINE_BASE/" | grep -o 'System.map-[^"<]*' | head -1 || true)
   [ -n "$SYSMAP" ] && fetch "$ALPINE_BASE/$SYSMAP" "$IMAGES/System.map-lts"
   say "Linux (Alpine lts カーネル + initramfs + System.map) 完了"
 }
