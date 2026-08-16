@@ -313,7 +313,8 @@ impl Machine {
     ///
     /// テキストVRAMは**メモリ空間に居座る装置**なので、素通しで `mem` に書く。
     /// 実機でもビデオカードのRAMがCPUのアドレス空間に窓として現れているだけで、
-    /// 書き込み経路に特別な変換は無い。ここで足しているのは描画側への合図だけ。
+    /// 書き込み経路に特別な変換は無い。ここで足しているのは描画側への合図と、
+    /// 自己書き換えの申告 (note_write) だけ。
     ///
     /// 読み出し ([`read8`](Self::read8)) には一切分岐を入れていない。
     /// メモリアクセスは最も回数の多い経路なので、**書き込み側だけで済む
@@ -343,6 +344,9 @@ impl Machine {
             });
         }
         self.mem[a] = val;
+        // コードを控えたページへの書き込みは写しを無効化 (自己書き換え対策)。
+        // データページなら has_code の1判定で素通り (ADR-0007の許容コスト)
+        self.dcache.note_write(a as u32);
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             self.vram_dirty = true;
         }
@@ -459,6 +463,7 @@ impl Machine {
             return None; // テキストVRAM窓は遅い道 (vram_dirtyの約束)
         }
         self.mem[a..a + 4].copy_from_slice(&val.to_le_bytes());
+        self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる
         Some(())
     }
 
@@ -522,6 +527,7 @@ impl Machine {
             return Some(()); // write8と同じ捨て
         }
         self.mem[a] = v;
+        self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             self.vram_dirty = true;
         }
@@ -549,6 +555,7 @@ impl Machine {
             return None;
         }
         self.mem[a..a + 2].copy_from_slice(&v.to_le_bytes());
+        self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる
         Some(())
     }
 
@@ -591,6 +598,8 @@ impl Machine {
         for i in 0..width as usize {
             self.mem[a + i] = (val >> (i * 8)) as u8;
         }
+        // ページ内に収まる書き込み (呼び手が保証) なので申告は先頭1回でよい
+        self.dcache.note_write(a as u32);
         true
     }
 

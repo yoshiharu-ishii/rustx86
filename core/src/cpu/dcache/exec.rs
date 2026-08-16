@@ -314,6 +314,8 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                         let a = u32::from_le_bytes(m.mem[pa..pa + 4].try_into().unwrap());
                         let v = alu_w(&mut m.cpu, kind, a, b, true);
                         m.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+                        // 直書きも自己書き換え検出の網に入れる (ADR-0020)
+                        m.dcache.note_write(pa as u32);
                     } else {
                         slow_rmw32(m, &mr, kind, b, prev_ip);
                     }
@@ -362,6 +364,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                         let a = m.mem[pa];
                         let v = alu8(&mut m.cpu, kind, a, b);
                         m.mem[pa] = v;
+                        m.dcache.note_write(pa as u32);
                     } else {
                         slow_rmw8(m, &mr, kind, b, prev_ip);
                     }
@@ -419,6 +422,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let a = u32::from_le_bytes(m.mem[pa..pa + 4].try_into().unwrap());
                     let v = alu_w(&mut m.cpu, kind, a, imm, true);
                     m.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+                    m.dcache.note_write(pa as u32);
                 } else {
                     slow_rmw32(m, &mr, kind, imm, prev_ip);
                 }
@@ -444,6 +448,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let a = m.mem[pa];
                     let v = alu8(&mut m.cpu, kind, a, imm);
                     m.mem[pa] = v;
+                    m.dcache.note_write(pa as u32);
                 } else {
                     slow_rmw8(m, &mr, kind, imm, prev_ip);
                 }
