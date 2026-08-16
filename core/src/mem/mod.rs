@@ -151,6 +151,11 @@ impl Machine {
     ///   - 書き込みで R/W=0 のページは、CR0.WP (リング0でも守る) か
     ///     リング3なら保護フォールト。カーネルはこの挙動を起動時に試験し、
     ///     #PFが来ないと「壊れたWP」として起動を拒否する (実際に拒否された)
+    /// TLBヒットの直線路だけを持つ (C11: hot/cold分離)。ミス (表歩き+フィル+
+    /// Aビット) と、書き込みの初回 (Dビット) は #[cold] の別関数へ —
+    /// 全メモリアクセスがここを通るので、インライン展開される機械語を
+    /// ヒット路の大きさに保つ
+    #[inline]
     pub fn translate_for(&self, la: u32, write: bool) -> Result<u32, PageFault> {
         if self.cpu.cr0 & 0x8000_0000 == 0 {
             return Ok(la); // PG off: 線形がそのまま物理
@@ -159,76 +164,96 @@ impl Machine {
         let vpn = la >> 12;
         let slot = (vpn as usize) & (TLB_SLOTS - 1);
         let e = self.tlb[slot].get();
-        // ミス時: 表を歩いて present なら控える。**権限ビットも一緒に控える**が、
-        // 「今この瞬間に許されるか」の判定 (CPL/WP) は下で新しく見る。
-        // pde_addr は A ビットの宛先 (フィル時だけ要る)
-        let (base, writable, user_ok, leaf, dirty, fresh_pde) = if e.tag == vpn {
-            (
-                e.base_flags & !0xFFF,
-                e.base_flags & 1 != 0,
-                e.base_flags & 2 != 0,
-                e.leaf,
-                e.base_flags & 4 != 0,
-                None,
-            )
-        } else {
-            // 不在フォールトのW/Rビットは**このアクセスの向き** — walkは向きを
-            // 知らないので、エラーコードの材料はここで書き足す
-            let w = self.walk_page(la).map_err(|mut f| {
-                f.write = write;
-                f
-            })?;
-            (
-                w.base,
-                w.writable,
-                w.user_ok,
-                w.leaf_addr,
-                false,
-                Some(w.pde_addr),
-            )
-        };
+        if e.tag != vpn {
+            return self.translate_miss(la, write, slot);
+        }
+        let base = e.base_flags & !0xFFF;
         // --- 権限チェック。CPLとWPは引くたびに新しく (sys_accessも) ---
         let user = self.cpu.cpl() == 3 && !self.sys_access.get();
         let wp = self.cpu.cr0 & 0x0001_0000 != 0;
-        if write && !writable && (user || wp) {
+        if write && e.base_flags & 1 == 0 && (user || wp) {
             return Err(PageFault {
                 la,
                 write,
                 present: true,
             });
         }
-        if user && !user_ok {
+        if user && e.base_flags & 2 == 0 {
             return Err(PageFault {
                 la,
                 write,
                 present: true,
             });
         }
-        // --- 検査を通った変換だけが控えと帳簿を書く ---
-        // A/D は実CPUがページ表へ書き戻す2ビット (Linuxはこれで「最近触った/
-        // 汚れた」を知り、test386のPOST 11はこれを検査する)。
-        // 歩く経路は &self なので直接は書けず、queue_ad → 命令境界のflush_ad。
         // dirty=「Dを立てた後か」の控え — 立てた後は書き込みでも表に触らない
-        let set_dirty = write && !dirty;
-        if fresh_pde.is_some() || set_dirty {
-            self.tlb[slot].set(TlbEntry {
-                tag: vpn,
-                base_flags: base
-                    | writable as u32
-                    | ((user_ok as u32) << 1)
-                    | (((dirty || write) as u32) << 2),
-                leaf,
+        if write && e.base_flags & 4 == 0 {
+            return self.translate_set_dirty(la, slot, e);
+        }
+        Ok(base | (la & 0xFFF))
+    }
+
+    /// TLBミス側: 表を歩いて権限を裁き、通った変換だけを控えて
+    /// Aビット (と初回書き込みならDビット) を帳簿に積む。
+    /// A/D は実CPUがページ表へ書き戻す2ビット (Linuxはこれで「最近触った/
+    /// 汚れた」を知り、test386のPOST 11はこれを検査する)。
+    /// 歩く経路は &self なので直接は書けず、queue_ad → 命令境界のflush_ad
+    #[cold]
+    #[inline(never)]
+    fn translate_miss(&self, la: u32, write: bool, slot: usize) -> Result<u32, PageFault> {
+        // 不在フォールトのW/Rビットは**このアクセスの向き** — walkは向きを
+        // 知らないので、エラーコードの材料はここで書き足す
+        let w = self.walk_page(la).map_err(|mut f| {
+            f.write = write;
+            f
+        })?;
+        // 権限チェック (ヒット路と同じ判定を、歩いた値で)
+        let user = self.cpu.cpl() == 3 && !self.sys_access.get();
+        let wp = self.cpu.cr0 & 0x0001_0000 != 0;
+        if write && !w.writable && (user || wp) {
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
             });
         }
-        if let Some(pde) = fresh_pde {
-            self.queue_ad(pde, 0x20);
-            if leaf != pde {
-                self.queue_ad(leaf, 0x20);
-            }
+        if user && !w.user_ok {
+            return Err(PageFault {
+                la,
+                write,
+                present: true,
+            });
         }
-        if set_dirty {
-            self.queue_ad(leaf, 0x40);
+        // 検査を通った変換だけが控えと帳簿を書く
+        self.tlb[slot].set(TlbEntry {
+            tag: la >> 12,
+            base_flags: w.base
+                | w.writable as u32
+                | ((w.user_ok as u32) << 1)
+                | ((write as u32) << 2),
+            leaf: w.leaf_addr,
+        });
+        self.queue_ad(w.pde_addr, 0x20);
+        if w.leaf_addr != w.pde_addr {
+            self.queue_ad(w.leaf_addr, 0x20);
         }
+        if write {
+            self.queue_ad(w.leaf_addr, 0x40);
+        }
+        Ok(w.base | (la & 0xFFF))
+    }
+
+    /// ヒットしたが D 未設定のページへの書き込み初回: 控えに dirty を立て、
+    /// 表へのDビット書き戻しを帳簿に積む (ページごとに一度きりの道)
+    #[cold]
+    #[inline(never)]
+    fn translate_set_dirty(&self, la: u32, slot: usize, e: TlbEntry) -> Result<u32, PageFault> {
+        let base = e.base_flags & !0xFFF;
+        self.tlb[slot].set(TlbEntry {
+            tag: la >> 12,
+            base_flags: e.base_flags | 4,
+            leaf: e.leaf,
+        });
+        self.queue_ad(e.leaf, 0x40);
         Ok(base | (la & 0xFFF))
     }
 
