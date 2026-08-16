@@ -65,6 +65,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [0016](adr/0016-platform-cfg.md) | プラットフォーム分岐の作法 — 同じコードでターゲット別の速さを取る |
 | [0017](adr/0017-network-isa-first.md) | ネットワークの境界とバス順 — ISA NE2000 から始める |
 | [0018](adr/0018-devices-chip-card-bus.md) | 装置は「なにか」と「どう見つかるか」で分ける — chip / card と bus |
+| [0019](adr/0019-disk-virtio-blk-first.md) | ディスクは virtio-blk-pci から — 速さはvirtio、互換はATAで後から |
 
 ## 読む順番 (初見の人向けの道)
 
