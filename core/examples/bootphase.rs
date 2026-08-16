@@ -25,9 +25,9 @@ fn main() {
         if m.trap.is_some() {
             panic!("trap: {:?}", m.trap);
         }
-        if m.halted {
-            break; // 起こせない眠り (デッドハルト) — run() は0命令で返り続ける
-        }
+        // 眠りの判定より**先に**シリアルを見る。シェル到達とアイドル入り
+        // (NO_HZがタイマを止めてHLT) が同じ10Mスライスに収まると、
+        // 先にbreakしてはバナーを見逃す (2026-08-16のinitramfs更新で顕在化)
         if first_serial.is_none() && !m.devices.uart.tx.is_empty() {
             first_serial = Some((n, t0.elapsed().as_secs_f32()));
         }
@@ -92,6 +92,9 @@ fn main() {
                 }
             }
             return;
+        }
+        if m.halted {
+            break; // 起こせない眠り (デッドハルト) — run() は0命令で返り続ける
         }
     }
     panic!("シェルに届かなかった");
