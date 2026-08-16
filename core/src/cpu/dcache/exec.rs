@@ -8,7 +8,7 @@ use super::super::alu::{alu8, alu_w, condition, inc_dec_w};
 use super::super::operand::{pop_w, push_w};
 use super::super::shift::shift_rot;
 use super::super::{sp_write, string, Decoder, AX, BP, CF, OF, SP, SS};
-use super::{MemRef, Rm, Uop};
+use super::{MemRef, Rm, RmView, Uop};
 use crate::Machine;
 
 /// このuopがメモリ (線形アドレス) に触り得るか。
@@ -32,7 +32,7 @@ pub(super) fn is_control(u: &Uop) -> bool {
 }
 
 pub(super) fn may_touch_memory(u: &Uop) -> bool {
-    let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
+    let mem = |rm: &Rm| matches!(rm.view(), RmView::Mem(_));
     match u {
         // レジスタとフラグしか触らない組 — #PFは起き得ない
         Uop::MovRImm { .. }
@@ -188,9 +188,9 @@ fn slow_pop32(m: &mut Machine, prev_ip: u32) -> u32 {
 #[cold]
 #[inline(never)]
 fn cold_grp3b(m: &mut Machine, kind: u8, rm: Rm, imm: u8) {
-    let a = match rm {
-        Rm::Reg(r) => m.cpu.reg8(r as usize),
-        Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
+    let a = match rm.view() {
+        RmView::Reg(r) => m.cpu.reg8(r as usize),
+        RmView::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
     };
     match kind {
         0 | 1 => {
@@ -208,9 +208,9 @@ fn cold_grp3b(m: &mut Machine, kind: u8, rm: Rm, imm: u8) {
 #[cold]
 #[inline(never)]
 fn cold_grp3w(m: &mut Machine, kind: u8, rm: Rm, imm: u32) {
-    let a = match rm {
-        Rm::Reg(r) => m.cpu.regs[r as usize],
-        Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
+    let a = match rm.view() {
+        RmView::Reg(r) => m.cpu.regs[r as usize],
+        RmView::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
     };
     match kind {
         0 | 1 => {
@@ -236,7 +236,7 @@ fn cold_grp5(m: &mut Machine, kind: u8, rm: Rm) {
             match addr {
                 Some(a2) => m.write32(a2, r),
                 None => {
-                    if let Rm::Reg(rr) = rm {
+                    if let RmView::Reg(rr) = rm.view() {
                         m.cpu.regs[rr as usize] = r;
                     }
                 }
@@ -362,9 +362,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
     match u {
         Uop::MovRmR { rm, reg } => {
             let v = m.cpu.regs[reg as usize];
-            match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize] = v,
-                Rm::Mem(mr) => {
+            match rm.view() {
+                RmView::Reg(r) => m.cpu.regs[r as usize] = v,
+                RmView::Mem(mr) => {
                     // translate-first (F1c-d5): 成功が確定するまで状態を変えない
                     // ので、成功路はguard控えが要らない。ダメなら控えて従来経路
                     let off = off_of(m, &mr);
@@ -377,9 +377,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             }
         }
         Uop::MovRRm { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => {
+            let v = match rm.view() {
+                RmView::Reg(r) => m.cpu.regs[r as usize],
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
@@ -391,9 +391,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::Mov8RmR { rm, reg } => {
             let v = m.cpu.reg8(reg as usize);
-            match rm {
-                Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
-                Rm::Mem(mr) => {
+            match rm.view() {
+                RmView::Reg(r) => m.cpu.set_reg8(r as usize, v),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     if m.fast_write8(mr.seg as usize, off, v).is_none() {
                         slow_write8(m, &mr, v, prev_ip);
@@ -403,9 +403,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::Mov16RmR { rm, reg } => {
             let v = m.cpu.reg16(reg as usize);
-            match rm {
-                Rm::Reg(r) => m.cpu.set_reg16(r as usize, v),
-                Rm::Mem(mr) => {
+            match rm.view() {
+                RmView::Reg(r) => m.cpu.set_reg16(r as usize, v),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     if m.fast_write16(mr.seg as usize, off, v).is_none() {
                         slow_write16(m, &mr, v, prev_ip);
@@ -414,9 +414,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             }
         }
         Uop::Mov16RRm { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.reg16(r as usize),
-                Rm::Mem(mr) => {
+            let v = match rm.view() {
+                RmView::Reg(r) => m.cpu.reg16(r as usize),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read16(mr.seg as usize, off) {
                         Some(v) => v,
@@ -427,9 +427,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             m.cpu.set_reg16(reg as usize, v);
         }
         Uop::Mov8RRm { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => {
+            let v = match rm.view() {
+                RmView::Reg(r) => m.cpu.reg8(r as usize),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read8(mr.seg as usize, off) {
                         Some(v) => v,
@@ -442,15 +442,15 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::MovRImm { reg, imm } => m.cpu.regs[reg as usize] = imm,
         Uop::AluRmR { kind, rm, reg } => {
             let b = m.cpu.regs[reg as usize];
-            match rm {
-                Rm::Reg(r) => {
+            match rm.view() {
+                RmView::Reg(r) => {
                     let a = m.cpu.regs[r as usize];
                     let v = alu_w(&mut m.cpu, kind, a, b, true);
                     if kind != 7 {
                         m.cpu.regs[r as usize] = v;
                     }
                 }
-                Rm::Mem(mr) => {
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     if kind == 7 {
                         let a = match m.fast_read32(mr.seg as usize, off) {
@@ -472,9 +472,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::AluRRm { kind, reg, rm } => {
             let a = m.cpu.regs[reg as usize];
-            let b = match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => {
+            let b = match rm.view() {
+                RmView::Reg(r) => m.cpu.regs[r as usize],
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
@@ -489,15 +489,15 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::Alu8RmR { kind, rm, reg } => {
             let b = m.cpu.reg8(reg as usize);
-            match rm {
-                Rm::Reg(r) => {
+            match rm.view() {
+                RmView::Reg(r) => {
                     let a = m.cpu.reg8(r as usize);
                     let v = alu8(&mut m.cpu, kind, a, b);
                     if kind != 7 {
                         m.cpu.set_reg8(r as usize, v);
                     }
                 }
-                Rm::Mem(mr) => {
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     if kind == 7 {
                         let a = match m.fast_read8(mr.seg as usize, off) {
@@ -518,9 +518,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::Alu8RRm { kind, reg, rm } => {
             let a = m.cpu.reg8(reg as usize);
-            let b = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => {
+            let b = match rm.view() {
+                RmView::Reg(r) => m.cpu.reg8(r as usize),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read8(mr.seg as usize, off) {
                         Some(v) => v,
@@ -547,15 +547,15 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 m.cpu.set_reg8(0, v);
             }
         }
-        Uop::Grp1RmImm { kind, rm, imm } => match rm {
-            Rm::Reg(r) => {
+        Uop::Grp1RmImm { kind, rm, imm } => match rm.view() {
+            RmView::Reg(r) => {
                 let a = m.cpu.regs[r as usize];
                 let v = alu_w(&mut m.cpu, kind, a, imm, true);
                 if kind != 7 {
                     m.cpu.regs[r as usize] = v;
                 }
             }
-            Rm::Mem(mr) => {
+            RmView::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if kind == 7 {
                     let a = match m.fast_read32(mr.seg as usize, off) {
@@ -573,15 +573,15 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 }
             }
         },
-        Uop::Grp18RmImm { kind, rm, imm } => match rm {
-            Rm::Reg(r) => {
+        Uop::Grp18RmImm { kind, rm, imm } => match rm.view() {
+            RmView::Reg(r) => {
                 let a = m.cpu.reg8(r as usize);
                 let v = alu8(&mut m.cpu, kind, a, imm);
                 if kind != 7 {
                     m.cpu.set_reg8(r as usize, v);
                 }
             }
-            Rm::Mem(mr) => {
+            RmView::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if kind == 7 {
                     let a = match m.fast_read8(mr.seg as usize, off) {
@@ -600,9 +600,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             }
         },
         Uop::TestRmR { rm, reg } => {
-            let a = match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => {
+            let a = match rm.view() {
+                RmView::Reg(r) => m.cpu.regs[r as usize],
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
@@ -614,9 +614,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             alu_w(&mut m.cpu, 4, a, b, true);
         }
         Uop::Test8RmR { rm, reg } => {
-            let a = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => {
+            let a = match rm.view() {
+                RmView::Reg(r) => m.cpu.reg8(r as usize),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read8(mr.seg as usize, off) {
                         Some(v) => v,
@@ -674,9 +674,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             shift_exec(m, kind, rm, count);
         }
         Uop::MovzxB { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => {
+            let v = match rm.view() {
+                RmView::Reg(r) => m.cpu.reg8(r as usize),
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read8(mr.seg as usize, off) {
                         Some(v) => v,
@@ -695,18 +695,18 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             let a = m.cpu.regs[reg as usize];
             m.cpu.regs[reg as usize] = inc_dec_w(&mut m.cpu, a, true, true);
         }
-        Uop::MovRmImm { rm, imm } => match rm {
-            Rm::Reg(r) => m.cpu.regs[r as usize] = imm,
-            Rm::Mem(mr) => {
+        Uop::MovRmImm { rm, imm } => match rm.view() {
+            RmView::Reg(r) => m.cpu.regs[r as usize] = imm,
+            RmView::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if m.fast_write32(mr.seg as usize, off, imm).is_none() {
                     slow_write32(m, &mr, imm, prev_ip);
                 }
             }
         },
-        Uop::MovRm8Imm { rm, imm } => match rm {
-            Rm::Reg(r) => m.cpu.set_reg8(r as usize, imm),
-            Rm::Mem(mr) => {
+        Uop::MovRm8Imm { rm, imm } => match rm.view() {
+            RmView::Reg(r) => m.cpu.set_reg8(r as usize, imm),
+            RmView::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if m.fast_write8(mr.seg as usize, off, imm).is_none() {
                     slow_write8(m, &mr, imm, prev_ip);
@@ -747,9 +747,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             write_rm8(m, rm, v);
         }
         Uop::MovzxW { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize] as u16,
-                Rm::Mem(mr) => {
+            let v = match rm.view() {
+                RmView::Reg(r) => m.cpu.regs[r as usize] as u16,
+                RmView::Mem(mr) => {
                     let off = off_of(m, &mr);
                     match m.fast_read16(mr.seg as usize, off) {
                         Some(v) => v,
@@ -767,9 +767,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
 /// r/m32 の読み。メモリなら番地も返す (RMWで再変換しないため — 検査も書き込みで受ける)
 #[inline]
 fn read_rm32_addr(m: &Machine, rm: Rm) -> (u32, Option<u32>) {
-    match rm {
-        Rm::Reg(r) => (m.cpu.regs[r as usize], None),
-        Rm::Mem(mr) => {
+    match rm.view() {
+        RmView::Reg(r) => (m.cpu.regs[r as usize], None),
+        RmView::Mem(mr) => {
             let a = addr_of(m, &mr, 4, true);
             (m.read32(a), Some(a))
         }
@@ -778,17 +778,17 @@ fn read_rm32_addr(m: &Machine, rm: Rm) -> (u32, Option<u32>) {
 
 #[inline]
 fn read_rm32(m: &Machine, rm: Rm) -> u32 {
-    match rm {
-        Rm::Reg(r) => m.cpu.regs[r as usize],
-        Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
+    match rm.view() {
+        RmView::Reg(r) => m.cpu.regs[r as usize],
+        RmView::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
     }
 }
 
 #[inline]
 fn write_rm8(m: &mut Machine, rm: Rm, v: u8) {
-    match rm {
-        Rm::Reg(r) => m.cpu.set_reg8(r as usize, v),
-        Rm::Mem(mr) => {
+    match rm.view() {
+        RmView::Reg(r) => m.cpu.set_reg8(r as usize, v),
+        RmView::Mem(mr) => {
             let a = addr_of(m, &mr, 1, true);
             m.write8(a, v);
         }
@@ -797,9 +797,9 @@ fn write_rm8(m: &mut Machine, rm: Rm, v: u8) {
 
 #[inline]
 fn write_rm32(m: &mut Machine, rm: Rm, v: u32) {
-    match rm {
-        Rm::Reg(r) => m.cpu.regs[r as usize] = v,
-        Rm::Mem(mr) => {
+    match rm.view() {
+        RmView::Reg(r) => m.cpu.regs[r as usize] = v,
+        RmView::Mem(mr) => {
             let a = addr_of(m, &mr, 4, true);
             m.write32(a, v);
         }
@@ -808,13 +808,13 @@ fn write_rm32(m: &mut Machine, rm: Rm, v: u32) {
 
 /// シフトの共通部。従来経路 (grp2 のw形) と同じく**結果は常に書き戻す**
 fn shift_exec(m: &mut Machine, kind: u8, rm: Rm, count: u8) {
-    match rm {
-        Rm::Reg(r) => {
+    match rm.view() {
+        RmView::Reg(r) => {
             let a = m.cpu.regs[r as usize];
             let v = shift_rot(&mut m.cpu, kind, a, count, 32);
             m.cpu.regs[r as usize] = v;
         }
-        Rm::Mem(mr) => {
+        RmView::Mem(mr) => {
             let addr = addr_of(m, &mr, 4, true);
             let a = m.read32(addr);
             let v = shift_rot(&mut m.cpu, kind, a, count, 32);
