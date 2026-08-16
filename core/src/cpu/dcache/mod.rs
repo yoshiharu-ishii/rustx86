@@ -34,6 +34,7 @@ use crate::Machine;
 // B3 (ペア融合) や B4 (ブロック連結) が来てもここに部屋を足すだけで済む
 mod decode;
 mod exec;
+pub mod jit;
 
 /// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さとの
 /// 折り合い。**表全体は 128K × Entry 32B = 4MiB** (L2の1/3。旧記述の
@@ -332,6 +333,11 @@ impl DecodeCache {
         }
     }
 
+    /// ページの現世代 (JITの頭照合用)。RAM外は0 (焼かれないので照合は常に落ちる)
+    pub(crate) fn page_gen_of(&self, pa: u32) -> u32 {
+        self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
+    }
+
     /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める。
     /// ビットが立っていない (= コード無しページ) なら分岐1つで抜ける —
     /// ここが全ストアの通り道なので、この形より重くしない
@@ -567,6 +573,56 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
+    // ---- JIT入口 (F1d-a) — チェーン入口でだけランタイムに問い合わせる ----
+    //
+    // F1cの「Entryにスロットを畳む」受け口は+8B/Entryの税だった (削除で-22%)
+    // ので、毎命令のホットループには何も足さない。Noneなら分岐1つで死ぬ。
+    // 予算 = min(チェーン残り+1, tick_countdown) — **ブロック内でtickが
+    // 起きない**ことの保証で、割り込みの受付位置は毎命令実行と同一に保たれる。
+    // 清算の契約 (F1aからの写し): 先頭命令は外側が前払い済みなので n-1 を払う。
+    // 着地の時計はここでは払わない (payしてからreturnすると外側と二重払いになり、
+    // tscが実行列より先行する — F1b時代にprintk時刻のµsずれで発覚した過払い)
+    if let Some(h) = m.jit {
+        if !m.cpu.flag(super::TF) {
+            loop {
+                if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+                    break;
+                }
+                if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+                    break; // IRQ保留中はインタプリタが1命令粒度で受ける
+                }
+                let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
+                let n = (h.try_enter)(pa, m.dcache.page_gen_of(pa), budget);
+                if n == 0 {
+                    break;
+                }
+                let n64 = n as u64;
+                m.jit_instrs = m.jit_instrs.wrapping_add(n64);
+                m.jit_entries += 1;
+                m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
+                m.tick_countdown -= n - 1;
+                extra -= n64 - 1;
+                if extra == 0 {
+                    return; // チェーンの出し切り: 次の時計は外側が払う
+                }
+                // ブロック終端 (分岐/直線) の着地へ。ページを跨いだら外へ
+                let new_lin = cs_base.wrapping_add(m.cpu.ip);
+                if new_lin >> 12 != lin >> 12 {
+                    return;
+                }
+                pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+                lin = new_lin;
+                // 続けて実行する: 次の1命令ぶんを前払い (インタプリタと同じ順序)
+                extra -= 1;
+                m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+                m.tick_countdown -= 1;
+                if m.tick_countdown == 0 {
+                    m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                    m.tick_devices(1);
+                }
+            }
+        }
+    }
     loop {
         // 前の命令のページウォークが立てた A/D を表へ反映。
         // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)

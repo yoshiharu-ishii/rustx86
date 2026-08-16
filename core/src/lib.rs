@@ -8,6 +8,8 @@ pub mod dev;
 pub mod disk;
 pub mod mem;
 pub mod snapshot;
+// JITビュー (F1d)。焼き候補ブロックとフィールド実番地表を外の生成器へ渡す口
+pub use cpu::dcache::jit;
 
 // 移動前のパス (rustx86_core::bzimage 等) を保つ再エクスポート。
 // テスト・wasm・cosim の参照はこれで壊れない
@@ -230,6 +232,15 @@ pub struct Machine {
     /// D5 (victim TLB) の生死をこの実測で決める — ミス率が床下なら実装しない
     pub tlb_probes: std::cell::Cell<u64>,
     pub tlb_misses: std::cell::Cell<u64>,
+    /// JITフック (F1d)。**Noneなら退路は完全に従来のホットループ** —
+    /// 入口はチェーン頭の分岐1つで、JIT無効時のコストはゼロ (譲れない不変条件)
+    pub jit: Option<cpu::dcache::jit::JitHook>,
+    /// JITブロックが実行した命令数 (観測用)
+    pub jit_instrs: u64,
+    /// JITブロックに入った回数。jit_instrs / jit_entries = 平均ブロック長
+    pub jit_entries: u64,
+    /// 生成コードへ渡す実行予算 (将来のbudget-aware用。F1d-aでは未使用の写し)
+    pub jit_budget: u32,
     /// census (P4用): 実効アドレスの形の動的分布。opstats時のみ。
     /// index = base有(1) | index有(2) | disp≠0(4) の3bit
     pub ea_counts: [std::cell::Cell<u64>; 8],
@@ -287,7 +298,14 @@ enum FaultSaveKind {
 
 const TLB_INVALID: u32 = 0xFFFF_FFFF;
 /// TLBのスロット数 (直接マップ)。4096で16MB分のホットページを覆える
-const TLB_SLOTS: usize = 4096;
+pub(crate) const TLB_SLOTS: usize = 4096;
+
+impl Machine {
+    /// TLB配列の先頭実番地 (jit::layout用)。TlbEntryはrepr(C)が契約
+    pub(crate) fn tlb_base_addr(&self) -> usize {
+        self.tlb.as_ptr() as usize
+    }
+}
 
 /// ページ変換の失敗。#PF として配送される
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +369,10 @@ impl Machine {
             tlb_probes: std::cell::Cell::new(0),
             tlb_misses: std::cell::Cell::new(0),
             ea_counts: Default::default(),
+            jit: None,
+            jit_instrs: 0,
+            jit_entries: 0,
+            jit_budget: 0,
             console: Vec::new(),
             disk: None,
             first_fault: None,
