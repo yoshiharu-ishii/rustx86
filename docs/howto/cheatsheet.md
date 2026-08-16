@@ -6,22 +6,27 @@
 
 ## イメージを揃える (最初に一度)
 
+`tools/images/sh/` のスクリプトは**Docker道具箱の中で勝手に走る** — ホストに
+cpio/mtools/nasmは要らない (Dockerだけ要る。詳細は [images.md](images.md))。
+
 ```bash
 tools/images/sh/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
 tools/images/sh/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
-tools/images/sh/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
+tools/images/sh/fetch-images.sh test386    # CPU互換テストROM (道具箱のnasmで焼く)
 tools/images/sh/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
-tools/images/sh/make-mini-initramfs.sh     # busyboxの最小initramfsを組む (Docker道具箱の中で走る)
-tools/images/sh/make-gcc-disk.sh           # gcc入りのディスク (squashfs)。焼き方の詳細は howto/images.md
+tools/images/sh/make-mini-initramfs.sh     # busyboxの最小initramfs (既定のルートFS)
+tools/images/sh/make-gcc-disk.sh           # gcc入りのディスク (squashfs)
+tools/images/make-linux-snapshot.sh        # 起動済みスナップショット (これはネイティブ — エミュレータを走らせる係)
 ```
 
 ## 走らせる
 
 | やりたいこと | コマンド |
 |---|---|
-| Linuxを対話起動 (シリアルをターミナルへ) | `cargo run --release --example run -- images/vmlinux` |
-| ディスク付きでLinux起動 (gccが打てる) | `DISK=images/disk-gcc.img cargo run --release --example run -- images/vmlinuz-lts` |
-| ゲストに1コマンド流して検証 (必ず終わる) | `GUEST_CMD='ls; printf "DONE%s\n" MARK' cargo run --release --example guestcmd` |
+| Linuxを対話起動 (シリアルをターミナルへ) | `cargo run --release --example run` (既定: vmlinuz-lts + initramfs-mini。RAMはinitrdから自動) |
+| ディスク付きでLinux起動 (gccが打てる) | `DISK=images/disk-gcc.img cargo run --release --example run` |
+| ゲストに1コマンド流して検証 (必ず終わる) | `GUEST_CMD='ls; printf "DONE%s\n" MARK' cargo run --release --example guestcmd` (KERNEL/INITRD/DISK/RAM_MB/BUDGET_Gで差し替え) |
+| ブラウザでgccを使う | ルートFS「gcc入り (ディスク)」を選んで電源ON ([disk.md](../explanation/disk.md)) |
 | ディスクからOS起動 | `cargo run --release --example boot -- images/fd2880.img` |
 | 起動して1コマンド打って結果を見る | `cargo run --release --example boot -- images/fd2880.img 50000000 root "uname -a"` |
 | gdb風デバッガで追う | `cargo run --release --example dbg -- images/fd14games.img` |
@@ -35,7 +40,7 @@ tools/images/sh/make-gcc-disk.sh           # gcc入りのディスク (squashfs)
 | 命令毎秒 (機械まるごと) | `cargo run --release --example bench -- asm/bench.bin` |
 | 命令毎秒 (CPUだけ、ラッパー無し) | `cargo run --release --example bench_raw -- asm/bench.bin` |
 | 起動のどの区間に命令を使うか | `cargo run --release --example bootphase` |
-| どのカーネル関数で燃えているか (ipサンプル) | `cargo run --release --example bootprof -- images/vmlinux > /tmp/p.txt` |
+| どのカーネル関数で燃えているか (ipサンプル) | `cargo run --release --example bootprof -- images/vmlinux-lts > /tmp/p.txt` |
 | ↑を関数名に解決 | `uv run --with pyelftools python3 tools/perf/bootprof-resolve.py /tmp/p.txt images/System.map-lts` |
 | v86と同一カーネルでMIPS比較 | `node tools/webtest/v86-bench.mjs` |
 
