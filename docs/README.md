@@ -21,6 +21,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [ロードマップ](roadmap.md) | 深さ (Tier 1〜9) × 広さ (箱 B1〜B5) の計画全文。原本はここ (READMEには書かない) |
 | [JITの考え方と仕組み](explanation/jit.md) | インタプリタ/AOT/JITの違い、なぜ速くなるのか、結果論の台帳 |
 | [ネットワーク](explanation/network.md) | ブラウザの中のPCがインターネットに出るまで。灯りの読み方、ゲストごとのNIC |
+| [ディスク](explanation/disk.md) | rootfsがRAMから引っ越すまで。virtio-blkの1往復、squashfs+overlayの乗り物 |
 | [踏んだ罠の型](explanation/pitfalls.md) | 「教科書どおりに書いたのに罠」10型。他所でも踏み得るものだけ |
 
 ### 🔧 手を動かす (how-to — 作業のとき開く)
@@ -29,6 +30,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 |---|---|
 | [チートシート](howto/cheatsheet.md) | よく打つコマンドの早見表 (走らせる/測る/検証する/焼く) |
 | [ビルドの最小構成](howto/build.md) | Rust導入〜wasm-packの中身、wasmの落とし穴 |
+| [イメージの焼き方](howto/images.md) | 道具箱 (Docker) と5つのスクリプト。いつ何を焼き直すか |
 | [perf.md の「起動経路の測り方」](reference/perf.md#起動経路の測り方) | bootphase / headless / ブラウザでの測定コマンド |
 | [ルートREADME](../README.md) | 実行方法の本体 (用意するもの〜デバッガ〜ベンチ) |
 
@@ -63,6 +65,7 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [0016](adr/0016-platform-cfg.md) | プラットフォーム分岐の作法 — 同じコードでターゲット別の速さを取る |
 | [0017](adr/0017-network-isa-first.md) | ネットワークの境界とバス順 — ISA NE2000 から始める |
 | [0018](adr/0018-devices-chip-card-bus.md) | 装置は「なにか」と「どう見つかるか」で分ける — chip / card と bus |
+| [0019](adr/0019-disk-virtio-blk-first.md) | ディスクは virtio-blk-pci から — 速さはvirtio、互換はATAで後から |
 
 ## 読む順番 (初見の人向けの道)
 

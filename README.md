@@ -174,7 +174,7 @@ URLのつまみ (Linuxの機械) — ツールバーの初期値になる:
 | | 何が変わるか |
 |---|---|
 | `?kernel=vmlinux` | 自己解凍ステブを飛ばす近道 (計測・経路比較用) |
-| `?initrd=<名前>` | ルートFSを名前で指す (`web/` の隣に置いた物) |
+| `?initrd=<名前>` | ルートFSを名前で指す (`web/machines.js` の ROOTFS の項。ディスク型 `disk-gcc` も可) |
 | `?ram=<MB>` | 機械のRAM (無指定なら自動、16〜2048) |
 | `?net=off` / `?net=<wsのURL>` | NICを挿さない / 指定のSLiRP backendへ繋ぐ |
 

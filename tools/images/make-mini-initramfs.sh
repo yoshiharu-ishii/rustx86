@@ -6,19 +6,17 @@
 # busybox は Alpine の initramfs-lts から借りる (静的リンク・動作実績あり)。
 set -e
 cd "$(dirname "$0")/../.."
+# **イメージ焼きは道具箱 (Linuxコンテナ) の中でやる。** rootのcpio/mknodが
+# 本物の道具で、ホスト差 (macOS/WSL2/CI) もここで消える。外から呼ばれたら
+# 自分をコンテナの中で呼び直す (中の印は /.dockerenv)
+[ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
 [ -f images/initramfs-lts ] || { echo "images/initramfs-lts が無い"; exit 1; }
 [ -f tools/guest/snake ] || { echo "tools/guest/snake が無い"; exit 1; }
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 # busybox と musl (Alpineのbusyboxは**動的リンク** — ローダとlibcも要る。
 # 最初これを忘れて "No working init found" で1敗した)
-# gzcat は macOS の名前で Linux (CI) には無い。gunzip -c は両方に居る。
-# cpio コマンドの無いホスト (Windows) は自前の読み側 (mkcpio.py --extract) で開く
-if command -v cpio >/dev/null 2>&1; then
-  (cd "$work" && gunzip -c "$OLDPWD/images/initramfs-lts" | cpio -idm --quiet 2>/dev/null)
-else
-  python3 tools/images/mkcpio.py --extract images/initramfs-lts "$work"
-fi
+(cd "$work" && gunzip -c "$OLDPWD/images/initramfs-lts" | cpio -idm --quiet 2>/dev/null)
 [ -f "$work/bin/busybox" ] || { echo "busyboxが取り出せない"; exit 1; }
 [ -f "$work/lib/ld-musl-i386.so.1" ] || { echo "ld-muslが取り出せない"; exit 1; }
 
@@ -39,7 +37,7 @@ cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
 #   virtio + virtio_ring     リングの共通機構
 #   virtio_pci (+legacy/modern_dev)  PCIの上に建つ口
 #   virtio_blk               ブロック装置本体 → /dev/vda
-for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk squashfs overlay; do
   ko=$(find -L "$work/lib" "$work/usr/lib" -name "$mod.ko" 2>/dev/null | head -1)
   [ -n "$ko" ] && cp "$ko" "$work/root/lib/modules/"
 done
@@ -104,9 +102,39 @@ export TERM=xterm
 # ディスクのドライバ。**カードが無くてもエラーにならない**のはNICと同じ。
 # 依存の順は .ko の depends= の実測から: ring が土台で virtio がその上
 # (直感と逆。逆順で挿すと virtio_blk が Unknown symbol で落ちる — 実際に落ちた)
-for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk squashfs overlay; do
   /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
 done
+#
+# --- ディスクがあれば、そちらを根にして移り住む ---
+#
+# /dev/vda がsquashfsなら、それが本当のrootfs (Live CDと同じ立て付け)。
+# squashfsは読み専用なので、**tmpfsを上に重ねて (overlayfs) 書ける根にする**。
+# initramfsは「ディスクを見つけて移る係」に戻る — 実機Linuxの標準の姿。
+#
+# .rustx86-disk はディスク側の木に焼いてある印。**この印が無いときだけ探す**
+# — ディスクの中のinit (同じこのスクリプト) がまたディスクを探すと輪になる。
+# 移る前に /proc /sys /dev を返す (置いたままだと古い根に縛られて消せない)
+if [ ! -e /.rustx86-disk ] && [ -b /dev/vda ]; then
+  /bin/busybox mkdir -p /disk /overlay
+  if /bin/busybox mount -t squashfs -o ro /dev/vda /disk 2>/dev/null; then
+    /bin/busybox mount -t tmpfs tmpfs /overlay
+    /bin/busybox mkdir -p /overlay/up /overlay/work /overlay/root
+    if /bin/busybox mount -t overlay overlay \
+        -o lowerdir=/disk,upperdir=/overlay/up,workdir=/overlay/work \
+        /overlay/root 2>/dev/null; then
+      echo "  rootfs: /dev/vda (squashfs + tmpfsのoverlay)"
+      /bin/busybox umount /proc /sys 2>/dev/null
+      /bin/busybox umount /dev 2>/dev/null
+      exec /bin/busybox switch_root /overlay/root /init
+    fi
+    # overlayが挿せない世界でも、読み専用の根のまま進める (書けないだけ)
+    echo "  rootfs: /dev/vda (squashfs, 読み専用)"
+    /bin/busybox umount /proc /sys 2>/dev/null
+    /bin/busybox umount /dev 2>/dev/null
+    exec /bin/busybox switch_root /disk /init
+  fi
+fi
 # カードが挿さっていればDHCPを裏で回す (ELKSの rc.sys が ktcp を上げるのと
 # 同じ作法)。**挿さっていなければ何もしない** — NIC無し起動は素のまま。
 # -b: リースが取れるまで裏で粘る (線が後から生きても拾える)
@@ -160,10 +188,10 @@ while :; do
 done
 INIT
 chmod 755 "$work/root/init"
-# cpioは自前で書く (tools/images/mkcpio.py) — /dev/console ノードを非rootで
-# 含めるため。コンソールノードが無いとinitは入出力ゼロの盲目で走る
-python3 tools/images/mkcpio.py "$work/mini.cpio" "$work/root" --console
-gzip -c "$work/mini.cpio" > images/initramfs-mini
+# /dev/console はノードとして実体を作る (コンテナ内はrootなのでmknodできる)。
+# コンソールノードが無いとinitは入出力ゼロの盲目で走る
+mknod -m 600 "$work/root/dev/console" c 5 1
+(cd "$work/root" && find . | sort | cpio -o -H newc --quiet | gzip) > images/initramfs-mini
 # ブラウザ版 (linux-machine.js) は web/ から読む。置き忘れると initrd 無しで
 # 起動して VFS パニックになる (実際になった) ので、作ったその場で配る
 cp images/initramfs-mini web/initramfs-mini

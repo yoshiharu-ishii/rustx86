@@ -707,7 +707,10 @@ pub(crate) fn exec(m: &mut Machine, d: &Decoder, op: u8, start_ip: u32) {
             match rm {
                 // オフセットの幅はオペランドサイズに従う (32bitなら EAX 等へ全桁)
                 Operand::Mem { off, .. } => m.cpu.set_reg_w(reg, off, d.opsize32),
-                Operand::Reg(_) => panic!("LEA with register operand"),
+                // mod=3 は実CPUでも #UD。trap経由ならユーザー空間の分は
+                // SIGILLでそのプロセスだけ死ぬ (panicにするとホストごと落ちる —
+                // ltsのinitがディスク探索中にここを踏んで実際に落とした)
+                Operand::Reg(_) => m.trap("LEA with register operand (#UD)".into()),
             }
         }
         0x8F => {

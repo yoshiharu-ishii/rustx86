@@ -15,3 +15,5 @@ web/vmlinux-lts.gz
 # 起動回帰の証跡 (CIアーティファクト用の一時出力)
 regress-out/
 dist/
+# 焼いたディスクイメージ (配布物)
+web/disk-gcc.img
