@@ -461,6 +461,11 @@
       <span class="lbl" id="rootLbl" hidden>ルートFS</span>
       <select id="rootSel" hidden></select>
       <span class="lbl" id="ramLbl" hidden>RAM</span>
+      <label id="jitLbl" for="jitSel" hidden>JIT</label>
+      <select id="jitSel" hidden title="JIT (F1d wasm) — on/offで実行結果は1bitも変わらない">
+        <option value="off">JIT off</option>
+        <option value="on">JIT on</option>
+      </select>
       <select id="ramSel" hidden>
         <option value="auto">自動</option>
         <option value="128">128 MB</option>

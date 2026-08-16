@@ -670,6 +670,21 @@ impl Machine {
         true
     }
 
+    /// JIT用のleave (SP←BP、BP←pop — exec.rsのLeave速い道と同一順序)。
+    /// 読みが確定してから両レジスタを動かす。false = 脱出 (SP/BP無傷)
+    pub fn jit_try_leave(&mut self) -> bool {
+        if !self.cpu.hidden[crate::cpu::SS].big {
+            return false;
+        }
+        let bp = self.cpu.regs[crate::cpu::BP];
+        let Some(v) = self.fast_read32(crate::cpu::SS, bp) else {
+            return false;
+        };
+        self.cpu.regs[crate::cpu::SP] = bp.wrapping_add(4);
+        self.cpu.regs[crate::cpu::BP] = v;
+        true
+    }
+
     /// JIT用のpop。読みが確定したときだけSPを確定 (push32と同じ約束)
     pub fn jit_try_pop32(&mut self) -> Option<u32> {
         if !self.cpu.hidden[crate::cpu::SS].big {

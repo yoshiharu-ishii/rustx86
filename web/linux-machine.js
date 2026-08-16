@@ -130,6 +130,11 @@ export function mountLinux(canvas, opts = {}) {
     if (!worker || !booted) return;
     const bytes = new TextEncoder().encode(s);
     worker.postMessage({ type: 'input', bytes: bytes.buffer }, [bytes.buffer]);
+  }
+
+  /** JITのon/offを実行中に切り替える (比較実験用の外部フラグ) */
+  function setJit(on) {
+    if (worker && booted) worker.postMessage({ type: 'jit', on: !!on });
   };
 
   // 描画ループ (端末の dirty を見て 60fps で描く)。
@@ -318,6 +323,9 @@ export function mountLinux(canvas, opts = {}) {
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
+                // JIT (F1d wasmバックエンド)。起動時の初期値 — 実行中も
+                // setJit() でon/offできる (決定性はJIT on/offで不変が門番)
+                jit: opts.jit?.() ?? false,
               },
               [kernel.buffer, initrd?.buffer, disk?.buffer].filter(Boolean),
             );
@@ -400,6 +408,7 @@ export function mountLinux(canvas, opts = {}) {
 
   return {
     boot,
+    setJit,
     get booted() { return booted; },
     get busy() { return busy; },
     get paused() { return paused; },
