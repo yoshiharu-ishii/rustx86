@@ -260,9 +260,19 @@ export function mountLinux(canvas, opts = {}) {
     if (!snapshot && usedDisk) {
       try {
         disk = await fetchWithProgress(`./${usedDisk}`, usedDisk);
+        // .gz は輸送路の圧縮。**ここ (ホスト) で1回だけ解く** — ゲストの
+        // エミュレートされたCPUに読むたび解凍させると cold read の sys が
+        // 0.9s→15.6s に化ける (実測は make-gcc-disk.sh の注釈と disk.md)
+        if (usedDisk.endsWith('.gz')) {
+          const t0 = performance.now();
+          const stream = new Blob([disk]).stream().pipeThrough(new DecompressionStream('gzip'));
+          disk = new Uint8Array(await new Response(stream).arrayBuffer());
+          console.log(`disk: ホスト側で解凍 ${disk.length}B (${Math.round(performance.now() - t0)}ms)`);
+        }
       } catch {
         status(`${usedDisk} が無い (tools/images/sh/make-gcc-disk.sh で作って web/ に置く)。ディスク無しで起動します`, true);
         usedDisk = '';
+        disk = null;
       }
     }
     if (!alive || gen !== bootGen) return;
