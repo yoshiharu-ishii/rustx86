@@ -297,9 +297,12 @@ pub struct DecodeCache {
     entries: Vec<Entry>,
     /// 物理4Kページごとの世代。書き込みで進む
     page_gen: Vec<u32>,
-    /// そのページにデコード済みコードがあるか。
-    /// データページへの書き込みをタダにするための1判定
-    page_has_code: Vec<bool>,
+    /// そのページにデコード済みコードがあるか (1ページ1bit)。
+    /// データページへの書き込みをタダにするための1判定。
+    /// Vec<bool> (1ページ1バイト = 128MBで32KB) だと全ストアが引く配列が
+    /// L1に収まりきらない。1bit詰め (4KB) ならL1に居座る — note_writeを
+    /// 全ストア経路に配線した (ADR-0020 P0) ときの税をここで消す
+    page_has_code: Vec<u64>,
     /// 観測: ヒット / 新規デコード / 対象外 (従来経路行き)
     pub hits: u64,
     pub fills: u64,
@@ -316,7 +319,7 @@ impl DecodeCache {
         DecodeCache {
             entries: Vec::new(),
             page_gen: vec![0; pages],
-            page_has_code: vec![false; pages],
+            page_has_code: vec![0; pages.div_ceil(64)],
             hits: 0,
             fills: 0,
             fallbacks: 0,
@@ -324,13 +327,16 @@ impl DecodeCache {
         }
     }
 
-    /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める
+    /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める。
+    /// ビットが立っていない (= コード無しページ) なら分岐1つで抜ける —
+    /// ここが全ストアの通り道なので、この形より重くしない
     #[inline]
     pub(crate) fn note_write(&mut self, pa: u32) {
         let p = (pa >> 12) as usize;
-        if let Some(has) = self.page_has_code.get_mut(p) {
-            if *has {
-                *has = false;
+        if let Some(w) = self.page_has_code.get_mut(p >> 6) {
+            let bit = 1u64 << (p & 63);
+            if *w & bit != 0 {
+                *w &= !bit;
                 self.page_gen[p] = self.page_gen[p].wrapping_add(1);
             }
         }
@@ -344,12 +350,7 @@ impl DecodeCache {
         let first = (pa >> 12) as usize;
         let last = ((pa as usize).saturating_add(len - 1)) >> 12;
         for p in first..=last {
-            if let Some(has) = self.page_has_code.get_mut(p) {
-                if *has {
-                    *has = false;
-                    self.page_gen[p] = self.page_gen[p].wrapping_add(1);
-                }
-            }
+            self.note_write((p as u32) << 12);
         }
     }
 }
@@ -562,8 +563,8 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         len_flags: lf,
                         uop,
                     };
-                    if let Some(h) = m.dcache.page_has_code.get_mut(page) {
-                        *h = true;
+                    if let Some(w) = m.dcache.page_has_code.get_mut(page >> 6) {
+                        *w |= 1 << (page & 63);
                     }
                     m.dcache.fills += 1;
                     (lf, uop)
