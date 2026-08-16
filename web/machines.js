@@ -152,7 +152,10 @@ export const ROOTFS = [
     label: 'gcc入り (ディスク)',
     sub: 'squashfs + overlay',
     initrd: 'initramfs-mini',
-    disk: 'disk-gcc.img',
+    // .gz は**輸送路の圧縮** — ホスト側で1回だけ解いてからvdaに挿す。
+    // squashfs自体は無圧縮 (ゲストのCPUに読むたび解凍させると、
+    // cold readのsysが0.9s→15.6sに化ける。実測は make-gcc-disk.sh の注釈)
+    disk: 'disk-gcc.img.gz',
     note:
       'virtio-blkの/dev/vdaにgcc一式 (34MBのsquashfs)。ミニのinitが見つけて' +
       '移り住む。読んだ分しかRAMに載らないので**128MBで済む** — こちらが本命。' +

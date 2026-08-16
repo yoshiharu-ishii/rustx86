@@ -16,4 +16,4 @@ web/vmlinux-lts.gz
 regress-out/
 dist/
 # 焼いたディスクイメージ (配布物)
-web/disk-gcc.img
+web/disk-gcc.img.gz
