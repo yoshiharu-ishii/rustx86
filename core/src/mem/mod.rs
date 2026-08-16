@@ -697,17 +697,34 @@ impl Machine {
 
     /// PCIの装置への読み。**挿さっている装置ごとの分岐はここ1箇所**
     fn pci_slot_read(&mut self, slot: usize, off: u16) -> u8 {
-        match (slot, &mut self.devices.net) {
+        match slot {
             // RTL8029: 皮はPCIでも中身はISA版と同じDP8390
-            (crate::dev::card::rtl8029::NET_SLOT, Some(net)) => net.read(off),
+            crate::dev::card::rtl8029::NET_SLOT => match &mut self.devices.net {
+                Some(net) => net.read(off),
+                None => 0xFF,
+            },
+            crate::dev::card::virtio_blk::BLK_SLOT => match &mut self.devices.blk {
+                Some(blk) => blk.vio.read(off),
+                None => 0xFF,
+            },
             _ => 0xFF,
         }
     }
 
     /// PCIの装置への書き
     fn pci_slot_write(&mut self, slot: usize, off: u16, val: u8) {
-        if let (crate::dev::card::rtl8029::NET_SLOT, Some(net)) = (slot, &mut self.devices.net) {
-            net.write(off, val);
+        match slot {
+            crate::dev::card::rtl8029::NET_SLOT => {
+                if let Some(net) = &mut self.devices.net {
+                    net.write(off, val);
+                }
+            }
+            crate::dev::card::virtio_blk::BLK_SLOT => {
+                if let Some(blk) = &mut self.devices.blk {
+                    blk.vio.write(off, val);
+                }
+            }
+            _ => {}
         }
     }
 
