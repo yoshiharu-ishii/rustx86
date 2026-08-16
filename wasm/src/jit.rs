@@ -742,9 +742,7 @@ pub fn compile_batch(bodies: &[Vec<u8>]) -> Vec<u8> {
     // function: type0 × N
     let mut b = Vec::new();
     uleb(&mut b, n as u64);
-    for _ in 0..n {
-        b.push(0x00);
-    }
+    b.extend(std::iter::repeat_n(0x00, n)); // 全部type0
     section(&mut m, 3, &b);
     // export: "b0".."bN-1" = func 8+i
     let mut b = Vec::new();
