@@ -28,7 +28,7 @@ fn dec_modrm(b: &[u8], i: &mut usize, seg_override: Option<u8>) -> Option<(u8, R
     let reg = (mrm >> 3) & 7;
     let rm = mrm & 7;
     if md == 3 {
-        return Some((reg, Rm::Reg(rm)));
+        return Some((reg, Rm::reg(rm)));
     }
     let mut default_seg = DS as u8;
     let base: i8;
@@ -80,7 +80,7 @@ fn dec_modrm(b: &[u8], i: &mut usize, seg_override: Option<u8>) -> Option<(u8, R
     });
     Some((
         reg,
-        Rm::Mem(MemRef {
+        Rm::mem(MemRef {
             base,
             index,
             scale,
@@ -259,9 +259,9 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
         },
         0x8D => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
-            match rm {
-                Rm::Mem(mem) => Uop::Lea { reg, mem },
-                Rm::Reg(_) => return None, // LEAのレジスタ形は従来経路 (panic) に任せる
+            match rm.view() {
+                super::RmView::Mem(mem) => Uop::Lea { reg, mem },
+                super::RmView::Reg(_) => return None, // LEAのレジスタ形は従来経路 (panic) に任せる
             }
         }
         0xB8..=0xBF => {

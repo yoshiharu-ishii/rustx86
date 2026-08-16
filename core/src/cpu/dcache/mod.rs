@@ -36,9 +36,8 @@ mod decode;
 mod exec;
 
 /// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さとの
-/// 折り合い。**表全体は 128K × Entry 32B = 4MiB** (L2の1/3。旧記述の
-/// 「768KB」は誤り — 2026-08-16 レイアウト計算で訂正)。スロット数の掃引は
-/// D2で実測済みワッシュ、Entry痩身はD4として台帳に
+/// 折り合い。**表全体は 128K × Entry 24B = 3MiB** (D4で32Bから痩身、
+/// 2026-08-16)。スロット数の掃引はD2で実測済みワッシュ
 const SLOTS: usize = 128 * 1024;
 
 const TAG_INVALID: u32 = 0xFFFF_FFFF;
@@ -57,10 +56,48 @@ pub(crate) struct MemRef {
     disp: u32,
 }
 
+/// r/m の畳み込み表現 (D4)。以前は `enum { Reg(u8), Mem(MemRef) }` で
+/// 12B (判別子+パディングに4B) だったが、**segの番兵値でレジスタ形を表せば
+/// MemRefと同じ8Bに収まる** — Uopが20→16B (AArch64のレジスタ2本渡しに入る)、
+/// Entryが32→24B、表が4MiB→3MiBになる。読む側は [`Rm::view`] で従来どおり
+/// enumとしてmatchする (判別はseg 1バイトの比較1つ)
 #[derive(Clone, Copy)]
-pub(crate) enum Rm {
+pub(crate) struct Rm(MemRef);
+
+/// Rmの読み口。matchの形は旧enumと同じ
+#[derive(Clone, Copy)]
+pub(crate) enum RmView {
     Reg(u8),
     Mem(MemRef),
+}
+
+impl Rm {
+    /// segの番兵 = レジスタ形 (実segは0..=5)
+    const REG: u8 = 0xFF;
+
+    pub(crate) fn reg(r: u8) -> Self {
+        Rm(MemRef {
+            base: r as i8,
+            index: -1,
+            scale: 0,
+            seg: Self::REG,
+            disp: 0,
+        })
+    }
+
+    pub(crate) fn mem(mr: MemRef) -> Self {
+        debug_assert!(mr.seg != Self::REG);
+        Rm(mr)
+    }
+
+    #[inline(always)]
+    pub(crate) fn view(self) -> RmView {
+        if self.0.seg == Self::REG {
+            RmView::Reg(self.0.base as u8)
+        } else {
+            RmView::Mem(self.0)
+        }
+    }
 }
 
 /// デコード済み命令。従来経路の各armと1対1で対応する
@@ -282,15 +319,17 @@ const LEN_MASK: u8 = 0x0F;
 const F_MEM: u8 = 0x10;
 const F_CTL: u8 = 0x20;
 
-// 表4MiBの根拠 (SLOTSコメント参照)。痩せたらここも更新する (D4)
-const _: () = assert!(std::mem::size_of::<Entry>() == 32);
+// 表3MiBの根拠 (SLOTSコメント参照)。D4で32→24Bに痩身済み — 太ったら気づく
+const _: () = assert!(std::mem::size_of::<Entry>() == 24);
 
 #[derive(Clone, Copy)]
 struct Entry {
     /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
     tag: u32,
-    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる
-    gen: u32,
+    /// 控えたときのページ世代。ページに書き込みがあると合わなくなる。
+    /// u16で足りる: 世代bumpは全ブートで~1,000回。**丁度65,536回で一周して
+    /// 古い控えが蘇るABAは、note_write側が一周の瞬間に表ごと捨てて塞ぐ**
+    gen: u16,
     /// 命令長 + 属性ビット (LEN_MASK/F_MEM/F_CTL)
     len_flags: u8,
     uop: Uop,
@@ -300,8 +339,8 @@ pub struct DecodeCache {
     /// 直接マップ。**最初の32bitデコードまで確保しない** —
     /// 16bit機やcosimの単発Machineに768KBずつ払わせない
     entries: Vec<Entry>,
-    /// 物理4Kページごとの世代。書き込みで進む
-    page_gen: Vec<u32>,
+    /// 物理4Kページごとの世代。書き込みで進む (u16 — 一周はnote_writeが塞ぐ)
+    page_gen: Vec<u16>,
     /// そのページにデコード済みコードがあるか (1ページ1bit)。
     /// データページへの書き込みをタダにするための1判定。
     /// Vec<bool> (1ページ1バイト = 128MBで32KB) だと全ストアが引く配列が
@@ -342,7 +381,15 @@ impl DecodeCache {
             let bit = 1u64 << (p & 63);
             if *w & bit != 0 {
                 *w &= !bit;
-                self.page_gen[p] = self.page_gen[p].wrapping_add(1);
+                let gen = self.page_gen[p].wrapping_add(1);
+                self.page_gen[p] = gen;
+                // u16世代の一周 (65,536回目のbump)。丁度一周した古い控えが
+                // 「現世代」に化けるABAを、表ごと捨てて塞ぐ。世代bumpは
+                // 全ブートで~1,000回なので、ここに来ることは実質無い —
+                // 来ても再fillで直るだけ (正しさの保険であって性能の道ではない)
+                if gen == 0 {
+                    self.entries = Vec::new();
+                }
             }
         }
     }
@@ -363,7 +410,7 @@ impl DecodeCache {
 /// uopの粗い名前 (opstatsの分布表示用)。メモリ形かどうかで分ける
 #[cfg(feature = "opstats")]
 fn uop_name(u: &Uop) -> &'static str {
-    let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
+    let mem = |rm: &Rm| matches!(rm.view(), RmView::Mem(_));
     match u {
         Uop::MovRmR { rm, .. } => {
             if mem(rm) {
