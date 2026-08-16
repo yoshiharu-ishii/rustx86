@@ -338,6 +338,17 @@ impl DecodeCache {
         self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
     }
 
+    /// JITがブロックを焼いたページに「コードあり」の印を立てる。
+    /// **fillと同じ義務** — この印が無いとnote_writeが世代を進めず、
+    /// JITだけが実行するページの自己書き換えを見逃す (ディスク課程で
+    /// virtio記述子域を古いブロックが壊し、デッドハルトとして発覚 2026-08-17)
+    pub(crate) fn mark_code_page(&mut self, pa: u32) {
+        let p = (pa >> 12) as usize;
+        if let Some(w) = self.page_has_code.get_mut(p >> 6) {
+            *w |= 1 << (p & 63);
+        }
+    }
+
     /// ページ世代スロットの実番地 (JITのn+1脱出照合用)。RAM外は0。
     /// page_genはnew()以後リサイズしない — 番地は機械の寿命の間安定
     pub(crate) fn page_gen_addr_of(&self, pa: u32) -> usize {

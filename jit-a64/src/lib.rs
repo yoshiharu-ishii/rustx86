@@ -267,6 +267,9 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
             return 0;
         };
         block.gen = gen;
+        // fillと同じ義務: このページに「コードあり」を立てる (立て忘れると
+        // note_writeが素通りして世代が動かず、SMC/DMA上書きを見逃す)
+        unsafe { jit::mark_code_page(&mut *rt.machine, pa) };
         rt.baked += 1;
         let n = block.n as u32;
         let entry = block.entry;
