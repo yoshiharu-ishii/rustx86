@@ -7,12 +7,28 @@
 use rustx86_core::{Machine, MachineProfile};
 
 fn main() {
-    // 引数でイメージを選べる (既定は bzImage)。vmlinux を渡せば直接ロード経路
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "images/vmlinuz-lts".into());
-    let kernel = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let initrd = std::fs::read("images/initramfs-mini").expect("images/initramfs-mini");
+    // 引数でイメージを選べる: [カーネル] [initrd]。vmlinux を渡せば直接ロード経路。
+    // 既定は**凍結された定規** (bench対 = 970Mコース、rustx86-imagesの現物)。
+    // initramfsの荷物が変わるとコースの命令数ごと変わり、過去の秒と比べられなく
+    // なる (2026-08-16にTLS一式で970M→1370Mに漂流して発覚)。定規は更新しない —
+    // 無い環境では最新のminiに落ちるが、そのときは秒を台帳と比較しないこと
+    let kernel_path = std::env::args().nth(1).unwrap_or_else(|| {
+        if std::path::Path::new("images/bzImage-bench").exists() {
+            "images/bzImage-bench".into()
+        } else {
+            "images/vmlinuz-lts".into()
+        }
+    });
+    let initrd_path = std::env::args().nth(2).unwrap_or_else(|| {
+        if std::path::Path::new("images/initramfs-bench").exists() {
+            "images/initramfs-bench".into()
+        } else {
+            "images/initramfs-mini".into()
+        }
+    });
+    let kernel = std::fs::read(&kernel_path).unwrap_or_else(|e| panic!("{kernel_path}: {e}"));
+    let initrd = std::fs::read(&initrd_path).unwrap_or_else(|e| panic!("{initrd_path}: {e}"));
+    println!("コース: {kernel_path} + {initrd_path}");
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
     m.boot_linux_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
         .expect("boot");
