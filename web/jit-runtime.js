@@ -46,20 +46,21 @@ export function setupJit(emu, exports) {
 export function pumpJit(emu) {
   let installed = 0;
   for (;;) {
-    const bytes = emu.drain_job();
+    // バッチ (1モジュール=最大4096ブロック)。モジュール数を減らすのが本体 —
+    // 1ブロック=1モジュールはエンジンのコンパイル固定費でブート+19sだった
+    const bytes = emu.drain_batch();
     if (!bytes) break;
+    const n = emu.pending_count();
     try {
       const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), ctx.imports);
-      // 関数テーブルを1つ伸ばし、生成関数をそのスロットへ。core はこの
-      // スロット番号で call_indirect する (JS境界なし)
-      const slot = ctx.table.grow(1);
-      ctx.table.set(slot, inst.exports.b);
-      emu.install_block(slot);
-      installed++;
+      const first = ctx.table.grow(n);
+      for (let i = 0; i < n; i++) ctx.table.set(first + i, inst.exports['b' + i]);
+      emu.install_batch(first);
+      installed += n;
     } catch (e) {
-      // 焼き損じは捨てる — coreはインタプリタで走り続ける (退路は常にある)
+      // 焼き損じはバッチごと捨てる — coreはインタプリタで走り続ける
       console.error('jit instantiate failed:', e);
-      emu.discard_job();
+      emu.discard_batch();
     }
   }
   return installed;

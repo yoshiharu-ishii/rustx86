@@ -50,9 +50,9 @@ pub struct Emulator {
     m: Machine,
     /// JITランタイム (F1d世代のtry_enter駆動)。Boxで番地固定 —
     /// enableでcoreのフックと結線する。据え付け待ちジョブの手渡しは
-    /// drain_job/install_block (instantiateはJSにしかできない)
+    /// drain_batch/install_batch (instantiateはJSにしかできない)
     jit_rt: Box<jit::JitRt>,
-    pending_job: Option<(u32, u32, u32)>,
+    pending_batch: Vec<(u32, u32, u32)>,
 }
 
 impl Emulator {
@@ -61,7 +61,7 @@ impl Emulator {
         Emulator {
             m,
             jit_rt: Box::new(jit::JitRt::new()),
-            pending_job: None,
+            pending_batch: Vec::new(),
         }
     }
 }
@@ -285,33 +285,50 @@ impl Emulator {
     pub fn jit_disable(&mut self) {
         self.m.jit = None;
         self.jit_rt.flush();
-        self.pending_job = None;
+        self.pending_batch.clear();
     }
 
     pub fn jit_enabled(&self) -> bool {
         self.m.jit.is_some()
     }
 
-    /// 焼き上がってinstantiate待ちのジョブを1件取り出す (バイト列)。
-    /// JS側が WebAssembly.Instance を作り、関数テーブルへ table.set し、
-    /// そのスロット番号で install_block を呼ぶ
-    pub fn drain_job(&mut self) -> Option<js_sys::Uint8Array> {
-        let job = self.jit_rt.take_job()?;
-        let bytes = js_sys::Uint8Array::from(job.bytes.as_slice());
-        self.pending_job = Some((job.pa, job.gen, job.n));
-        Some(bytes)
+    /// 焼き上がってinstantiate待ちのジョブを**1バッチ (1モジュール)** に
+    /// 束ねて取り出す。1ブロック=1モジュールだとエンジンのモジュール
+    /// コンパイル固定費 (~0.5ms/個) がブロック数で効き、36kブロックの
+    /// ブートで+19s (2026-08-17実測)。JS側は1回instantiateして
+    /// table.grow(pending_count) → 各export "b0".."bN-1" をset →
+    /// install_batch(先頭スロット)
+    pub fn drain_batch(&mut self) -> Option<js_sys::Uint8Array> {
+        let jobs = self.jit_rt.take_batch(4096);
+        if jobs.is_empty() {
+            return None;
+        }
+        let bodies: Vec<Vec<u8>> = jobs.iter().map(|j| j.body.clone()).collect();
+        self.pending_batch = jobs.iter().map(|j| (j.pa, j.gen, j.n)).collect();
+        let m = jit::compile_batch(&bodies);
+        Some(js_sys::Uint8Array::from(m.as_slice()))
     }
 
-    /// JS が table.set したスロット番号を受け取り、直接マップへ据える
-    pub fn install_block(&mut self, slot: u32) {
-        if let Some((pa, gen, n)) = self.pending_job.take() {
-            self.jit_rt.install(pa, gen, n, slot);
+    /// バッチの据え付け本数 (JSがtable.growに使う)
+    pub fn pending_count(&self) -> usize {
+        self.pending_batch.len()
+    }
+
+    /// JS が table.set した先頭スロットを受け、バッチ全員を直接マップへ据える
+    pub fn install_batch(&mut self, first_slot: u32) {
+        for (i, (pa, gen, n)) in self.pending_batch.drain(..).enumerate() {
+            self.jit_rt.install(pa, gen, n, first_slot + i as u32);
         }
     }
 
-    /// instantiate に失敗したジョブを捨てる (coreはインタプリタで走り続ける)
-    pub fn discard_job(&mut self) {
-        self.pending_job = None;
+    /// instantiate に失敗したバッチを捨てる (coreはインタプリタで走り続ける)
+    pub fn discard_batch(&mut self) {
+        self.pending_batch.clear();
+    }
+
+    /// 診断モード (jit-checkの税分解用)
+    pub fn jit_diag(&self, mode: u32) {
+        jit::set_diag(mode);
     }
 
     pub fn jit_installed(&self) -> usize {

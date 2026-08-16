@@ -582,7 +582,17 @@ impl Gen<'_> {
 
 /// ブロックをwasmモジュールに焼く。
 /// `machine_addr` は生きているMachineの実アドレス (ヘルパへ焼き込む)
+/// 1ブロックを単独モジュールに包む (テスト用の互換口 — 本番はcompile_batch)
 pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec<u8> {
+    compile_batch(&[compile_body(block, lay, machine_addr)])
+}
+
+/// ブロック本体 (locals宣言込みのcode section用ボディ) だけを焼く。
+/// モジュールへの包みは compile_batch — **モジュール数を減らすのが目的**:
+/// 1ブロック=1モジュールだと据え付け (エンジンのコンパイル) の固定費が
+/// ブロック数×~0.5msで効き、36kブロックのブートで+19s (2026-08-17実測、
+/// jit-probeの6.3µs/個は「1個なら」の数字だった)
+pub fn compile_body(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec<u8> {
     let mut g = Gen {
         code: Vec::new(),
         lay,
@@ -684,7 +694,16 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
     g.iconst(block.ops.len() as u32);
     g.code.push(END);
 
-    // ---- モジュールに包む ----
+    // locals (i32×4, i64×1) + 本体 = code sectionのボディ
+    let mut body = Vec::new();
+    body.extend_from_slice(&[2, 4, 0x7f, 1, 0x7e]);
+    body.extend_from_slice(&g.code);
+    body
+}
+
+/// N個のボディを1モジュールに包む。export名は "b0".."bN-1" (関数import 8本の後)
+pub fn compile_batch(bodies: &[Vec<u8>]) -> Vec<u8> {
+    let n = bodies.len();
     let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
     // type: [()->i32, (i32)->i32, (i32,i32)->i32, (i32,i32,i32)->i64,
     //        (i32×4)->i32, (i32×5)->i32, (i32)->i64]
@@ -720,18 +739,31 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
         b.extend_from_slice(desc);
     }
     section(&mut m, 2, &b);
-    // function: [type0]
-    section(&mut m, 3, &[1, 0x00]);
-    // export: "b" = func 8 (関数import 8本の後)
-    section(&mut m, 7, &[1, 1, b'b', 0x00, 8]);
-    // code: locals (i32 ×4, i64 ×1) + 本体
-    let mut body = Vec::new();
-    body.extend_from_slice(&[2, 4, 0x7f, 1, 0x7e]); // 2グループ: i32×4, i64×1
-    body.extend_from_slice(&g.code);
+    // function: type0 × N
     let mut b = Vec::new();
-    uleb(&mut b, 1);
-    uleb(&mut b, body.len() as u64);
-    b.extend_from_slice(&body);
+    uleb(&mut b, n as u64);
+    for _ in 0..n {
+        b.push(0x00);
+    }
+    section(&mut m, 3, &b);
+    // export: "b0".."bN-1" = func 8+i
+    let mut b = Vec::new();
+    uleb(&mut b, n as u64);
+    for i in 0..n {
+        let name = format!("b{i}");
+        uleb(&mut b, name.len() as u64);
+        b.extend_from_slice(name.as_bytes());
+        b.push(0x00);
+        uleb(&mut b, (8 + i) as u64);
+    }
+    section(&mut m, 7, &b);
+    // code: N本
+    let mut b = Vec::new();
+    uleb(&mut b, n as u64);
+    for body in bodies {
+        uleb(&mut b, body.len() as u64);
+        b.extend_from_slice(body);
+    }
     section(&mut m, 10, &b);
     m
 }
@@ -745,12 +777,13 @@ pub fn compile_block(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Ve
 // bake (バイト列生成) は同期・据え付けは非同期 (スライス境界でJSがpump)。
 // 据え付くまでそのブロック頭は0を返してインタプリタが走る — 退路は常にある
 
-/// 焼き上がってJSのinstantiate待ちのジョブ
+/// 焼き上がってJSのinstantiate待ちのジョブ (本体のみ — モジュールへの
+/// 包みはdrain時にバッチでやる)
 pub struct Job {
     pub pa: u32,
     pub gen: u32,
     pub n: u32,
-    pub bytes: Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 /// 直接マップのスロット状態
@@ -789,6 +822,14 @@ pub struct JitRt {
 thread_local! {
     /// try_enter (裸のfnポインタ) から届くための生ポインタ。wasmは単一スレッド
     static RT: core::cell::Cell<*mut JitRt> = const { core::cell::Cell::new(core::ptr::null_mut()) };
+    /// 診断モード (jit-checkの税分解用): 0=通常 / 1=即return0 (プローブ機構の税だけ) /
+    /// 2=焼く+据えるが実行しない (焼き税まで)
+    static DIAG: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+
+/// 診断モード設定 (税の分解計測用 — 本番では触らない)
+pub fn set_diag(mode: u32) {
+    DIAG.with(|c| c.set(mode));
 }
 
 impl Default for JitRt {
@@ -828,8 +869,10 @@ impl JitRt {
         RT.with(|c| c.set(self as *mut JitRt));
     }
 
-    pub fn take_job(&mut self) -> Option<Job> {
-        self.jobs.pop()
+    /// 溜まったジョブを最大cap件、1バッチとして取り出す
+    pub fn take_batch(&mut self, cap: usize) -> Vec<Job> {
+        let k = self.jobs.len().min(cap);
+        self.jobs.drain(..k).collect()
     }
 
     /// JSが table.set したスロット番号を受けて据え付ける。
@@ -872,12 +915,19 @@ pub fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
     if p.is_null() {
         return 0;
     }
+    let diag = DIAG.with(|c| c.get());
+    if diag == 1 {
+        return 0; // プローブ機構 (coreの再プローブループ+この呼び出し) の税だけ測る
+    }
     let rt = unsafe { &mut *p };
     let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
     let slot = rt.slots[si];
     if slot.tag == pa {
         match slot.state {
             SlotState::Installed => {
+                if diag == 2 {
+                    return 0; // 焼き+据え付けまでの税 (ブロック実行なし)
+                }
                 if slot.gen != gen {
                     // 世代落ち (自己書き換え)。捨てて次の来訪で焼き直す
                     rt.slots[si].state = SlotState::Free;
@@ -930,7 +980,7 @@ pub fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
     let lay = rustx86_core::jit::layout(m);
     let maddr = rt.machine as u32;
     let n = blk.ops.len() as u32;
-    let bytes = compile_block(&blk, &lay, maddr);
+    let body = compile_body(&blk, &lay, maddr);
     rt.baked += 1;
     if rt.slots[si].state == SlotState::Installed {
         rt.installed -= 1; // 衝突退去
@@ -942,7 +992,7 @@ pub fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
         n: n as u16,
         state: SlotState::Baking,
     };
-    rt.jobs.push(Job { pa, gen, n, bytes });
+    rt.jobs.push(Job { pa, gen, n, body });
     0
 }
 
