@@ -19,9 +19,11 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "images/vmlinuz-lts".into());
     let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    // 既定は**mini** — まっすぐシェルに落ち、ディスクがあれば移り住む起点。
+    // lts (Alpine標準のinit) は単体では緊急シェル行きで、既定にする意味が無い
     let initrd_path = std::env::var("INITRD").unwrap_or_else(|_| {
         std::path::Path::new(&path)
-            .with_file_name("initramfs-lts")
+            .with_file_name("initramfs-mini")
             .to_string_lossy()
             .into_owned()
     });
