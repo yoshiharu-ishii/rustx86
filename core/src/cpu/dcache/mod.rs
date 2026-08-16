@@ -573,137 +573,149 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
-    // ---- JIT入口 (F1d-a) — チェーン入口でだけランタイムに問い合わせる ----
-    //
-    // F1cの「Entryにスロットを畳む」受け口は+8B/Entryの税だった (削除で-22%)
-    // ので、毎命令のホットループには何も足さない。Noneなら分岐1つで死ぬ。
-    // 予算 = min(チェーン残り+1, tick_countdown) — **ブロック内でtickが
-    // 起きない**ことの保証で、割り込みの受付位置は毎命令実行と同一に保たれる。
-    // 清算の契約 (F1aからの写し): 先頭命令は外側が前払い済みなので n-1 を払う。
-    // 着地の時計はここでは払わない (payしてからreturnすると外側と二重払いになり、
-    // tscが実行列より先行する — F1b時代にprintk時刻のµsずれで発覚した過払い)
-    if let Some(h) = m.jit {
-        if !m.cpu.flag(super::TF) {
-            loop {
-                if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
-                    break;
-                }
-                if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
-                    break; // IRQ保留中はインタプリタが1命令粒度で受ける
-                }
-                let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
-                let n = (h.try_enter)(pa, m.dcache.page_gen_of(pa), budget);
-                if n == 0 {
-                    break;
-                }
-                let n64 = n as u64;
-                m.jit_instrs = m.jit_instrs.wrapping_add(n64);
-                m.jit_entries += 1;
-                m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
-                m.tick_countdown -= n - 1;
-                extra -= n64 - 1;
-                if extra == 0 {
-                    return; // チェーンの出し切り: 次の時計は外側が払う
-                }
-                // ブロック終端 (分岐/直線) の着地へ。ページを跨いだら外へ
-                let new_lin = cs_base.wrapping_add(m.cpu.ip);
-                if new_lin >> 12 != lin >> 12 {
-                    return;
-                }
-                pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-                lin = new_lin;
-                // 続けて実行する: 次の1命令ぶんを前払い (インタプリタと同じ順序)
-                extra -= 1;
-                m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
-                m.tick_countdown -= 1;
-                if m.tick_countdown == 0 {
-                    m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
-                    m.tick_devices(1);
-                }
-            }
-        }
-    }
-    loop {
-        // 前の命令のページウォークが立てた A/D を表へ反映。
-        // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
-        m.flush_ad();
-        let page = (pa >> 12) as usize;
-        let slot = (pa as usize) & (SLOTS - 1);
-
-        // Entry照合 (gen一致 = 「この命令は現世代」の保証)。
-        // ヒット路は中間のOptionを経由せず直結 — ミス/新規/対象外の塊は
-        // #[cold] の fill_or_fallback へ (バッチC11: ホットループの痩身)
-        let (lf, uop) = 'hit: {
-            if !m.dcache.entries.is_empty() {
-                let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-                let e = &m.dcache.entries[slot];
-                if e.tag == pa && e.gen == gen_now {
-                    let got = (e.len_flags, e.uop);
-                    // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
-                    if cfg!(feature = "opstats") {
-                        m.dcache.hits += 1;
+    // 外側ラベル (F1d-b): taken分岐の着地 = 新しいブロック頭なので、
+    // JIT入口へ戻って再プローブする (タイル張りの代わり — 熱カウンタも
+    // Entryへの細工も無しでカバレッジを稼ぐ)。jit=Noneならこのループは
+    // 一周しかしない (下のcontinueが発火しない) — 従来コストは分岐1つ
+    'outer: loop {
+        // ---- JIT入口 (F1d-a) — チェーン入口でだけランタイムに問い合わせる ----
+        //
+        // F1cの「Entryにスロットを畳む」受け口は+8B/Entryの税だった (削除で-22%)
+        // ので、毎命令のホットループには何も足さない。Noneなら分岐1つで死ぬ。
+        // 予算 = min(チェーン残り+1, tick_countdown) — **ブロック内でtickが
+        // 起きない**ことの保証で、割り込みの受付位置は毎命令実行と同一に保たれる。
+        // 清算の契約 (F1aからの写し): 先頭命令は外側が前払い済みなので n-1 を払う。
+        // 着地の時計はここでは払わない (payしてからreturnすると外側と二重払いになり、
+        // tscが実行列より先行する — F1b時代にprintk時刻のµsずれで発覚した過払い)
+        if let Some(h) = m.jit {
+            if !m.cpu.flag(super::TF) {
+                loop {
+                    if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+                        break;
                     }
-                    break 'hit got;
+                    if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+                        break; // IRQ保留中はインタプリタが1命令粒度で受ける
+                    }
+                    let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
+                    let n = (h.try_enter)(pa, m.dcache.page_gen_of(pa), budget);
+                    if n == 0 {
+                        break;
+                    }
+                    let n64 = n as u64;
+                    m.jit_instrs = m.jit_instrs.wrapping_add(n64);
+                    m.jit_entries += 1;
+                    m.cpu.tsc = m.cpu.tsc.wrapping_add(n64 - 1);
+                    m.tick_countdown -= n - 1;
+                    extra -= n64 - 1;
+                    if extra == 0 {
+                        return; // チェーンの出し切り: 次の時計は外側が払う
+                    }
+                    // ブロック終端 (分岐/直線) の着地へ。ページを跨いだら外へ
+                    let new_lin = cs_base.wrapping_add(m.cpu.ip);
+                    if new_lin >> 12 != lin >> 12 {
+                        return;
+                    }
+                    pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+                    lin = new_lin;
+                    // 続けて実行する: 次の1命令ぶんを前払い (インタプリタと同じ順序)
+                    extra -= 1;
+                    m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+                    m.tick_countdown -= 1;
+                    if m.tick_countdown == 0 {
+                        m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                        m.tick_devices(1);
+                    }
                 }
             }
-            match fill_or_fallback(m, pa, page, slot) {
-                Some(x) => x,
-                None => {
-                    // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
-                    // ブロック先頭のIP)
-                    m.trap_ip = m.cpu.ip;
-                    m.guard_save();
-                    return super::step(m);
+        }
+        loop {
+            // 前の命令のページウォークが立てた A/D を表へ反映。
+            // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
+            m.flush_ad();
+            let page = (pa >> 12) as usize;
+            let slot = (pa as usize) & (SLOTS - 1);
+
+            // Entry照合 (gen一致 = 「この命令は現世代」の保証)。
+            // ヒット路は中間のOptionを経由せず直結 — ミス/新規/対象外の塊は
+            // #[cold] の fill_or_fallback へ (バッチC11: ホットループの痩身)
+            let (lf, uop) = 'hit: {
+                if !m.dcache.entries.is_empty() {
+                    let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+                    let e = &m.dcache.entries[slot];
+                    if e.tag == pa && e.gen == gen_now {
+                        let got = (e.len_flags, e.uop);
+                        // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
+                        if cfg!(feature = "opstats") {
+                            m.dcache.hits += 1;
+                        }
+                        break 'hit got;
+                    }
                 }
+                match fill_or_fallback(m, pa, page, slot) {
+                    Some(x) => x,
+                    None => {
+                        // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
+                        // ブロック先頭のIP)
+                        m.trap_ip = m.cpu.ip;
+                        m.guard_save();
+                        return super::step(m);
+                    }
+                }
+            };
+
+            // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
+            // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
+            // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない。
+            // 判定はデコード時に焼いたF_MEMビット (uopのmatch再実行をしない)
+            let len = (lf & LEN_MASK) as u32;
+            if lf & F_MEM != 0 {
+                m.guard_save_slim();
             }
-        };
+            let prev_ip = m.cpu.ip; // 巻き戻し先 (exec内で控えるarm用)
+            m.cpu.advance_ip32(len);
+            let ip_linear = m.cpu.ip; // 直線ならexec後もこのまま
+            exec::exec(m, uop, prev_ip);
 
-        // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
-        // ページ内で完結する (跨ぎはデコード時に拒否) ので、フォールトの
-        // 出どころはデータアクセスだけ — 触らないなら巻き戻しは起きない。
-        // 判定はデコード時に焼いたF_MEMビット (uopのmatch再実行をしない)
-        let len = (lf & LEN_MASK) as u32;
-        if lf & F_MEM != 0 {
-            m.guard_save_slim();
-        }
-        let prev_ip = m.cpu.ip; // 巻き戻し先 (exec内で控えるarm用)
-        m.cpu.advance_ip32(len);
-        let ip_linear = m.cpu.ip; // 直線ならexec後もこのまま
-        exec::exec(m, uop, prev_ip);
-
-        // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
-        if extra == 0 {
-            return;
-        }
-        // フォールトの巻き戻しと#UDの裁きは外側の担当。割り込みが受けられる
-        // 状態になったら境界で外へ返す (配送点は非連結時と同じ)
-        if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
-            return;
-        }
-        if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
-            return;
-        }
-        // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
-        let new_lin = if lf & F_CTL == 0 {
-            // 非制御uopはIPに触らない — 比較すら不要で直線が確定
-            lin.wrapping_add(len)
-        } else if m.cpu.ip == ip_linear {
-            lin.wrapping_add(len)
-        } else {
-            cs_base.wrapping_add(m.cpu.ip)
-        };
-        if new_lin >> 12 != lin >> 12 {
-            return; // ページを跨いだら外へ (変換からやり直し)
-        }
-        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
-        lin = new_lin;
-        // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
-        extra -= 1;
-        m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
-        m.tick_countdown -= 1;
-        if m.tick_countdown == 0 {
-            m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
-            m.tick_devices(1);
+            // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
+            if extra == 0 {
+                return;
+            }
+            // フォールトの巻き戻しと#UDの裁きは外側の担当。割り込みが受けられる
+            // 状態になったら境界で外へ返す (配送点は非連結時と同じ)
+            if m.pending_fault.get().is_some() || m.trap.is_some() || m.halted {
+                return;
+            }
+            if m.cpu.flag(super::IF) && (m.pending_irq.is_some() || m.pic_service) {
+                return;
+            }
+            // 次の物理番地。直線なら足すだけ、分岐でも同じ線形ページなら差し替え
+            let new_lin = if lf & F_CTL == 0 {
+                // 非制御uopはIPに触らない — 比較すら不要で直線が確定
+                lin.wrapping_add(len)
+            } else if m.cpu.ip == ip_linear {
+                lin.wrapping_add(len)
+            } else {
+                cs_base.wrapping_add(m.cpu.ip)
+            };
+            let took_branch = lf & F_CTL != 0 && m.cpu.ip != ip_linear;
+            if new_lin >> 12 != lin >> 12 {
+                return; // ページを跨いだら外へ (変換からやり直し)
+            }
+            pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+            lin = new_lin;
+            // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
+            extra -= 1;
+            m.cpu.tsc = m.cpu.tsc.wrapping_add(1);
+            m.tick_countdown -= 1;
+            if m.tick_countdown == 0 {
+                m.tick_countdown = crate::INSTRUCTIONS_PER_TICK;
+                m.tick_devices(1);
+            }
+            // taken分岐の着地はブロック頭 — JITに再プローブさせる (F1d-b)。
+            // 時計は上で前払い済みなので、JITループの契約 (先頭前払い) と合う
+            if took_branch && m.jit.is_some() {
+                continue 'outer;
+            }
         }
     }
 }
