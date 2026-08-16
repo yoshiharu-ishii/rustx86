@@ -633,6 +633,54 @@ impl Machine {
         }
     }
 
+    /// JIT用の32bitストア (F1d-c)。**意味論はfast_write32へ委譲** —
+    /// note_write (自己書き換え検出、ADR-0020) も VRAM窓の脱出も dbg も
+    /// そちらの1本に畳まれている。返り値: true=完了 / false=脱出 (何も書いてない。
+    /// インタプリタが同じ命令をやり直す)。
+    /// **書いた後の自ページ世代照合は生成コード側の責務** (jit.rsのn+1契約)
+    pub fn jit_try_write32(&mut self, seg: usize, off: u32, val: u32) -> bool {
+        self.fast_write32(seg, off, val).is_some()
+    }
+
+    /// JIT用のRMW (`alu [mem], b`)。exec.rsのfast RMW armの写し —
+    /// 書き込み権限で先に変換 (writable⊆readable) するので、cc更新後に
+    /// 失敗する道が無い。ALUは従来と同じ alu_w、書いたら note_write
+    pub fn jit_try_rmw32(&mut self, seg: usize, off: u32, kind: u8, b: u32) -> bool {
+        let Some(pa) = self.fast_rmw32_addr(seg, off) else {
+            return false;
+        };
+        let a = u32::from_le_bytes(self.mem[pa..pa + 4].try_into().unwrap());
+        let v = crate::cpu::alu::alu_w(&mut self.cpu, kind, a, b, true);
+        self.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+        self.dcache.note_write(pa as u32);
+        true
+    }
+
+    /// JIT用のpush (dcache/exec.rsのfast_push32と同一実装 — あちらが委譲してくる)。
+    /// SSが平坦・32bitスタックで書き込みが確定するときだけSPを動かしてtrue
+    pub fn jit_try_push32(&mut self, v: u32) -> bool {
+        if !self.cpu.hidden[crate::cpu::SS].big {
+            return false;
+        }
+        let sp = self.cpu.regs[crate::cpu::SP].wrapping_sub(4);
+        if self.fast_write32(crate::cpu::SS, sp, v).is_none() {
+            return false;
+        }
+        self.cpu.regs[crate::cpu::SP] = sp;
+        true
+    }
+
+    /// JIT用のpop。読みが確定したときだけSPを確定 (push32と同じ約束)
+    pub fn jit_try_pop32(&mut self) -> Option<u32> {
+        if !self.cpu.hidden[crate::cpu::SS].big {
+            return None;
+        }
+        let sp = self.cpu.regs[crate::cpu::SP];
+        let v = self.fast_read32(crate::cpu::SS, sp)?;
+        self.cpu.regs[crate::cpu::SP] = sp.wrapping_add(4);
+        Some(v)
+    }
+
     pub fn write32(&mut self, addr: u32, val: u32) {
         if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
             return;
