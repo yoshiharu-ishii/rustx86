@@ -338,6 +338,15 @@ impl DecodeCache {
         self.page_gen.get((pa >> 12) as usize).copied().unwrap_or(0)
     }
 
+    /// ページ世代スロットの実番地 (JITのn+1脱出照合用)。RAM外は0。
+    /// page_genはnew()以後リサイズしない — 番地は機械の寿命の間安定
+    pub(crate) fn page_gen_addr_of(&self, pa: u32) -> usize {
+        self.page_gen
+            .get((pa >> 12) as usize)
+            .map(|g| g as *const u32 as usize)
+            .unwrap_or(0)
+    }
+
     /// 物理1バイト書き込みの通知。コードを控えたページだけ世代を進める。
     /// ビットが立っていない (= コード無しページ) なら分岐1つで抜ける —
     /// ここが全ストアの通り道なので、この形より重くしない
