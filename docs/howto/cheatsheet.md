@@ -25,7 +25,8 @@ tools/images/make-linux-snapshot.sh        # 起動済みスナップショッ�
 |---|---|
 | Linuxを対話起動 (シリアルをターミナルへ) | `cargo run --release --example run` (既定: vmlinuz-lts + initramfs-mini。RAMはinitrdから自動) |
 | ディスク付きでLinux起動 (gccが打てる) | `DISK=images/disk-gcc.img cargo run --release --example run` |
-| ゲストに1コマンド流して検証 (必ず終わる) | `GUEST_CMD='ls; printf "DONE%s\n" MARK' cargo run --release --example guestcmd` (KERNEL/INITRD/DISK/RAM_MB/BUDGET_Gで差し替え) |
+| ゲストに1コマンド流して検証 (必ず終わる) | `GUEST_CMD='ls; printf "DONE%s\n" MARK' cargo run --release --example guestcmd` (KERNEL/INITRD/DISK/RAM_MB/BUDGET_Gで差し替え。シリアルは流し見せ+5G命令ごとに心拍) |
+| 長回しに番犬を付ける (出力が止まったら殺す) | `python3 tools/watchdog.py --idle 300 --log b.log -- <コマンド...>` (プロセスグループごと殺す。rc=124が番犬発動の印) |
 | ブラウザでgccを使う | ルートFS「gcc入り (ディスク)」を選んで電源ON ([disk.md](../explanation/disk.md)) |
 | ディスクからOS起動 | `cargo run --release --example boot -- images/fd2880.img` |
 | 起動して1コマンド打って結果を見る | `cargo run --release --example boot -- images/fd2880.img 50000000 root "uname -a"` |
