@@ -35,6 +35,14 @@ mod_dir=$(dirname "$(find -L "$work/lib" "$work/usr/lib" -name ne2k-pci.ko 2>/de
 pkt=$(find -L "$work/lib" "$work/usr/lib" -name af_packet.ko 2>/dev/null | head -1)
 mkdir -p "$work/root/lib/modules"
 cp "$mod_dir/8390.ko" "$mod_dir/ne2k-pci.ko" "$pkt" "$work/root/lib/modules/"
+# ディスクのモジュール (virtio-blk-pci)。これも同じ荷物から借りる。
+#   virtio + virtio_ring     リングの共通機構
+#   virtio_pci (+legacy/modern_dev)  PCIの上に建つ口
+#   virtio_blk               ブロック装置本体 → /dev/vda
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+  ko=$(find -L "$work/lib" "$work/usr/lib" -name "$mod.ko" 2>/dev/null | head -1)
+  [ -n "$ko" ] && cp "$ko" "$work/root/lib/modules/"
+done
 # TLS一式 — busyboxのwgetはhttpsを外部ヘルパ ssl_client に投げる。
 # 全部Alpineのinitramfs-ltsから借りる (busybox/muslと同じ出自)。
 #   ssl_client            13KB  wgetのTLS口 (libssl/libcryptoに動的リンク)
@@ -93,6 +101,12 @@ export TERM=xterm
 /bin/busybox insmod /lib/modules/af_packet.ko 2>/dev/null
 /bin/busybox insmod /lib/modules/8390.ko 2>/dev/null
 /bin/busybox insmod /lib/modules/ne2k-pci.ko 2>/dev/null
+# ディスクのドライバ。**カードが無くてもエラーにならない**のはNICと同じ。
+# 依存の順は .ko の depends= の実測から: ring が土台で virtio がその上
+# (直感と逆。逆順で挿すと virtio_blk が Unknown symbol で落ちる — 実際に落ちた)
+for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk; do
+  /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
+done
 # カードが挿さっていればDHCPを裏で回す (ELKSの rc.sys が ktcp を上げるのと
 # 同じ作法)。**挿さっていなければ何もしない** — NIC無し起動は素のまま。
 # -b: リースが取れるまで裏で粘る (線が後から生きても拾える)

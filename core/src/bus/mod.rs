@@ -102,6 +102,9 @@ pub struct Devices {
     /// PCIのホストブリッジ。**16bit機には挿さない** — 1980年代の機械に
     /// PCIは無く、挿すと起動の命令列が変わる。世代で分けるのが史実にも合う
     pub pci: Option<pci::PciHost>,
+    /// virtio-blk (PCIスロット4)。**挿さっていないのが既定** — NICと同じで、
+    /// 装置が居なければ起動はビット同一のまま (ADR-0017の不変条件)
+    pub blk: Option<crate::dev::VirtioBlk>,
 }
 
 impl Default for Devices {
@@ -122,6 +125,7 @@ impl Devices {
             sysctl: 0,
             net: None,
             pci: None,
+            blk: None,
         }
     }
 }
