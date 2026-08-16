@@ -112,6 +112,7 @@ flowchart TD
 | B4 | 基本ブロック連結 | 10〜20% | ✅済 | 期待超え **-43%**。同一ページ内は分岐もまたいで続行。時計・割込み・照合は1命令粒度のまま = 命令数不変 |
 | B5 | ホットループのトレース化 | 10〜30% | 💤 | 交互A/B 6戦全敗 (+8%)、x86ホストでも+4%で再現 — 表アクセスはボトルネックではない。タグ [exp/speed-b5-blocks](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fspeed-b5-blocks) |
 | B6 | matchを関数ポインタ表に | 0〜10% | 💤 | B3/B5の教訓 (OoOがディスパッチを隠す) から期待薄に降格 |
+| B7 | threaded / tail-call dispatch (`become`) | 0〜数% | 💤 | M1のcomputed goto実測+10%どまり・Rohou CGO'15 (ITTAGE世代でdispatchミスは支配的でない)。becomeはnightly。やるならミス予測率実測 (kperf系) が先 ([ADR-0021](../adr/0021-broad-sweep-round.md)) |
 
 ### C. 実行の質
 
@@ -125,14 +126,20 @@ flowchart TD
 | C8 | condition/setccの分岐レス化 | 1〜2% | 💤 | 微益。F1では生成コード側の話 |
 | C9 | dbg.onの単相化 (const generic) | 1〜3% | 💤 | 改修が広い割に薄い |
 | C10 | INSTRUCTIONS_PER_TICK 64→256 | 数% | 🔒意味変更 | 命令数基準の引き直しを伴う。案B (ADR-0008) と同じ箱 |
+| C11 | cold外しの総ざらい (最頻armのインライン低速路12箇所・fill/fallback外出し・稀uop arm移送・translate_forのhot/cold分離) | 2〜5% | 🔬 | #[cold]化5勝2敗1分の続編。fill経路には**4MiBのvec!確保コード**がホットループ本体に同居 ([ADR-0021](../adr/0021-broad-sweep-round.md) バッチC) |
+| C12 | 鎖の直短縮バッチ (set_ip32でip_mask()剥がし・execのipレジスタ返し・slot計算のオフセットcarry化) | 数% | 🔬 | batch1 (-8%) の刈り残し。制御uop=全命令15〜20%が鎖上でip_mask()を払っている (ADR-0021 バッチA) |
+| C13 | jcc conditionの単一ディスパッチ化 + cc_signのu32実体化 | 1〜2% | 🔬 | C8 (分岐レス化) とは別物 — flag()2〜3回叩き+cc_op再ロードの多重ディスパッチ解消。jcc結果はipを作る鎖上 (ADR-0021 バッチA) |
+| C14 | **dead-flags elimination** — デコード時にブロック内フラグ死活を解析、死んだ定義はlazy storeも省く | 数% | 🔬 | Box64/QEMU恒久採用・Bochs類似改良で全体+5%実測。決定性無影響。lazy flags (C1) の一段先 (ADR-0021 バッチD1) |
 
 ### D. メモリとデータ配置
 
 | # | 案 | 期待 | 状態 | メモ |
 |---|---|---|---|---|
-| D1 | Machineのホット項目を先頭64Bに | 0〜5% | 🔬 | 未計測 (期待薄 — OoOの教訓) |
+| D1 | Machineのホット項目を先頭64Bに | 0〜5% | 💤 | 実測済みワッシュ (2026-08-13、タグ exp/hotstate、8周3勝5敗±0)。毎命令触るラインは散っていても常時L1在住 |
 | D2 | TLBスロット数調整 | 0〜5% | 💤 | 1024〜16384をスイープ、交互A/Bで4096が最良。固定長配列化も差なし |
-| D3 | wasm境界チェック削減 | wasm 5〜15% | 🔬 | リニアメモリ直アクセスの形に |
+| D3 | wasm境界チェック削減 | wasm 5〜15% | 💤 | **実測+8.4%全勝 (PR #119) → core不可侵の原則でrevert (PR #120)**、タグ exp/wasm-d3-bounds。ビルド層・JS層の蛇口も2026-08-13に乾いた (perf-log) |
+| D4 | Entry痩身 32→24B (Rm::RegをMemRefの番兵に畳む) | 0〜数% | 🔬 | Entryは実測32B・表4MiB (コメント「768KB」は死んだ記述)。Uopが16BになりABI値渡しがレジスタ2本に。注意: #111で4B痩身単独はワッシュ — 8B+ABI変化の跳びで挑む (ADR-0021 バッチB) |
+| D5 | victim TLB (直写像の後ろに8エントリ全連想) | 数% | 🔒census待ち | QEMU実測SPECINT+10.7%。ただしC7ワッシュ=ヒット率が高い示唆もあるので、TLBミス率を測ってから (ADR-0021 バッチD2) |
 
 ### E. 実行量そのものを減らす
 
@@ -144,6 +151,7 @@ flowchart TD
 | E4 | earlyprintk (無言150Mの体感) | 体感 | 🔬 | 命令数は減らない |
 | E5 | 自前スリムカーネル (config絞り) | -30〜50%? | 💤 | 580M自体を削る。再現ビルドの手間と相談 |
 | E6 | HLT早送り | — | ✅済 | P0の成果 |
+| E7 | HLT時計warp (仮想時刻を次のタイマ期限へ跳ばす) | 体感 | 🔬 | QEMU icountと同型で**命令数決定性を保つ**。定規には効かず、ブラウザのアイドルCPU使用率に効く製品品質玉 (ADR-0021 バッチD3) |
 
 ### F. 大物・研究枠
 
