@@ -81,6 +81,38 @@ fn main() {
                     fr[6] / 1_000_000
                 );
             }
+            // census (ADR-0021、opstats時のみ): TLBミス率 (D5の生死) とEA形分布 (P4)
+            let probes = m.tlb_probes.get();
+            if probes > 0 {
+                let misses = m.tlb_misses.get();
+                println!(
+                    "TLB: {}M probes / {}k misses = ミス率 {:.4}%",
+                    probes / 1_000_000,
+                    misses / 1_000,
+                    misses as f64 * 100.0 / probes as f64
+                );
+            }
+            let ea_total: u64 = m.ea_counts.iter().map(|c| c.get()).sum();
+            if ea_total > 0 {
+                let name = [
+                    "disp0のみ",
+                    "baseのみ",
+                    "indexのみ",
+                    "base+index",
+                    "dispのみ",
+                    "base+disp",
+                    "index+disp",
+                    "base+index+disp",
+                ];
+                print!("EA形:");
+                for (i, n) in name.iter().enumerate() {
+                    let c = m.ea_counts[i].get();
+                    if c > 0 {
+                        print!(" {n} {:.1}%", c as f64 * 100.0 / ea_total as f64);
+                    }
+                }
+                println!();
+            }
             // opstats フィーチャ付きなら、実行回数の上位を出す
             // (デコードキャッシュの対象選定は推測でなくこの実測で行う)
             let total: u64 = m.op_counts.iter().sum();
