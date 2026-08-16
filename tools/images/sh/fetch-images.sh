@@ -47,8 +47,10 @@ else
   exit 1
 fi
 # 道具 (curl/unzip/mtools/nasm) はLinuxコンテナから借りる — sh/ に居るものは
-# 全部この作法。配布zipの展開先 (道具箱が無い世界) ではネイティブのまま動く
-if [ ! -f /.dockerenv ] && [ -f tools/images/in-linux.sh ]; then
+# 全部この作法。ただし**このスクリプトだけはネイティブでも動ける**まま残す:
+# 配布zipの利用者はdockerを持っていないことがあり、ELKS/FreeDOSの取得は
+# curl+unzip+mtoolsで足りる (道具箱が要るのはイメージを「焼く」側)
+if [ ! -f /.dockerenv ] && [ -f tools/images/in-linux.sh ] && command -v docker >/dev/null 2>&1; then
   exec tools/images/in-linux.sh bash "tools/images/sh/fetch-images.sh" "$@"
 fi
 IMAGES=images
