@@ -689,6 +689,9 @@ pub struct JitLayout {
     pub mem_len: usize,
     /// 隠しレジスタ配列の先頭 (SegHidden 12バイト刻み、baseはオフセット0)
     pub hidden: usize,
+    /// セグメントセレクタ配列 (u16×6)。CPL = sregs[CS] & 3 (PE時) —
+    /// TLBインライン路の「リング3なら遅い道へ」のゲートに使う
+    pub sregs: usize,
     /// テキストVRAM窓 [lo, hi] (書き込み高速路はこの範囲を避けてヘルパへ)
     pub vram_lo: u32,
     pub vram_hi: u32,
@@ -767,6 +770,7 @@ pub fn layout(m: &Machine) -> JitLayout {
         mem: m.mem.as_ptr() as usize,
         mem_len: m.mem.len(),
         hidden: m.cpu.hidden.as_ptr() as usize,
+        sregs: m.cpu.sregs.as_ptr() as usize,
         vram_lo: crate::bus::VRAM_TEXT_BASE,
         vram_hi: crate::bus::VRAM_TEXT_END,
         jit_budget: &m.jit_budget as *const u32 as usize,
