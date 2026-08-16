@@ -23,16 +23,19 @@ fn boot_to_shell() -> Machine {
     m.boot_linux_with_initrd(&kernel, "console=ttyS0", Some(&initrd))
         .expect("boot");
     let t0 = std::time::Instant::now();
-    // シェルのバナーが出るまで回す (番人: 3G命令)
+    // シェルのバナーが出るまで回す。番人は10G命令 — ミニinitramfsが
+    // 育って (virtio/squashfs/overlayのinsmodで計8個) 3Gでは届かなくなった。
+    // これは性能の門番ではなく暴走の番人なので、緩くてよい
     let mut n: u64 = 0;
-    while n < 3_000_000_000 {
-        n += m.run(50_000_000);
+    while n < 10_000_000_000 {
+        let ran = m.run(50_000_000);
+        n += ran;
         if m.trap.is_some() {
             panic!("trap: {:?}", m.trap);
         }
-        if m.halted {
-            break; // 起こせない眠り (デッドハルト) — run() は0命令で返り続ける
-        }
+        // バナーの確認は halted の検査より**先**。シェルは出た直後にHLTで
+        // 待つので、バナーを含むスライスがHLTで終わると「眠り=失敗」と
+        // 誤判定してしまう (initが育ってタイミングが変わり、実際に踏んだ)
         let s = String::from_utf8_lossy(&m.devices.uart.tx);
         if s.contains("busybox shell") {
             println!(
@@ -41,6 +44,9 @@ fn boot_to_shell() -> Machine {
                 n / 1_000_000
             );
             return m;
+        }
+        if m.halted && ran == 0 {
+            break; // 起こせない眠り (デッドハルト) — 進めなくなった
         }
     }
     panic!("シェルに届かなかった");
@@ -72,18 +78,21 @@ fn main() {
             m.devices.uart.feed(b"ls /\n");
             let mut n: u64 = 0;
             while n < 2_000_000_000 {
-                n += m.run(10_000_000);
+                let ran = m.run(10_000_000);
+                n += ran;
                 if m.trap.is_some() {
                     panic!("trap: {:?}", m.trap);
                 }
-                if m.halted {
-                    break; // デッドハルト (run()は0命令で返り続ける)
-                }
+                // 出力の確認が halted より先 (save側と同じ理由 — 復元直後の
+                // 機械はシェルのHLTで寝ていて、スライスは大抵HLTで終わる)
                 let s = String::from_utf8_lossy(&m.devices.uart.tx[before..]);
                 if s.contains("bin") && s.contains("dev") {
                     println!("復元後の対話OK: ls が返った ({}M命令)", n / 1_000_000);
                     println!("--- 出力 ---\n{}", s);
                     return;
+                }
+                if m.halted && ran == 0 {
+                    break; // デッドハルト — 進めなくなった
                 }
             }
             panic!("復元後に ls が返らなかった");
