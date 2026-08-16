@@ -591,6 +591,48 @@ impl Machine {
         Some(())
     }
 
+    /// JIT用の**記録しない**32bit読み (F1d-b、ADR-0008の脱出モデル)。
+    ///
+    /// [`read32`](Self::read32) との違いは1点だけ — フォールトしそうなとき
+    /// `note_fault` せず None を返す。生成コードはこれを合図に**状態を1つも
+    /// 変えずに脱出**し、インタプリタが同じ命令をやり直して正式に裁く
+    /// (#PFの記録・配送は従来経路)。
+    ///
+    /// 脱出は保守的でよい (余計に脱出しても、やり直しで同じ結果になる) ので、
+    /// ページ跨ぎは無条件で None に倒す。Some の道は read32 の速い道と同じ部品
+    /// (translate_for + read_phys32) — 意味論を二重実装しない
+    pub fn jit_try_read32(&self, addr: u32) -> Option<u32> {
+        if addr & 0xFFF > 0xFFC {
+            return None; // ページ跨ぎ (稀) はインタプリタに任せる
+        }
+        match self.translate_for(addr, false) {
+            Ok(pa) => Some(self.read_phys32(pa)),
+            Err(_) => None,
+        }
+    }
+
+    /// JIT用の8bit読み。1バイトはページを跨げないので跨ぎ検査なし
+    pub fn jit_try_read8(&self, addr: u32) -> Option<u8> {
+        match self.translate_for(addr, false) {
+            Ok(pa) => Some(self.read_phys8(pa)),
+            Err(_) => None,
+        }
+    }
+
+    /// JIT用の16bit読み。跨ぎは脱出 (インタプリタに任せる)
+    pub fn jit_try_read16(&self, addr: u32) -> Option<u16> {
+        if addr & 0xFFF > 0xFFE {
+            return None;
+        }
+        match self.translate_for(addr, false) {
+            Ok(pa) => Some(u16::from_le_bytes([
+                self.read_phys8(pa),
+                self.read_phys8(pa.wrapping_add(1)),
+            ])),
+            Err(_) => None,
+        }
+    }
+
     pub fn write32(&mut self, addr: u32, val: u32) {
         if addr & 0xFFF <= 0xFFC && self.write_wide(addr, val, 4) {
             return;
