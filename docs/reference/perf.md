@@ -126,9 +126,9 @@ flowchart TD
 | C8 | condition/setccの分岐レス化 | 1〜2% | 💤 | 微益。F1では生成コード側の話 |
 | C9 | dbg.onの単相化 (const generic) | 1〜3% | 💤 | 改修が広い割に薄い |
 | C10 | INSTRUCTIONS_PER_TICK 64→256 | 数% | 🔒意味変更 | 命令数基準の引き直しを伴う。案B (ADR-0008) と同じ箱 |
-| C11 | cold外しの総ざらい (最頻armのインライン低速路12箇所・fill/fallback外出し・稀uop arm移送・translate_forのhot/cold分離) | 2〜5% | 🔬 | #[cold]化5勝2敗1分の続編。fill経路には**4MiBのvec!確保コード**がホットループ本体に同居 ([ADR-0021](../adr/0021-broad-sweep-round.md) バッチC) |
-| C12 | 鎖の直短縮バッチ (set_ip32でip_mask()剥がし・execのipレジスタ返し・slot計算のオフセットcarry化) | 数% | 🔬 | batch1 (-8%) の刈り残し。制御uop=全命令15〜20%が鎖上でip_mask()を払っている (ADR-0021 バッチA) |
-| C13 | jcc conditionの単一ディスパッチ化 + cc_signのu32実体化 | 1〜2% | 🔬 | C8 (分岐レス化) とは別物 — flag()2〜3回叩き+cc_op再ロードの多重ディスパッチ解消。jcc結果はipを作る鎖上 (ADR-0021 バッチA) |
+| C11 | cold外しの総ざらい (最頻armのインライン低速路12箇所・fill/fallback外出し・稀uop arm移送・translate_forのhot/cold分離) | 2〜5% | ✅済 **-19%** (8勝0敗、105 MIPS温間、PR #170) | #[cold]化5勝2敗1分の続編。fill経路には**4MiBのvec!確保コード**がホットループ本体に同居 ([ADR-0021](../adr/0021-broad-sweep-round.md) バッチC) |
+| C12 | 鎖の直短縮バッチ (set_ip32・execのipレジスタ返し・slot計算のcarry化) | 数% | 💤 | **実測ワッシュ** (2026-08-16、8周1勝6敗1分+2%)。バッチC後の世界では鎖の微調整はOoOの影 — 判別則(4)の3度目。タグ exp/chain-batch |
+| C13 | jcc conditionの単一ディスパッチ化 | 1〜2% | 💤 | C12と同バッチで実測ワッシュ (タグ exp/chain-batch)。cc_sign実体化は未試行のまま同タグへ |
 | C14 | **dead-flags elimination** — デコード時にブロック内フラグ死活を解析、死んだ定義はlazy storeも省く | 数% | 🔬 | Box64/QEMU恒久採用・Bochs類似改良で全体+5%実測。決定性無影響。lazy flags (C1) の一段先 (ADR-0021 バッチD1) |
 
 ### D. メモリとデータ配置
