@@ -1,0 +1,15 @@
+[package]
+name = "rustx86-jit-a64"
+version = "0.1.0"
+edition = "2021"
+
+# F1d: 税なしテンプレートJIT (ADR-0022)。Craneliftの代わりに dynasmrt —
+# ランタイム ~4.5k SLoC・依存3つ・数十kB。リンク税はjbootの交互A/Bで見張る
+[dependencies]
+rustx86-core = { path = "../core" }
+dynasm = "5"
+dynasmrt = "5"
+
+[[bin]]
+name = "jboot"
+path = "src/bin/jboot.rs"
