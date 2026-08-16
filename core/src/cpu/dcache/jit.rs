@@ -749,6 +749,13 @@ pub fn page_gen_addr(m: &Machine, pa: u32) -> usize {
     m.dcache.page_gen_addr_of(pa)
 }
 
+/// ブロックを焼いたページに「コードあり」を立てる (fillと同じ義務)。
+/// 立て忘れると note_write が素通りし、JITだけが実行するページの
+/// 自己書き換え/DMA上書きを見逃す — 焼いたら必ず呼ぶこと
+pub fn mark_code_page(m: &mut Machine, pa: u32) {
+    m.dcache.mark_code_page(pa);
+}
+
 pub fn layout(m: &Machine) -> JitLayout {
     // jit.rs は cpu モジュールの子孫なので、Cpuのprivateフィールドに触れる
     // (alu.rs が cc_* に触れるのと同じ理屈)。アドレスはここで写し取り、
