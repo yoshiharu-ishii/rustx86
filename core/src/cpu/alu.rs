@@ -119,16 +119,37 @@ pub fn set_szp_w(c: &mut Cpu, v: u32, wide: bool) {
     }
 }
 
+/// jcc/setcc の条件判定。**遅延の有無を先に1回だけ裁く** (C13) —
+/// 以前は flag() を条件ごとに1〜3回呼び、そのたびに cc_op==CC_NONE の
+/// 判定をやり直していた。jcc の結果は次のIPを作る鎖の上に居るので、
+/// ここの縦深はそのまま反復の縦深になる。個々の式は flag() の遅延側と
+/// 逐語同一 (意味論の原本は cc_cf/cc_of — 二重実装ではなく展開)
 pub fn condition(c: &Cpu, cc: u8) -> bool {
-    let r = match cc >> 1 {
-        0 => c.flag(OF),
-        1 => c.flag(CF),
-        2 => c.flag(ZF),
-        3 => c.flag(CF) || c.flag(ZF),
-        4 => c.flag(SF),
-        5 => c.flag(PF),
-        6 => c.flag(SF) != c.flag(OF),
-        _ => c.flag(ZF) || (c.flag(SF) != c.flag(OF)),
+    let r = if c.cc_op == super::CC_NONE {
+        // eager: flags フィールドが6フラグ含めて真実
+        let f = c.flags;
+        match cc >> 1 {
+            0 => f & OF != 0,
+            1 => f & CF != 0,
+            2 => f & ZF != 0,
+            3 => f & (CF | ZF) != 0,
+            4 => f & SF != 0,
+            5 => f & PF != 0,
+            6 => (f & SF != 0) != (f & OF != 0),
+            _ => f & ZF != 0 || ((f & SF != 0) != (f & OF != 0)),
+        }
+    } else {
+        // lazy: 材料から必要なビットだけ (flag()の遅延側と同じ式)
+        match cc >> 1 {
+            0 => c.cc_of(),
+            1 => c.cc_cf(),
+            2 => c.cc_r == 0,
+            3 => c.cc_cf() || c.cc_r == 0,
+            4 => c.cc_r & c.cc_sign() != 0,
+            5 => (c.cc_r as u8).count_ones().is_multiple_of(2),
+            6 => (c.cc_r & c.cc_sign() != 0) != c.cc_of(),
+            _ => c.cc_r == 0 || ((c.cc_r & c.cc_sign() != 0) != c.cc_of()),
+        }
     };
     if cc & 1 != 0 {
         !r
