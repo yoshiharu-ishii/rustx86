@@ -736,7 +736,12 @@ function syncSidebar() {
   $('devCon').textContent = linux ? 'シリアル (ttyS0)' : conJp;
   // Linuxのときは自分が読んだ名前を使う (前の機械のラベルを引きずらない)
   const imageLabel = linux ? linux.imageName : lastLabel;
-  $('devDisk').textContent = linux ? linux.initrdName : lastLabel || '—';
+  // ディスク型なら挿した実体 (vda) を、メモリ型なら initramfs を出す
+  $('devDisk').textContent = linux
+    ? linux.diskName
+      ? `${linux.diskName} (vda)`
+      : linux.initrdName
+    : lastLabel || '—';
   $('infoImage').textContent = imageLabel || '—';
   // 機種とRAMは機械自身に聞く (デバッガと同じ出どころ)
   try {

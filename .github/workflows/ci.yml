@@ -388,7 +388,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -501,7 +501,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -580,7 +580,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -697,7 +697,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v3-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/mkcpio.py') }}
+          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'

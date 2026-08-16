@@ -142,18 +142,30 @@ export function byGroup(machines = MACHINES) {
 export const ROOTFS = [
   {
     name: 'initramfs-mini',
-    label: 'ミニ',
+    label: 'ミニ (RAM)',
     sub: 'busybox + snake/vi',
-    note: '3.6MB。まっすぐシェルに出る既定のルートFS。128MBで動く',
+    initrd: 'initramfs-mini',
+    note: '4MB。まっすぐシェルに出る既定のルートFS。128MBで動く',
+  },
+  {
+    name: 'disk-gcc',
+    label: 'gcc入り (ディスク)',
+    sub: 'squashfs + overlay',
+    initrd: 'initramfs-mini',
+    disk: 'disk-gcc.img',
+    note:
+      'virtio-blkの/dev/vdaにgcc一式 (34MBのsquashfs)。ミニのinitが見つけて' +
+      '移り住む。読んだ分しかRAMに載らないので**128MBで済む** — こちらが本命。' +
+      'tools/images/make-gcc-disk.sh で作る',
   },
   {
     name: 'initramfs-gcc',
-    label: 'gcc入り',
-    sub: 'gcc + binutils + musl-dev',
+    label: 'gcc入り (RAM)',
+    sub: 'initramfsに全部載せ',
+    initrd: 'initramfs-gcc',
     note:
-      '35MB (展開88MB)。中で `gcc hello.c && ./a.out` が通る。' +
-      '展開した中身がそのままtmpfsに載るので、RAMは自動で256MBになる ' +
-      '(足りないと起動はするのにcollect2だけ落ちる)。' +
+      '34MB (展開84MB)。ディスク無しでも動く保険の形。展開した中身が' +
+      'そのままtmpfsに載るので、RAMは自動で256MBになる。' +
       'tools/images/make-gcc-initramfs.sh で作る',
   },
 ];
