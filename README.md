@@ -107,6 +107,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # 2. ブラウザ版を作るとき
 rustup target add wasm32-unknown-unknown   # wasm を吐けるようにする
 cargo install wasm-pack                    # JSとの繋ぎを自動生成する道具
+
+# 3. イメージを取ってくる・焼くとき (Docker Desktop / OrbStack 等)
+#    tools/images/sh/ のスクリプトはLinuxの道具箱コンテナの中で走る —
+#    ホストにcpioやmtoolsを入れる必要は無い (docs/howto/images.md)
+docker --version
 ```
 
 `core` は**外部クレートに依存していない**ので、`cargo test` はこれだけで通る。
@@ -140,9 +145,12 @@ tools/images/sh/fetch-images.sh elks     # 片方だけでもよい
 
 | ファイル | 中身 |
 |---|---|
-| `images/fd1440.img` | ELKS 0.9.1。`tetris` `invaders` `ttypong` `sl` `matrix` が最初から入っている |
+| `images/fd2880.img` | ELKS 0.9.1。`tetris` `invaders` `ttypong` `sl` `matrix` が最初から入っている |
 | `images/fd14boot.img` | FreeDOS 1.4 の素の起動フロッピー (8086ビルド) |
 | `images/fd14games.img` | 上に `eliza` `zmiy` `row4t` を載せたもの |
+| `images/vmlinuz-lts` ほか | `fetch-images.sh linux` で。Alpineのカーネルとinitramfs |
+
+ルートFS (ミニ/gcc入り) とディスクの焼き方は [イメージの焼き方](docs/howto/images.md) へ。
 
 **テキストモードのゲームしか入れていない。** この機械の画面はテキストだけなので、
 CGAグラフィックスを要求するものは Tier 6 まで動かない
@@ -208,7 +216,7 @@ cargo test
 #    実際に何命令かかったかは実行時に表示される)
 
 # ELKS を起動してログインし、tetris を動かす
-cargo run --release --example boot -- images/fd1440.img '' \
+cargo run --release --example boot -- images/fd2880.img '' \
   "login:" 'root\n' "ELKS 0.9.1" 'tetris\n'
 
 # FreeDOS をプロンプトまで進めて dir を打つ
@@ -221,8 +229,17 @@ cargo run --release --example boot -- images/fd14games.img '' \
 # デバッガ (gdb風)
 cargo run --release --example dbg -- images/fd14games.img
 
-# ブートセクタ1つを実行
-cargo run --example run -- asm/hello.bin
+# Linuxを対話起動 (シリアルをそのままターミナルへ。Ctrl-]で終了)
+cargo run --release --example run
+
+# ディスク付きでLinux起動 — シェルで gcc hello.c && ./a.out が打てる
+DISK=images/disk-gcc.img cargo run --release --example run
+
+# ゲストに1コマンド流して検証 (必ず終わる非対話ランナー)
+GUEST_CMD='uname -a; printf "DONE%s\n" MARK' cargo run --release --example guestcmd
+
+# ブートセクタ1つを実行 (デバッガ経由 — 512バイトの.binを直接食える)
+cargo run --release --example dbg -- asm/hello.bin
 
 # 実行速度の計測 (--release 必須)
 cargo run --release --example bench -- asm/bench.bin
