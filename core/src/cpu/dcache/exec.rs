@@ -315,27 +315,13 @@ fn cold_strone(m: &mut Machine, op: u8, seg: i8) {
 /// 確定するときだけ実行してtrue。falseなら呼び手が控えて従来経路へ
 #[inline]
 fn fast_push32(m: &mut Machine, v: u32) -> bool {
-    if !m.cpu.hidden[SS].big {
-        return false;
-    }
-    let sp = m.cpu.regs[SP].wrapping_sub(4);
-    if m.fast_write32(SS, sp, v).is_none() {
-        return false;
-    }
-    m.cpu.regs[SP] = sp;
-    true
+    m.jit_try_push32(v) // 実装は1本 (mem/mod.rs) — JITヘルパと共有
 }
 
 /// popの速い道。読みが確定したときだけSPを確定 (push32/pop_wと同じ約束)
 #[inline]
 fn fast_pop32(m: &mut Machine) -> Option<u32> {
-    if !m.cpu.hidden[SS].big {
-        return None;
-    }
-    let sp = m.cpu.regs[SP];
-    let v = m.fast_read32(SS, sp)?;
-    m.cpu.regs[SP] = sp.wrapping_add(4);
-    Some(v)
+    m.jit_try_pop32() // 実装は1本 (mem/mod.rs) — JITヘルパと共有
 }
 
 /// 実効アドレス。レジスタの**今の**値から組む。
