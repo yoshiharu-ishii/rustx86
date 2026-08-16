@@ -16,9 +16,9 @@
 #
 # ## 使い方
 #
-#     tools/images/fetch-images.sh          # 全部
-#     tools/images/fetch-images.sh elks     # ELKSだけ
-#     tools/images/fetch-images.sh freedos  # FreeDOS (ゲーム入り) だけ
+#     tools/images/sh/fetch-images.sh          # 全部
+#     tools/images/sh/fetch-images.sh elks     # ELKSだけ
+#     tools/images/sh/fetch-images.sh freedos  # FreeDOS (ゲーム入り) だけ
 #
 # 出来上がるもの:
 #
@@ -40,9 +40,18 @@ elif [ -d "$here/../web" ]; then
   cd "$here/.."
 elif [ -d "$here/../../web" ]; then
   cd "$here/../.."
+elif [ -d "$here/../../../web" ]; then
+  cd "$here/../../.."
 else
   echo "web/ が見つからない。リポジトリのルートか、配布zipの展開先で実行する" >&2
   exit 1
+fi
+# 道具 (curl/unzip/mtools/nasm) はLinuxコンテナから借りる — sh/ に居るものは
+# 全部この作法。ただし**このスクリプトだけはネイティブでも動ける**まま残す:
+# 配布zipの利用者はdockerを持っていないことがあり、ELKS/FreeDOSの取得は
+# curl+unzip+mtoolsで足りる (道具箱が要るのはイメージを「焼く」側)
+if [ ! -f /.dockerenv ] && [ -f tools/images/in-linux.sh ] && command -v docker >/dev/null 2>&1; then
+  exec tools/images/in-linux.sh bash "tools/images/sh/fetch-images.sh" "$@"
 fi
 IMAGES=images
 WEB=web

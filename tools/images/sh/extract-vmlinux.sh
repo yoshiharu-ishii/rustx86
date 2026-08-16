@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # bzImage から非圧縮の vmlinux (ELF) を取り出す。
 #
-#   tools/images/extract-vmlinux.sh                # images/vmlinuz-lts → images/vmlinux-lts
-#   tools/images/extract-vmlinux.sh in.bz out.elf
+#   tools/images/sh/extract-vmlinux.sh                # images/vmlinuz-lts → images/vmlinux-lts
+#   tools/images/sh/extract-vmlinux.sh in.bz out.elf
 #
 # ## なぜ取り出すのか
 #
@@ -15,7 +15,9 @@
 # 仕組みはカーネル付属 scripts/extract-vmlinux と同じ: 圧縮データの
 # マジックを探して展開し、ELF が出てくるまで試す。
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+# 道具 (xz/zstd) はLinuxコンテナから借りる — sh/ に居るものは全部この作法
+[ -f /.dockerenv ] || exec tools/images/in-linux.sh bash "$0" "$@"
+cd "$(dirname "$0")/../../.."
 
 IN="${1:-images/vmlinuz-lts}"
 OUT="${2:-images/vmlinux-lts}"

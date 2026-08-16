@@ -99,7 +99,7 @@ initramfs方式は展開中に「圧縮イメージ+展開済みの中身」が�
 
 ```bash
 # 焼く (道具箱=Dockerの中で走る。詳細は ../howto/images.md)
-tools/images/make-gcc-disk.sh
+tools/images/sh/make-gcc-disk.sh
 
 # ネイティブで起動 (INITRDは既定でminiなので指定不要)
 DISK=images/disk-gcc.img cargo run --release --example run -- images/vmlinuz-lts
