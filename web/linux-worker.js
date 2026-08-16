@@ -23,6 +23,7 @@
 //         {type:'dbg-stop', why}             見張り (ブレークポイント等) が機械を止めた
 
 import init, { Emulator } from './pkg/rustx86_wasm.js';
+import { setupJit, pumpJit, resetJit } from './jit-runtime.js';
 
 let emu = null;
 let running = false;
@@ -39,7 +40,14 @@ let instrs = 0;
 let lastMeasure = 0;
 let lastTone = 0;
 
-await init();
+const wasmExports = await init();
+let jitOn = false;
+/** 初回enable時にimport束とテーブルを結線する (再bootでは張り直す) */
+function jitEnable() {
+  setupJit(emu, wasmExports);
+  emu.jit_enable();
+  jitOn = true;
+}
 postMessage({ type: 'ready' });
 
 self.onmessage = (e) => {
@@ -69,6 +77,10 @@ self.onmessage = (e) => {
         // スナップショット復元はカーネルがもう時計を読んだ後なので合わせない
         emu.set_rtc_unix(Date.now() / 1000);
       }
+      // JIT (F1d wasm)。電源投入時の初期値 — 実行中の切替は 'jit' メッセージ
+      resetJit();
+      jitOn = false;
+      if (msg.jit) jitEnable();
       netInbox = [];
       running = true;
       instrs = 0;
@@ -106,6 +118,16 @@ self.onmessage = (e) => {
       postMessage({ type: 'loaded' });
       break;
     }
+    case 'jit':
+      // 実行中のon/off (比較実験の外部フラグ)。offは据え付けごと捨てる —
+      // on/offどちらで走っても決定性 (命令数・出力) が不変なのが門番
+      if (msg.on && !jitOn) jitEnable();
+      if (!msg.on && jitOn) {
+        emu.jit_disable();
+        jitOn = false;
+      }
+      postMessage({ type: 'jit', on: jitOn });
+      break;
     case 'pause':
       running = false;
       break;
@@ -218,6 +240,9 @@ function loop() {
     // **返るのは「実際に進んだ量」** — 送信フレームが出ると早く戻るので、
     // 頼んだ量で勘定するとゲストの時計が速く回る (pitfalls 7 の型)
     ran = emu.run_slice(sliceSize);
+    // スライスで焼き上がったブロックを据え付ける (instantiateはJSの仕事)。
+    // 据え付くまでの間はインタプリタが走っている — 退路は常にある
+    if (jitOn) pumpJit(emu);
   } catch (err) {
     running = false;
     postMessage({ type: 'trap', reason: 'wasm panic: ' + err });
