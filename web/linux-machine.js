@@ -135,6 +135,9 @@ export function mountLinux(canvas, opts = {}) {
   // 描画ループ (端末の dirty を見て 60fps で描く)。
   // **取り外されたら止める** — 回しっぱなしだと裏で描き続ける
   let alive = true;
+  /** 電源OFFで進む世代。**仕掛かり中のboot()を無効化する** — OFFの直後に
+      fetch済みの前のbootがワーカーを立ち上げてくる事故を防ぐ */
+  let bootGen = 0;
   (function draw() {
     if (!alive) return;
     term.render();
@@ -177,6 +180,7 @@ export function mountLinux(canvas, opts = {}) {
    */
   async function boot({ snapshot: given = null, kernel: givenKernel = null, kernelName = '' } = {}) {
     if (busy) return;
+    const gen = bootGen; // この起動が属する世代 (電源OFFで古くなる)
     busy = true;
     booted = false;
     paused = false;
@@ -248,7 +252,7 @@ export function mountLinux(canvas, opts = {}) {
         return;
       }
     }
-    if (!alive) return; // fetch の間に別のマシンへ切り替えられた
+    if (!alive || gen !== bootGen) return; // fetchの間に切替 or 電源OFF
 
     // ディスク型ならイメージも取る。**無ければディスク無しで進む** —
     // ミニのシェルには落ちるので、真っ暗になるよりは説明して動かす
@@ -261,7 +265,7 @@ export function mountLinux(canvas, opts = {}) {
         usedDisk = '';
       }
     }
-    if (!alive) return;
+    if (!alive || gen !== bootGen) return;
 
     // **RAMは実物を見てから決める。** 自動 (ramMb未指定) のときだけ効く。
     // ディスク型はinitrdがミニなので自然に128MBになる — ディスクの中身は
@@ -451,6 +455,20 @@ export function mountLinux(canvas, opts = {}) {
     /** ドラッグで選んだ文字列 (何も選んでいなければ空) */
     selectedText() {
       return term.selectedText();
+    },
+    /** 電源を切る。**機械 (この取っ手) は残る** — ルートFSを選び直して
+        もう一度 boot() できる。取り外し (destroy) とは別の顔 */
+    powerOff() {
+      bootGen += 1; // 仕掛かり中のbootを無効化
+      worker?.terminate();
+      worker = null;
+      booted = false;
+      busy = false;
+      paused = false;
+      dbgFlush();
+      term.reset();
+      status('電源を切りました — ルートFSを選び直して、電源でまた起動できます');
+      opts.onState?.();
     },
     /** 取り外す。**走らせっぱなしにしない** — ワーカーが裏でCPUを食い続ける */
     destroy() {
