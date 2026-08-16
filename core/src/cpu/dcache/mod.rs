@@ -35,8 +35,10 @@ use crate::Machine;
 mod decode;
 mod exec;
 
-/// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さと、
-/// ホストのキャッシュに収まる小ささの折り合い (768KB)。要調整なら実測で
+/// 直接マップのスロット数。ブートの熱い命令アドレス集合を覆う広さとの
+/// 折り合い。**表全体は 128K × Entry 32B = 4MiB** (L2の1/3。旧記述の
+/// 「768KB」は誤り — 2026-08-16 レイアウト計算で訂正)。スロット数の掃引は
+/// D2で実測済みワッシュ、Entry痩身はD4として台帳に
 const SLOTS: usize = 128 * 1024;
 
 const TAG_INVALID: u32 = 0xFFFF_FFFF;
@@ -280,6 +282,9 @@ const LEN_MASK: u8 = 0x0F;
 const F_MEM: u8 = 0x10;
 const F_CTL: u8 = 0x20;
 
+// 表4MiBの根拠 (SLOTSコメント参照)。痩せたらここも更新する (D4)
+const _: () = assert!(std::mem::size_of::<Entry>() == 32);
+
 #[derive(Clone, Copy)]
 struct Entry {
     /// 命令先頭の物理アドレス (TAG_INVALID = 空き)
@@ -466,6 +471,57 @@ fn classify_fallback(m: &mut Machine, pa: u32) {
     }
 }
 
+/// スロットのミス側: 新規デコードして控える (Some) か、語彙外で従来経路へ
+/// 落とす (None — 呼び手がtrap_ip/控え/stepをやる)。fillは全命令の~1%なので
+/// 4MiB確保・分類・帳簿ごとホットループの外へ置く (C11)
+#[cold]
+#[inline(never)]
+fn fill_or_fallback(m: &mut Machine, pa: u32, page: usize, slot: usize) -> Option<(u8, Uop)> {
+    match decode::decode_at(m, pa) {
+        Some((len, uop)) => {
+            if m.dcache.entries.is_empty() {
+                m.dcache.entries = vec![
+                    Entry {
+                        tag: TAG_INVALID,
+                        gen: 0,
+                        len_flags: 0,
+                        uop: Uop::Ret,
+                    };
+                    SLOTS
+                ];
+            }
+            let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+            // 分類はデコード時の一度だけ — 実行時はビットを見るだけ
+            let mut lf = len;
+            debug_assert!(len & !LEN_MASK == 0);
+            if exec::may_touch_memory(&uop) {
+                lf |= F_MEM;
+            }
+            if exec::is_control(&uop) {
+                lf |= F_CTL;
+            }
+            m.dcache.entries[slot] = Entry {
+                tag: pa,
+                gen,
+                len_flags: lf,
+                uop,
+            };
+            if let Some(w) = m.dcache.page_has_code.get_mut(page >> 6) {
+                *w |= 1 << (page & 63);
+            }
+            m.dcache.fills += 1;
+            Some((lf, uop))
+        }
+        None => {
+            m.dcache.fallbacks += 1;
+            if cfg!(feature = "opstats") {
+                classify_fallback(m, pa);
+            }
+            None
+        }
+    }
+}
+
 /// キャッシュ経由の実行。対象外は従来の [`super::step`] へ落ちる。
 ///
 /// ## ブロック連結 (B4)
@@ -518,69 +574,32 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let page = (pa >> 12) as usize;
         let slot = (pa as usize) & (SLOTS - 1);
 
-        // Entry照合 (gen一致 = 「この命令は現世代」の保証)
-        let mut cached = None;
-        if !m.dcache.entries.is_empty() {
-            let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-            let e = &m.dcache.entries[slot];
-            if e.tag == pa && e.gen == gen_now {
-                cached = Some((e.len_flags, e.uop));
-                // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
-                if cfg!(feature = "opstats") {
-                    m.dcache.hits += 1;
+        // Entry照合 (gen一致 = 「この命令は現世代」の保証)。
+        // ヒット路は中間のOptionを経由せず直結 — ミス/新規/対象外の塊は
+        // #[cold] の fill_or_fallback へ (バッチC11: ホットループの痩身)
+        let (lf, uop) = 'hit: {
+            if !m.dcache.entries.is_empty() {
+                let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+                let e = &m.dcache.entries[slot];
+                if e.tag == pa && e.gen == gen_now {
+                    let got = (e.len_flags, e.uop);
+                    // ヒットカウンタは毎命令の同番地storeになる — 計測時だけ数える
+                    if cfg!(feature = "opstats") {
+                        m.dcache.hits += 1;
+                    }
+                    break 'hit got;
                 }
             }
-        }
-
-        let (lf, uop) = match cached {
-            Some(x) => x,
-            None => match decode::decode_at(m, pa) {
-                Some((len, uop)) => {
-                    if m.dcache.entries.is_empty() {
-                        m.dcache.entries = vec![
-                            Entry {
-                                tag: TAG_INVALID,
-                                gen: 0,
-                                len_flags: 0,
-                                uop: Uop::Ret,
-                            };
-                            SLOTS
-                        ];
-                    }
-                    let gen = m.dcache.page_gen.get(page).copied().unwrap_or(0);
-                    // 分類はデコード時の一度だけ — 実行時はビットを見るだけ
-                    let mut lf = len;
-                    debug_assert!(len & !LEN_MASK == 0);
-                    if exec::may_touch_memory(&uop) {
-                        lf |= F_MEM;
-                    }
-                    if exec::is_control(&uop) {
-                        lf |= F_CTL;
-                    }
-                    m.dcache.entries[slot] = Entry {
-                        tag: pa,
-                        gen,
-                        len_flags: lf,
-                        uop,
-                    };
-                    if let Some(w) = m.dcache.page_has_code.get_mut(page >> 6) {
-                        *w |= 1 << (page & 63);
-                    }
-                    m.dcache.fills += 1;
-                    (lf, uop)
-                }
+            match fill_or_fallback(m, pa, page, slot) {
+                Some(x) => x,
                 None => {
-                    m.dcache.fallbacks += 1;
-                    if cfg!(feature = "opstats") {
-                        classify_fallback(m, pa);
-                    }
                     // 連結中に来たら trap_ip を今の現場に直す (外側で控えたのは
                     // ブロック先頭のIP)
                     m.trap_ip = m.cpu.ip;
                     m.guard_save();
                     return super::step(m);
                 }
-            },
+            }
         };
 
         // 控えは「メモリに触るuop」だけ。キャッシュ済み命令のフェッチは
