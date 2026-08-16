@@ -318,6 +318,14 @@ impl Cpu {
         self.ip = self.ip.wrapping_add(n);
     }
 
+    /// set_ip の32bit CS確定版 (advance_ip32と同じ論拠 — C12)。
+    /// 制御uop (全命令の15〜20%) は ip → 次の照合番地 の鎖上に居るので、
+    /// ip_mask() の cr0/CSロード+分岐をここから剥がす
+    #[inline(always)]
+    pub(crate) fn set_ip32(&mut self, v: u32) {
+        self.ip = v;
+    }
+
     /// セグメント適用後のリニアアドレス。
     /// リアルモードは1MBで折り返す (8086のアドレスバスが20本だったため)
     pub fn lin(&self, seg: usize, off: u32) -> u32 {

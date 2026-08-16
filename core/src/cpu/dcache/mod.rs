@@ -567,6 +567,11 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
     } else {
         chain_extra
     };
+    // ループ不変 (C12): ブロックは同一物理ページ内で完結する (跨いだら退出)
+    // ので、線形/物理のページ先頭は掴み置きできる — 毎反復の
+    // `pa & !0xFFF` と `>>12` 比較を鎖から外す
+    let lin_page = lin & !0xFFF;
+    let pa_page = pa & !0xFFF;
     loop {
         // 前の命令のページウォークが立てた A/D を表へ反映。
         // 空なら真偽値1つ — 熱い経路に足してよいのはこのサイズまで (B5/C5の教訓)
@@ -613,7 +618,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let prev_ip = m.cpu.ip; // 巻き戻し先 (exec内で控えるarm用)
         m.cpu.advance_ip32(len);
         let ip_linear = m.cpu.ip; // 直線ならexec後もこのまま
-        exec::exec(m, uop, prev_ip);
+                                  // 制御uopは「次のIP」をレジスタで返す (C12) — set_ipのストアを
+                                  // ここでメモリから読み直さない
+        let ret_ip = exec::exec(m, uop, prev_ip);
 
         // ---- 連結判定: ここから先は「次の命令も続けて実行するか」 ----
         if extra == 0 {
@@ -631,15 +638,15 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
         let new_lin = if lf & F_CTL == 0 {
             // 非制御uopはIPに触らない — 比較すら不要で直線が確定
             lin.wrapping_add(len)
-        } else if m.cpu.ip == ip_linear {
+        } else if ret_ip == ip_linear {
             lin.wrapping_add(len)
         } else {
-            cs_base.wrapping_add(m.cpu.ip)
+            cs_base.wrapping_add(ret_ip)
         };
-        if new_lin >> 12 != lin >> 12 {
+        if new_lin & !0xFFF != lin_page {
             return; // ページを跨いだら外へ (変換からやり直し)
         }
-        pa = (pa & !0xFFF) | (new_lin & 0xFFF);
+        pa = pa_page | (new_lin & 0xFFF);
         lin = new_lin;
         // 帳簿: 時計と装置を外側と同じ順で1命令ぶん進める
         extra -= 1;

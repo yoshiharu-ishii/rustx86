@@ -69,13 +69,15 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::Test8RmR { .. }
         | Uop::MovRm8Imm { .. }
         | Uop::Leave => false,
-        // r/m形: メモリオペランドのときだけ
+        // r/m形: メモリオペランドのときだけ。Grp5のinc/dec (kind 0/1) も
+        // 同類 — レジスタ形はメモリに触らない (60Bの控えを無駄払いしていた)
         Uop::Grp3b { rm, .. }
         | Uop::Grp3w { rm, .. }
         | Uop::SetCC { rm, .. }
         | Uop::ImulRRm { rm, .. }
         | Uop::ShiftRmImm { rm, .. }
-        | Uop::ShiftRmCl { rm, .. } => mem(rm),
+        | Uop::ShiftRmCl { rm, .. }
+        | Uop::Grp5 { kind: 0 | 1, rm } => mem(rm),
         // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
         Uop::MovAMoffs { .. } | Uop::Mov8AMoffs { .. } | Uop::Grp5 { .. } | Uop::StrOne { .. } => {
             true
@@ -227,7 +229,7 @@ fn cold_grp3w(m: &mut Machine, kind: u8, rm: Rm, imm: u32) {
 
 #[cold]
 #[inline(never)]
-fn cold_grp5(m: &mut Machine, kind: u8, rm: Rm) {
+fn cold_grp5(m: &mut Machine, kind: u8, rm: Rm) -> u32 {
     match kind {
         0 | 1 => {
             // inc/dec r/m: CF不変 (従来経路と同じヘルパ)
@@ -241,20 +243,24 @@ fn cold_grp5(m: &mut Machine, kind: u8, rm: Rm) {
                     }
                 }
             }
+            m.cpu.ip
         }
         2 => {
             let t = read_rm32(m, rm);
             let ret = m.cpu.ip;
             push_w(m, ret, true);
-            m.cpu.set_ip(t);
+            m.cpu.set_ip32(t);
+            t
         }
         4 => {
             let t = read_rm32(m, rm);
-            m.cpu.set_ip(t);
+            m.cpu.set_ip32(t);
+            t
         }
         _ => {
             let v = read_rm32(m, rm);
             push_w(m, v, true);
+            m.cpu.ip
         }
     }
 }
@@ -358,7 +364,11 @@ fn off_of(m: &Machine, r: &MemRef) -> u32 {
     off
 }
 
-pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
+/// 実行して「次のIP」を返す (C12)。制御uop (F_CTL) だけが意味のある値を
+/// 返し、それ以外は prev_ip (呼び手はF_CTLのときしか見ない)。
+/// **返り値はレジスタ渡し** — set_ipのストアを呼び手がメモリから読み直す
+/// store→load往復を、次の照合番地を作る鎖から外す
+pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) -> u32 {
     match u {
         Uop::MovRmR { rm, reg } => {
             let v = m.cpu.regs[reg as usize];
@@ -632,28 +642,35 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             m.cpu.regs[reg as usize] = off;
         }
         Uop::Jcc { cc, rel } => {
-            if condition(&m.cpu, cc) {
+            return if condition(&m.cpu, cc) {
                 let ip = m.cpu.ip.wrapping_add(rel);
-                m.cpu.set_ip(ip);
-            }
+                m.cpu.set_ip32(ip);
+                ip
+            } else {
+                m.cpu.ip // 不成立 = 直線 (advance済みのipがそれ)
+            };
         }
         Uop::JmpRel { rel } => {
             let ip = m.cpu.ip.wrapping_add(rel);
-            m.cpu.set_ip(ip);
+            m.cpu.set_ip32(ip);
+            return ip;
         }
         Uop::CallRel { rel } => {
             let ret = m.cpu.ip;
             if !fast_push32(m, ret) {
                 slow_push32(m, ret, prev_ip);
             }
-            m.cpu.set_ip(ret.wrapping_add(rel));
+            let ip = ret.wrapping_add(rel);
+            m.cpu.set_ip32(ip);
+            return ip;
         }
         Uop::Ret => {
             let ip = match fast_pop32(m) {
                 Some(v) => v,
                 None => slow_pop32(m, prev_ip),
             };
-            m.cpu.set_ip(ip);
+            m.cpu.set_ip32(ip);
+            return ip;
         }
         Uop::PushR { reg } => {
             let v = m.cpu.regs[reg as usize];
@@ -741,7 +758,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::Grp3b { kind, rm, imm } => cold_grp3b(m, kind, rm, imm),
         Uop::Grp3w { kind, rm, imm } => cold_grp3w(m, kind, rm, imm),
-        Uop::Grp5 { kind, rm } => cold_grp5(m, kind, rm),
+        Uop::Grp5 { kind, rm } => return cold_grp5(m, kind, rm),
         Uop::SetCC { cc, rm } => {
             let v = u8::from(condition(&m.cpu, cc));
             write_rm8(m, rm, v);
@@ -762,6 +779,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::ImulRRm { reg, rm } => cold_imul(m, reg, rm),
         Uop::StrOne { op, seg } => cold_strone(m, op, seg),
     }
+    prev_ip // 非制御uop (呼び手はF_CTLのときしか返り値を見ない)
 }
 
 /// r/m32 の読み。メモリなら番地も返す (RMWで再変換しないため — 検査も書き込みで受ける)
