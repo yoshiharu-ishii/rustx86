@@ -158,6 +158,159 @@ fn slow_leave(m: &mut Machine, bp: u32, prev_ip: u32) {
     m.cpu.regs[BP] = v;
 }
 
+#[cold]
+#[inline(never)]
+fn slow_write32(m: &mut Machine, mr: &MemRef, v: u32, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    let a = addr_of(m, mr, 4, true);
+    m.write32(a, v);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_push32(m: &mut Machine, v: u32, prev_ip: u32) {
+    m.guard_save_slim_at(prev_ip);
+    push_w(m, v, true);
+}
+
+#[cold]
+#[inline(never)]
+fn slow_pop32(m: &mut Machine, prev_ip: u32) -> u32 {
+    m.guard_save_slim_at(prev_ip);
+    pop_w(m, true)
+}
+
+// ---- 稀なuopのarm本体 (各~1%以下)。ホットなmatchをI-cacheから痩せさせる ----
+//
+// 意味論は移動のみ (中身は元のarmの逐語)。控えは対応するF_MEM分類で
+// step_cached側が済ませている
+
+#[cold]
+#[inline(never)]
+fn cold_grp3b(m: &mut Machine, kind: u8, rm: Rm, imm: u8) {
+    let a = match rm {
+        Rm::Reg(r) => m.cpu.reg8(r as usize),
+        Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
+    };
+    match kind {
+        0 | 1 => {
+            alu8(&mut m.cpu, 4, a, imm);
+        }
+        2 => write_rm8(m, rm, !a),
+        _ => {
+            let r = alu8(&mut m.cpu, 5, 0, a);
+            m.cpu.set_flag(CF, a != 0);
+            write_rm8(m, rm, r);
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_grp3w(m: &mut Machine, kind: u8, rm: Rm, imm: u32) {
+    let a = match rm {
+        Rm::Reg(r) => m.cpu.regs[r as usize],
+        Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
+    };
+    match kind {
+        0 | 1 => {
+            alu_w(&mut m.cpu, 4, a, imm, true);
+        }
+        2 => write_rm32(m, rm, !a),
+        _ => {
+            let r = alu_w(&mut m.cpu, 5, 0, a, true);
+            m.cpu.set_flag(CF, a != 0);
+            write_rm32(m, rm, r);
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_grp5(m: &mut Machine, kind: u8, rm: Rm) {
+    match kind {
+        0 | 1 => {
+            // inc/dec r/m: CF不変 (従来経路と同じヘルパ)
+            let (a, addr) = read_rm32_addr(m, rm);
+            let r = inc_dec_w(&mut m.cpu, a, kind != 0, true);
+            match addr {
+                Some(a2) => m.write32(a2, r),
+                None => {
+                    if let Rm::Reg(rr) = rm {
+                        m.cpu.regs[rr as usize] = r;
+                    }
+                }
+            }
+        }
+        2 => {
+            let t = read_rm32(m, rm);
+            let ret = m.cpu.ip;
+            push_w(m, ret, true);
+            m.cpu.set_ip(t);
+        }
+        4 => {
+            let t = read_rm32(m, rm);
+            m.cpu.set_ip(t);
+        }
+        _ => {
+            let v = read_rm32(m, rm);
+            push_w(m, v, true);
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_moffs32(m: &mut Machine, load: bool, seg: u8, off: u32) {
+    let a = m.data_addr(seg as usize, off, 4, !load);
+    if load {
+        let v = m.read32(a);
+        m.cpu.regs[AX] = v;
+    } else {
+        m.write32(a, m.cpu.regs[AX]);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_moffs8(m: &mut Machine, load: bool, seg: u8, off: u32) {
+    let a = m.data_addr(seg as usize, off, 1, !load);
+    if load {
+        let v = m.read8(a);
+        m.cpu.set_reg8(0, v);
+    } else {
+        m.write8(a, m.cpu.reg8(0));
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_imul(m: &mut Machine, reg: u8, rm: Rm) {
+    // IMUL r32, r/m32 (従来経路 twobyte 0xAF の写し)
+    let a = m.cpu.regs[reg as usize] as i32 as i64;
+    let b = read_rm32(m, rm) as i32 as i64;
+    let r = a * b;
+    m.cpu.regs[reg as usize] = r as u32;
+    let ext = (r as i32 as i64) != r;
+    m.cpu.set_flag(CF, ext);
+    m.cpu.set_flag(OF, ext);
+}
+
+#[cold]
+#[inline(never)]
+fn cold_strone(m: &mut Machine, op: u8, seg: i8) {
+    // 単発ストリング命令。従来の string::exec に丸ごと委譲 (二重実装しない)
+    let d = Decoder {
+        seg_override: if seg >= 0 { Some(seg as usize) } else { None },
+        rep: None,
+        opsize32: true,
+        addrsize32: true,
+        p66: false,
+        lock: false,
+    };
+    string::exec(m, &d, op);
+}
+
 /// pushの速い道 (translate-first)。SSが平坦・32bitスタックで書き込みが
 /// 確定するときだけ実行してtrue。falseなら呼び手が控えて従来経路へ
 #[inline]
@@ -217,10 +370,8 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     if m.fast_write32(mr.seg as usize, off, v).is_none() {
                         // 低速路: 控えの巻き戻し先は**命令頭** (prev_ip) —
-                        // ここはadvance_ip後なので素のsave_slimではダメ
-                        m.guard_save_slim_at(prev_ip);
-                        let a = addr_of(m, &mr, 4, true);
-                        m.write32(a, v);
+                        // advance_ip後なので素のsave_slimではダメ (slow_*が担う)
+                        slow_write32(m, &mr, v, prev_ip);
                     }
                 }
             }
@@ -232,10 +383,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
-                        None => {
-                            m.guard_save_slim_at(prev_ip);
-                            m.read32(addr_of(m, &mr, 4, false))
-                        }
+                        None => slow_read32(m, &mr, prev_ip),
                     }
                 }
             };
@@ -330,10 +478,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
-                        None => {
-                            m.guard_save_slim_at(prev_ip);
-                            m.read32(addr_of(m, &mr, 4, false))
-                        }
+                        None => slow_read32(m, &mr, prev_ip),
                     }
                 }
             };
@@ -461,10 +606,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     match m.fast_read32(mr.seg as usize, off) {
                         Some(v) => v,
-                        None => {
-                            m.guard_save_slim_at(prev_ip);
-                            m.read32(addr_of(m, &mr, 4, false))
-                        }
+                        None => slow_read32(m, &mr, prev_ip),
                     }
                 }
             };
@@ -502,33 +644,27 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::CallRel { rel } => {
             let ret = m.cpu.ip;
             if !fast_push32(m, ret) {
-                m.guard_save_slim_at(prev_ip);
-                push_w(m, ret, true);
+                slow_push32(m, ret, prev_ip);
             }
             m.cpu.set_ip(ret.wrapping_add(rel));
         }
         Uop::Ret => {
             let ip = match fast_pop32(m) {
                 Some(v) => v,
-                None => {
-                    m.guard_save_slim_at(prev_ip);
-                    pop_w(m, true)
-                }
+                None => slow_pop32(m, prev_ip),
             };
             m.cpu.set_ip(ip);
         }
         Uop::PushR { reg } => {
             let v = m.cpu.regs[reg as usize];
             if !fast_push32(m, v) {
-                m.guard_save_slim_at(prev_ip);
-                push_w(m, v, true);
+                slow_push32(m, v, prev_ip);
             }
         }
         Uop::PopR { reg } => match fast_pop32(m) {
             Some(v) => m.cpu.regs[reg as usize] = v,
             None => {
-                m.guard_save_slim_at(prev_ip);
-                let v = pop_w(m, true);
+                let v = slow_pop32(m, prev_ip);
                 m.cpu.regs[reg as usize] = v;
             }
         },
@@ -544,10 +680,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     match m.fast_read8(mr.seg as usize, off) {
                         Some(v) => v,
-                        None => {
-                            m.guard_save_slim_at(prev_ip);
-                            m.read8(addr_of(m, &mr, 1, false))
-                        }
+                        None => slow_read8(m, &mr, prev_ip),
                     }
                 }
             };
@@ -567,9 +700,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             Rm::Mem(mr) => {
                 let off = off_of(m, &mr);
                 if m.fast_write32(mr.seg as usize, off, imm).is_none() {
-                    m.guard_save_slim_at(prev_ip);
-                    let a = addr_of(m, &mr, 4, true);
-                    m.write32(a, imm);
+                    slow_write32(m, &mr, imm, prev_ip);
                 }
             }
         },
@@ -582,28 +713,11 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                 }
             }
         },
-        Uop::MovAMoffs { load, seg, off } => {
-            let a = m.data_addr(seg as usize, off, 4, !load);
-            if load {
-                let v = m.read32(a);
-                m.cpu.regs[AX] = v;
-            } else {
-                m.write32(a, m.cpu.regs[AX]);
-            }
-        }
-        Uop::Mov8AMoffs { load, seg, off } => {
-            let a = m.data_addr(seg as usize, off, 1, !load);
-            if load {
-                let v = m.read8(a);
-                m.cpu.set_reg8(0, v);
-            } else {
-                m.write8(a, m.cpu.reg8(0));
-            }
-        }
+        Uop::MovAMoffs { load, seg, off } => cold_moffs32(m, load, seg, off),
+        Uop::Mov8AMoffs { load, seg, off } => cold_moffs8(m, load, seg, off),
         Uop::PushImm { imm } => {
             if !fast_push32(m, imm) {
-                m.guard_save_slim_at(prev_ip);
-                push_w(m, imm, true);
+                slow_push32(m, imm, prev_ip);
             }
         }
         Uop::Leave => {
@@ -625,69 +739,9 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         Uop::XchgAR { reg } => {
             m.cpu.regs.swap(AX, reg as usize);
         }
-        Uop::Grp3b { kind, rm, imm } => {
-            let a = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => m.read8(addr_of(m, &mr, 1, false)),
-            };
-            match kind {
-                0 | 1 => {
-                    alu8(&mut m.cpu, 4, a, imm);
-                }
-                2 => write_rm8(m, rm, !a),
-                _ => {
-                    let r = alu8(&mut m.cpu, 5, 0, a);
-                    m.cpu.set_flag(CF, a != 0);
-                    write_rm8(m, rm, r);
-                }
-            }
-        }
-        Uop::Grp3w { kind, rm, imm } => {
-            let a = match rm {
-                Rm::Reg(r) => m.cpu.regs[r as usize],
-                Rm::Mem(mr) => m.read32(addr_of(m, &mr, 4, false)),
-            };
-            match kind {
-                0 | 1 => {
-                    alu_w(&mut m.cpu, 4, a, imm, true);
-                }
-                2 => write_rm32(m, rm, !a),
-                _ => {
-                    let r = alu_w(&mut m.cpu, 5, 0, a, true);
-                    m.cpu.set_flag(CF, a != 0);
-                    write_rm32(m, rm, r);
-                }
-            }
-        }
-        Uop::Grp5 { kind, rm } => match kind {
-            0 | 1 => {
-                // inc/dec r/m: CF不変 (従来経路と同じヘルパ)
-                let (a, addr) = read_rm32_addr(m, rm);
-                let r = inc_dec_w(&mut m.cpu, a, kind != 0, true);
-                match addr {
-                    Some(a2) => m.write32(a2, r),
-                    None => {
-                        if let Rm::Reg(rr) = rm {
-                            m.cpu.regs[rr as usize] = r;
-                        }
-                    }
-                }
-            }
-            2 => {
-                let t = read_rm32(m, rm);
-                let ret = m.cpu.ip;
-                push_w(m, ret, true);
-                m.cpu.set_ip(t);
-            }
-            4 => {
-                let t = read_rm32(m, rm);
-                m.cpu.set_ip(t);
-            }
-            _ => {
-                let v = read_rm32(m, rm);
-                push_w(m, v, true);
-            }
-        },
+        Uop::Grp3b { kind, rm, imm } => cold_grp3b(m, kind, rm, imm),
+        Uop::Grp3w { kind, rm, imm } => cold_grp3w(m, kind, rm, imm),
+        Uop::Grp5 { kind, rm } => cold_grp5(m, kind, rm),
         Uop::SetCC { cc, rm } => {
             let v = u8::from(condition(&m.cpu, cc));
             write_rm8(m, rm, v);
@@ -699,37 +753,14 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
                     let off = off_of(m, &mr);
                     match m.fast_read16(mr.seg as usize, off) {
                         Some(v) => v,
-                        None => {
-                            m.guard_save_slim_at(prev_ip);
-                            m.read16(addr_of(m, &mr, 2, false))
-                        }
+                        None => slow_read16(m, &mr, prev_ip),
                     }
                 }
             };
             m.cpu.regs[reg as usize] = v as u32;
         }
-        Uop::ImulRRm { reg, rm } => {
-            // IMUL r32, r/m32 (従来経路 twobyte 0xAF の写し)
-            let a = m.cpu.regs[reg as usize] as i32 as i64;
-            let b = read_rm32(m, rm) as i32 as i64;
-            let r = a * b;
-            m.cpu.regs[reg as usize] = r as u32;
-            let ext = (r as i32 as i64) != r;
-            m.cpu.set_flag(CF, ext);
-            m.cpu.set_flag(OF, ext);
-        }
-        Uop::StrOne { op, seg } => {
-            // 単発ストリング命令。従来の string::exec に丸ごと委譲 (二重実装しない)
-            let d = Decoder {
-                seg_override: if seg >= 0 { Some(seg as usize) } else { None },
-                rep: None,
-                opsize32: true,
-                addrsize32: true,
-                p66: false,
-                lock: false,
-            };
-            string::exec(m, &d, op);
-        }
+        Uop::ImulRRm { reg, rm } => cold_imul(m, reg, rm),
+        Uop::StrOne { op, seg } => cold_strone(m, op, seg),
     }
 }
 
