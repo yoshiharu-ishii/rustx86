@@ -12,6 +12,7 @@
 // 動く」というこのアプリの作法に合わせて、ページではなく部品にした。
 
 import { AnsiTerminal } from './ansi.js';
+import { ROOTFS } from './machines.js';
 
 // 端末は**一度作ったら使い回す**。AnsiTerminal はコンストラクタで canvas に
 // keydown を張り、外す口が無い。選び直すたびに作ると同じ canvas に
@@ -70,6 +71,8 @@ export function mountLinux(canvas, opts = {}) {
   // **表示は実物に合わせる。** つまみ (?initrd= / ?ram=) を足したのに
   // ラベルが固定だと、画面が嘘をつく
   let usedInitrd = 'initramfs-mini';
+  /** 挿したディスクのファイル名 (ディスク無しなら空) */
+  let usedDisk = '';
   let usedRam = 128;
   let booted = false;
   let paused = false;
@@ -188,8 +191,13 @@ export function mountLinux(canvas, opts = {}) {
     // 選ぶのは画面 (main.js のツールバー) で、URL (`?initrd=` / `?ram=`) は
     // その初期値。RAMは 'auto' なら initrd の実物から決める (下の autoRam)
     const want = opts.rootfs?.() ?? {};
-    const initrdName = want.name || 'initramfs-mini';
+    // 選択はROOTFSの項に解決する。**メモリ型かディスク型かはデータが言う**
+    // (initrdだけの項 = 従来のinitramfs起動、disk付きの項 = vdaに挿して
+    //  ミニのinitが移り住む)。知らない名前は先頭 (ミニ) に落とす
+    const entry = ROOTFS.find(r => r.name === want.name) ?? ROOTFS[0];
+    const initrdName = entry.initrd;
     usedInitrd = initrdName;
+    usedDisk = entry.disk ?? '';
     // RAMの確定は initrd を読んだ後 (自動のときは中身の大きさが要る)
     let ramMb = want.ramMb || 0;
 
@@ -242,7 +250,22 @@ export function mountLinux(canvas, opts = {}) {
     }
     if (!alive) return; // fetch の間に別のマシンへ切り替えられた
 
-    // **RAMは実物を見てから決める。** 自動 (ramMb未指定) のときだけ効く
+    // ディスク型ならイメージも取る。**無ければディスク無しで進む** —
+    // ミニのシェルには落ちるので、真っ暗になるよりは説明して動かす
+    let disk = null;
+    if (!snapshot && usedDisk) {
+      try {
+        disk = await fetchWithProgress(`./${usedDisk}`, usedDisk);
+      } catch {
+        status(`${usedDisk} が無い (tools/images/make-gcc-disk.sh で作って web/ に置く)。ディスク無しで起動します`, true);
+        usedDisk = '';
+      }
+    }
+    if (!alive) return;
+
+    // **RAMは実物を見てから決める。** 自動 (ramMb未指定) のときだけ効く。
+    // ディスク型はinitrdがミニなので自然に128MBになる — ディスクの中身は
+    // 読んだ分しかページキャッシュに載らず、RAMの頭数に入れなくてよい
     if (!ramMb) ramMb = initrd ? autoRam(initrd) : 128;
     usedRam = ramMb;
 
@@ -275,13 +298,14 @@ export function mountLinux(canvas, opts = {}) {
                 type: 'boot',
                 kernel: kernel.buffer,
                 initrd: initrd?.buffer,
+                disk: disk?.buffer,
                 cmdline: 'console=ttyS0',
                 ramMb,
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
               },
-              initrd ? [kernel.buffer, initrd.buffer] : [kernel.buffer],
+              [kernel.buffer, initrd?.buffer, disk?.buffer].filter(Boolean),
             );
           }
           booted = true;
@@ -408,6 +432,10 @@ export function mountLinux(canvas, opts = {}) {
     /** 実際に使った initramfs の名前 (?initrd= で差し替わる) */
     get initrdName() {
       return usedInitrd;
+    },
+    /** 挿したディスクのファイル名 (ディスク無しなら空) */
+    get diskName() {
+      return usedDisk;
     },
     /** 実際に渡したRAM (MB。?ram= で変わる) */
     get ramMb() {

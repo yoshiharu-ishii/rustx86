@@ -109,8 +109,19 @@ DISK=images/disk-gcc.img GUEST_CMD='gcc /hello.c -o /tmp/h && /tmp/h; printf "DO
   cargo run --release --example guestcmd
 ```
 
+## ブラウザでの選び方
+
+ツールバーの「ルートFS」で**メモリ型とディスク型を選べる**。データは
+`web/machines.js` の `ROOTFS` — initrdだけの項がメモリ型、`disk` 付きの項が
+ディスク型で、**どちらの挙動になるかはデータが言う**:
+
+| 選択肢 | initrd | ディスク | RAM自動 |
+|---|---|---|---|
+| ミニ (RAM) | initramfs-mini | — | 128MB |
+| gcc入り (ディスク) | initramfs-mini | disk-gcc.img → vda | **128MB** |
+| gcc入り (RAM) | initramfs-gcc | — | 256MB |
+
 ## まだ無いもの
 
-- ブラウザ側の口 (`?disk=` とルートFS選択UIへの統合)
 - ゲストが書いた内容の持ち帰り (いまはスナップショット経由のみ)
 - ATA/IDE (互換の相手が来たら)。virtio-mmio (PCIの無い機械に挿す口)
