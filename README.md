@@ -122,8 +122,8 @@ Unicorn との突き合わせ (`cosim`) はビルドに数分かかるため、
 ### ディスクイメージを取ってくる
 
 ```bash
-tools/images/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
-tools/images/fetch-images.sh elks     # 片方だけでもよい
+tools/images/sh/fetch-images.sh          # ELKS と FreeDOS (ゲーム入り)
+tools/images/sh/fetch-images.sh elks     # 片方だけでもよい
 ```
 
 **イメージはリポジトリに含めていない。** 再配布が禁じられているからではなく

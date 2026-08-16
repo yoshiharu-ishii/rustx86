@@ -5,7 +5,7 @@
 # エミュレータにはまだブロックデバイスが無い。探させない。
 # busybox は Alpine の initramfs-lts から借りる (静的リンク・動作実績あり)。
 set -e
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 # **イメージ焼きは道具箱 (Linuxコンテナ) の中でやる。** rootのcpio/mknodが
 # 本物の道具で、ホスト差 (macOS/WSL2/CI) もここで消える。外から呼ばれたら
 # 自分をコンテナの中で呼び直す (中の印は /.dockerenv)

@@ -43,9 +43,9 @@ cp web/pkg/*.js web/pkg/*.wasm "$root/pkg/"
 
 # ---- イメージの取得スクリプト。zipのルートに置く ----
 # (fetch-images.sh は web/ の在り処で自分の位置を判断するので、ルート直下でも動く)
-cp tools/images/fetch-images.sh "$root/"
+cp tools/images/sh/fetch-images.sh "$root/"
 mkdir -p "$root/tools/images"
-cp tools/images/mkcpio.py tools/images/extract-vmlinux.sh tools/images/make-mini-initramfs.sh "$root/tools/images/" 2>/dev/null || true
+cp tools/images/mkcpio.py tools/images/sh/extract-vmlinux.sh tools/images/sh/make-mini-initramfs.sh "$root/tools/images/" 2>/dev/null || true
 
 # ---- 2クリックで起動する入口 ----
 # **index.html の直接ダブルクリックでは動かない** — ESモジュールとwasmは
