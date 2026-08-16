@@ -137,6 +137,13 @@ impl Emulator {
         Ok(Emulator::wrap(m))
     }
 
+    /// virtio-blkのディスクを挿す (ゲストからは /dev/vda)。
+    /// net_attach と同じ流儀: 電源を入れる前 (runの前) に呼ぶ。
+    /// 呼ばなければディスクは無く、起動はビット同一のまま
+    pub fn blk_attach(&mut self, image: &[u8]) {
+        self.m.blk_attach(image.to_vec());
+    }
+
     /// 起動済みスナップショットから機械を丸ごと復元する。
     ///
     /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を

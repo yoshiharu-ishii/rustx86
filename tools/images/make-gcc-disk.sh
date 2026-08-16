@@ -28,4 +28,6 @@ touch "$work/root/.rustx86-disk"
 # -all-root: 所有者を全部rootに (ホストのuidを持ち込まない)
 mksquashfs "$work/root" images/disk-gcc.img \
   -comp gzip -all-root -no-xattrs -noappend -quiet
-echo "images/disk-gcc.img: $(du -h images/disk-gcc.img | cut -f1) (squashfs)"
+# ブラウザ版は web/ から読む (initramfs-miniと同じ配り方)
+cp images/disk-gcc.img web/disk-gcc.img
+echo "images/disk-gcc.img: $(du -h images/disk-gcc.img | cut -f1) (squashfs。web/ へも複製)"
