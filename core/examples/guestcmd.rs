@@ -54,9 +54,28 @@ fn main() {
 
     let (mut fed, mut done_at) = (false, None::<usize>);
     let mut spent: u64 = 0;
+    let mut printed = 0usize; // シリアルをここまで流した (貯めて最後に吐かない —
+                              // 外の番犬が「生きて進んでいるか」を読めるように)
+    let mut beat: u64 = 0;
     while spent < budget {
         m.run(2_000_000);
         spent += 2_000_000;
+        // 心拍: 5G命令ごとにstderrへ1行。ゲストが黙る区間 (コンパイル中など)
+        // でも、機械が回っている限りこれは打たれ続ける
+        if spent / 5_000_000_000 > beat {
+            beat = spent / 5_000_000_000;
+            eprintln!("[guestcmd] {}G命令 経過", beat * 5);
+        }
+        {
+            use std::io::Write;
+            let tx = &m.devices.uart.tx;
+            if tx.len() > printed {
+                let mut out = std::io::stdout();
+                let _ = out.write_all(&tx[printed..]);
+                let _ = out.flush();
+                printed = tx.len();
+            }
+        }
         let out = String::from_utf8_lossy(&m.devices.uart.tx);
         if !fed && out.contains("busybox shell") {
             for b in format!("{cmd}\n").bytes() {
@@ -75,7 +94,15 @@ fn main() {
             break;
         }
     }
-    print!("{}", String::from_utf8_lossy(&m.devices.uart.tx));
+    {
+        use std::io::Write;
+        let tx = &m.devices.uart.tx;
+        if tx.len() > printed {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&tx[printed..]);
+            let _ = out.flush();
+        }
+    }
     if done_at.is_none() {
         eprintln!(
             "\n[guestcmd] 予算 {}G 命令で目印が来なかった",

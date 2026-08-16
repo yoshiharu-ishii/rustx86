@@ -121,6 +121,37 @@ DISK=images/disk-gcc.img GUEST_CMD='gcc /hello.c -o /tmp/h && /tmp/h; printf "DO
 | gcc入り (ディスク) | initramfs-mini | disk-gcc.img → vda | **128MB** |
 | gcc入り (RAM) | initramfs-gcc | — | 256MB |
 
+## 速さ — 圧縮はゲストのFSではなく輸送路の仕事
+
+最初の実装はsquashfsをgzip圧縮で焼いていた。`time gcc hello.c` が**24.95s**
+(うちsys 20.90s) — メモリ版 (2.25s) の11倍遅い。userはぴたり一致していたので、
+差は全部カーネルの中。犯人はsquashfsの**ゲスト内解凍**だった: cc1 (45MB) を
+読むたび、エミュレートされた76MHz級のCPUがgzipを解く。
+
+squashfsの圧縮方式のA/B (cc1 45MBの冷read sys / 温めた後の gcc real):
+
+| squashfs | イメージ | cold read (sys) | gcc |
+|---|---|---|---|
+| gzip | 35MB | 15.59s | 8.08s |
+| zstd | 32MB | 16.34s | 8.35s |
+| lz4 -Xhc | 41MB | 3.30s | 3.55s |
+| **無圧縮** | 88MB | **0.91s** | **2.82s** |
+
+zstdは速くない — エミュレートされたCPUの上では、どの方式も「桁で高い」。
+lz4は3倍緩和するが、そもそも**払わなくていいコスト**である。
+
+答えは分業: **squashfsは無圧縮で焼き、配布だけ .gz で運ぶ**。ブラウザは
+fetch後に `DecompressionStream('gzip')` で**ホスト側で1回だけ**解く —
+実測88MBを**335ms** (ゲストにやらせたら15.6秒の仕事)。
+
+| | 転送 | 冷えたgcc |
+|---|---|---|
+| 旧 (gzip squashfs) | 34MB | 24.95s |
+| **新 (無圧縮 + 輸送gzip)** | 34MB | **4.44s** (native) / 4.45s (ブラウザ) |
+
+残るsys 1.6秒はページキャッシュへの初回読み込み。2回目からは温まって
+メモリ版と同じ速さになる。
+
 ## まだ無いもの
 
 - ゲストが書いた内容の持ち帰り (いまはスナップショット経由のみ)
