@@ -285,12 +285,6 @@ const RAM_KEY = 'rustx86.ram';
 const rootSel = $('rootSel');
 const ramSel = $('ramSel');
 const jitSel = $('jitSel');
-jitSel.value = q0.get('jit') || localStorage.getItem('rx86.jit') || 'off';
-jitSel.addEventListener('change', () => {
-  localStorage.setItem('rx86.jit', jitSel.value);
-  // 実行中でも切り替わる (比較実験の外部フラグ)
-  linux?.setJit?.(jitSel.value === 'on');
-});
 for (const r of ROOTFS) {
   const o = document.createElement('option');
   o.value = r.name;
@@ -303,6 +297,13 @@ rootSel.value =
   q0.get('initrd') || localStorage.getItem(ROOT_KEY) || ROOTFS[0].name;
 if (!rootSel.value) rootSel.value = ROOTFS[0].name; // URLに知らない名前が来たとき
 ramSel.value = q0.get('ram') || localStorage.getItem(RAM_KEY) || 'auto';
+// JIT (F1d wasm)。q0の宣言より前に置くとTDZでmain.jsごと死ぬ (2026-08-17に実際に死んだ)
+jitSel.value = q0.get('jit') || localStorage.getItem('rx86.jit') || 'off';
+jitSel.addEventListener('change', () => {
+  localStorage.setItem('rx86.jit', jitSel.value);
+  // 実行中でも切り替わる (比較実験の外部フラグ)
+  linux?.setJit?.(jitSel.value === 'on');
+});
 if (!ramSel.value) ramSel.value = 'auto';
 for (const [sel, key] of [
   [rootSel, ROOT_KEY],
