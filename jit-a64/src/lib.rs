@@ -31,7 +31,6 @@
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use rustx86_core::jit::{self, JitHook, JitLayout, JitOp};
 use rustx86_core::{cpu, Machine};
-use std::cell::RefCell;
 
 // ---- ヘルパ (生成コードから呼ばれる) ----
 
@@ -84,6 +83,30 @@ unsafe extern "C" fn h_ld8(m: *const Machine, seg: u32, off: u32) -> u64 {
     }
 }
 
+/// 32bitストア (意味論はcoreのfast_write32へ委譲 — note_write/VRAM脱出込み)。
+/// 1=完了 / 0=脱出 (何も書いてない)
+unsafe extern "C" fn h_st32(m: *mut Machine, seg: u32, off: u32, val: u32) -> u32 {
+    (*m).jit_try_write32(seg as usize, off, val) as u32
+}
+
+/// RMW `alu [mem], b` (read→alu→write+note_writeをヘルパ1呼びで)
+unsafe extern "C" fn h_rmw32(m: *mut Machine, seg: u32, off: u32, kind: u32, b: u32) -> u32 {
+    (*m).jit_try_rmw32(seg as usize, off, kind as u8, b) as u32
+}
+
+/// push (SP更新は書き込み確定後 — 意味論はexec.rsのfast_push32と同一実体)
+unsafe extern "C" fn h_push32(m: *mut Machine, val: u32) -> u32 {
+    (*m).jit_try_push32(val) as u32
+}
+
+/// pop (成功 = 値 / 脱出 = bit32)
+unsafe extern "C" fn h_pop32(m: *mut Machine) -> u64 {
+    match (*m).jit_try_pop32() {
+        Some(v) => v as u64,
+        None => 1u64 << 32,
+    }
+}
+
 /// 焼けたブロック
 struct Block {
     entry: unsafe extern "C" fn() -> u64,
@@ -104,8 +127,9 @@ struct Slot {
 
 /// 直接マップのスロット数。taken分岐の着地 (~1/7命令) が毎回引くので、
 /// HashMapでは税が勝つ (F1a-5 #58の教訓の再演を2026-08-16に実測 —
-/// 67M probesで+1.9s)
-const JSLOTS: usize = 64 * 1024;
+/// 67M probesで+1.9s)。64Kでは頭50k超に対して衝突リベイクが327k発生
+/// したので256Kへ (スロット構造は薄く、ブロック本体はBoxの先)
+const JSLOTS: usize = 256 * 1024;
 const TAG_FREE: u32 = 0xFFFF_FFFF;
 
 struct Rt {
@@ -120,7 +144,10 @@ struct Rt {
 }
 
 thread_local! {
-    static RT: RefCell<Option<Rt>> = const { RefCell::new(None) };
+    /// 取り付け済みランタイム (Box::leak)。try_enterはtaken分岐ごと (~1/7命令)
+    /// に呼ばれるので、RefCellの借用検査すら払わない — 単一スレッド前提で
+    /// 生ポインタ (アクセスは全部このモジュール内)
+    static RT: std::cell::Cell<*mut Rt> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
 /// ブロックの最大命令数。tick窓 (64命令) に収まる大きさ —
@@ -134,21 +161,20 @@ const BLOCK_CAP: usize = 32;
 /// mが指すMachineがJIT実行中ずっと同じ番地に居ること (Box/Pin前提)
 pub unsafe fn attach(m: &mut Machine) {
     let layout = jit::layout(m);
-    RT.with(|rt| {
-        let mut slots = Vec::with_capacity(JSLOTS);
-        slots.resize_with(JSLOTS, || Slot {
-            tag: TAG_FREE,
-            block: None,
-        });
-        *rt.borrow_mut() = Some(Rt {
-            layout,
-            machine: m as *mut Machine,
-            slots,
-            baked: 0,
-            rejected: 0,
-            installed: 0,
-        });
+    let mut slots = Vec::with_capacity(JSLOTS);
+    slots.resize_with(JSLOTS, || Slot {
+        tag: TAG_FREE,
+        block: None,
     });
+    let rt = Box::leak(Box::new(Rt {
+        layout,
+        machine: m as *mut Machine,
+        slots,
+        baked: 0,
+        rejected: 0,
+        installed: 0,
+    }));
+    RT.with(|cell| cell.set(rt as *mut Rt));
     m.jit = Some(JitHook { try_enter });
 }
 
@@ -170,21 +196,28 @@ pub unsafe fn attach_if_enabled(m: &mut Machine) -> bool {
 
 /// 観測値 (焼いた数, 語彙で落とした数, 据付中ブロック数)
 pub fn stats() -> (u64, u64, usize) {
-    RT.with(|rt| {
-        rt.borrow()
-            .as_ref()
-            .map(|r| (r.baked, r.rejected, r.installed as usize))
-            .unwrap_or((0, 0, 0))
+    RT.with(|cell| {
+        let p = cell.get();
+        if p.is_null() {
+            (0, 0, 0)
+        } else {
+            let r = unsafe { &*p };
+            (r.baked, r.rejected, r.installed as usize)
+        }
     })
 }
 
 fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
     RT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(rt) = borrow.as_mut() else {
+        let p = cell.get();
+        if p.is_null() {
             return 0;
-        };
-        let si = (pa as usize) & (JSLOTS - 1);
+        }
+        // 単一スレッド・生成コードはRtに触らない — 借用は実行前に手放す構図を
+        // 生ポインタで書いている (RefCell時代と同じ規律をコメントで固定)
+        let rt = unsafe { &mut *p };
+        // 命令頭は少数ページに密集する — ページ番号を混ぜて散らす
+        let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
         let slot = &mut rt.slots[si];
         if slot.tag == pa {
             let Some(b) = &slot.block else {
@@ -201,8 +234,7 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
                 return 0; // tick窓かチェーン残りに収まらない
             }
             let entry = b.entry;
-            // 生成コードがMachineを書く間、Rustの参照は一切持たない
-            drop(borrow);
+            // 生成コードがMachineを書く間、Rtへの参照は使い切っている
             return unsafe { entry() } as u32;
         }
         // ミス: 衝突退去 (直接マップ — dropで旧ブロックのメモリごと返す) か初訪
@@ -218,7 +250,8 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
                 block: None,
             };
         };
-        let Some(blk) = jit::collect_block_caps(m, pa, BLOCK_CAP, jit::CAP_VOCAB2) else {
+        let Some(blk) = jit::collect_block_caps(m, pa, BLOCK_CAP, jit::CAP_VOCAB2 | jit::CAP_CHAIN)
+        else {
             neg(rt);
             return 0;
         };
@@ -228,7 +261,8 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
             return 0;
         }
         let machine_addr = rt.machine as usize;
-        let Some(mut block) = emit_block(&rt.layout, machine_addr, &ops) else {
+        let gen_addr = jit::page_gen_addr(m, pa);
+        let Some(mut block) = emit_block(&rt.layout, machine_addr, &ops, gen_addr, gen) else {
             neg(rt);
             return 0;
         };
@@ -246,7 +280,6 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
         if n > budget {
             return 0;
         }
-        drop(borrow);
         unsafe { entry() as u32 }
     })
 }
@@ -277,14 +310,27 @@ fn reg_only_prefix(ops: &[(u8, JitOp)]) -> Vec<(u8, JitOp)> {
                 | JitOp::TestMR { .. }
                 | JitOp::MovzxBM { .. }
                 | JitOp::MovzxWM { .. }
+                // ---- ストア/スタック形 (F1d-c)。ストアの後は自ページ世代を
+                //      照合し、動いていたらn+1で脱出 (jit.rsの契約) ----
+                | JitOp::StoreMR { .. }
+                | JitOp::StoreMI { .. }
+                | JitOp::AluMR { .. }
+                | JitOp::AluMI { .. }
+                | JitOp::PushR { .. }
+                | JitOp::PushI { .. }
+                | JitOp::PopR { .. }
+                | JitOp::Leave
                 | JitOp::Jcc { .. }
                 | JitOp::Jmp { .. }
+                | JitOp::CallRel { .. }
+                | JitOp::Ret
         );
         if !ok {
             break;
         }
         out.push((len, op));
-        if matches!(op, JitOp::Jcc { .. } | JitOp::Jmp { .. }) {
+        // Jccは終端にしない (CAP_CHAIN両側焼き — 不成立側を同じブロックで続ける)
+        if matches!(op, JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret) {
             break;
         }
     }
@@ -319,48 +365,91 @@ fn mov_imm32(a: &mut dynasmrt::aarch64::Assembler, reg: u8, v: u32) {
     }
 }
 
-/// guest regs[i] を w<dst> へ
-fn load_reg(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, dst: u8, idx: u8) {
-    mov_abs(a, 9, l.regs as u64);
-    let off = idx as u32 * 4;
-    dynasm!(a; .arch aarch64; ldr W(dst), [x9, off]);
+/// x19 (=Machine) からの差分。ldr/str の imm12 (4バイトスケール) に
+/// 収まるときだけ Some — 収まらなければ呼び手が絶対番地へフォールバック
+fn field_off4(machine: usize, addr: usize) -> Option<u32> {
+    let d = addr.wrapping_sub(machine);
+    if d < 16384 && d.is_multiple_of(4) {
+        Some(d as u32)
+    } else {
+        None
+    }
+}
+
+/// 同・バイトアクセス (imm12、スケールなし)
+fn field_off1(machine: usize, addr: usize) -> Option<u32> {
+    let d = addr.wrapping_sub(machine);
+    if d < 4096 {
+        Some(d as u32)
+    } else {
+        None
+    }
+}
+
+/// guest regs[i] を w<dst> へ (x19相対1命令、収まらなければ絶対番地)
+fn load_reg(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize, dst: u8, idx: u8) {
+    let addr = l.regs + idx as usize * 4;
+    if let Some(off) = field_off4(machine, addr) {
+        dynasm!(a; .arch aarch64; ldr W(dst), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; ldr W(dst), [x9]);
+    }
 }
 
 /// w<src> を guest regs[i] へ
-fn store_reg(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, src: u8, idx: u8) {
-    mov_abs(a, 9, l.regs as u64);
-    let off = idx as u32 * 4;
-    dynasm!(a; .arch aarch64; str W(src), [x9, off]);
+fn store_reg(
+    a: &mut dynasmrt::aarch64::Assembler,
+    l: &JitLayout,
+    machine: usize,
+    src: u8,
+    idx: u8,
+) {
+    let addr = l.regs + idx as usize * 4;
+    if let Some(off) = field_off4(machine, addr) {
+        dynasm!(a; .arch aarch64; str W(src), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; str W(src), [x9]);
+    }
 }
 
 /// 番地 addr へ w<src> を書く
-fn store_at(a: &mut dynasmrt::aarch64::Assembler, addr: usize, src: u8) {
-    mov_abs(a, 9, addr as u64);
-    dynasm!(a; .arch aarch64; str W(src), [x9]);
+fn store_at(a: &mut dynasmrt::aarch64::Assembler, machine: usize, addr: usize, src: u8) {
+    if let Some(off) = field_off4(machine, addr) {
+        dynasm!(a; .arch aarch64; str W(src), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; str W(src), [x9]);
+    }
 }
 
 /// 番地 addr へ w<src> の下位1バイトを書く
-fn store_b_at(a: &mut dynasmrt::aarch64::Assembler, addr: usize, src: u8) {
-    mov_abs(a, 9, addr as u64);
-    dynasm!(a; .arch aarch64; strb W(src), [x9]);
+fn store_b_at(a: &mut dynasmrt::aarch64::Assembler, machine: usize, addr: usize, src: u8) {
+    if let Some(off) = field_off1(machine, addr) {
+        dynasm!(a; .arch aarch64; strb W(src), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; strb W(src), [x9]);
+    }
 }
 
 /// ALUの遅延材料 (op/w/a/b/cin/r) をまとめて書く。
 /// a=w10, b=w11, cin=w12, r=w13 に置いてから呼ぶ約束
-fn store_cc(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, op: u8, w: u8) {
+fn store_cc(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize, op: u8, w: u8) {
     mov_imm32(a, 14, op as u32);
-    store_b_at(a, l.cc_op, 14);
+    store_b_at(a, machine, l.cc_op, 14);
     mov_imm32(a, 14, w as u32);
-    store_b_at(a, l.cc_w, 14);
-    store_at(a, l.cc_a, 10);
-    store_at(a, l.cc_b, 11);
-    store_at(a, l.cc_cin, 12);
-    store_at(a, l.cc_r, 13);
+    store_b_at(a, machine, l.cc_w, 14);
+    store_at(a, machine, l.cc_a, 10);
+    store_at(a, machine, l.cc_b, 11);
+    store_at(a, machine, l.cc_cin, 12);
+    store_at(a, machine, l.cc_r, 13);
 }
 
 /// h_cf(machine) を呼び、結果 (0/1) を w<dst> に。x0-x17は死ぬ
-fn call_cf(a: &mut dynasmrt::aarch64::Assembler, machine: usize, dst: u8) {
-    mov_abs(a, 0, machine as u64);
+fn call_cf(a: &mut dynasmrt::aarch64::Assembler, _machine: usize, dst: u8) {
+    dynasm!(a; .arch aarch64; mov x0, x19);
     mov_abs(a, 16, h_cf as usize as u64);
     dynasm!(a; .arch aarch64; blr x16; mov W(dst), w0);
 }
@@ -374,18 +463,28 @@ fn call_cf(a: &mut dynasmrt::aarch64::Assembler, machine: usize, dst: u8) {
 /// w15 = 実行済み命令数**。終端 (Jcc/Jmp)・直線の落ち・メモリ脱出の全部が
 /// この2レジスタを立てて exit へ飛ぶ。脱出は「op i の手前で戻る」=
 /// w10 = opのブロック内オフセット、w15 = i (op iは未実行、状態は無傷)
-fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Block> {
+fn emit_block(
+    l: &JitLayout,
+    machine: usize,
+    ops: &[(u8, JitOp)],
+    gen_addr: usize,
+    gen: u32,
+) -> Option<Block> {
     let mut a = dynasmrt::aarch64::Assembler::new().ok()?;
     let n = ops.len() as u16;
     let total_len: u32 = ops.iter().map(|&(len, _)| len as u32).sum();
 
-    // prologue: フレーム + スピル1枠 ([sp,16] — ADC/SBBがヘルパ呼びの間
-    // b を退避するのに使う)
+    // prologue: フレーム + スピル1枠 ([sp,16]) + x19退避 ([sp,24])。
+    // **x19 = Machineの実番地** (callee-saved — ヘルパ呼びでも生きる)。
+    // フィールドアクセスは [x19, #差分] の1命令になる (mov_abs×4の絶対番地
+    // 生成をやめる — ブロック密度がここで決まる)
     dynasm!(a; .arch aarch64
         ; sub sp, sp, 32
         ; stp x29, x30, [sp]
+        ; str x19, [sp, 24]
         ; mov x29, sp
     );
+    mov_abs(&mut a, 19, machine as u64);
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
@@ -393,18 +492,18 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
         match op {
             JitOp::MovRI { dst, imm } => {
                 mov_imm32(&mut a, 10, imm);
-                store_reg(&mut a, l, 10, dst);
+                store_reg(&mut a, l, machine, 10, dst);
             }
             JitOp::MovRR { dst, src } => {
-                load_reg(&mut a, l, 10, src);
-                store_reg(&mut a, l, 10, dst);
+                load_reg(&mut a, l, machine, 10, src);
+                store_reg(&mut a, l, machine, 10, dst);
             }
             JitOp::XchgA { reg } => {
                 if reg != 0 {
-                    load_reg(&mut a, l, 10, 0);
-                    load_reg(&mut a, l, 11, reg);
-                    store_reg(&mut a, l, 11, 0);
-                    store_reg(&mut a, l, 10, reg);
+                    load_reg(&mut a, l, machine, 10, 0);
+                    load_reg(&mut a, l, machine, 11, reg);
+                    store_reg(&mut a, l, machine, 11, 0);
+                    store_reg(&mut a, l, machine, 10, reg);
                 }
             }
             JitOp::Lea {
@@ -414,47 +513,47 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
                 scale,
                 disp,
             } => {
-                emit_ea(&mut a, l, 10, base, index, scale, disp);
-                store_reg(&mut a, l, 10, dst);
+                emit_ea(&mut a, l, machine, 10, base, index, scale, disp);
+                store_reg(&mut a, l, machine, 10, dst);
             }
             JitOp::AluRR { kind, dst, src } => {
                 // ADC/SBB: cinのヘルパ呼びが全caller-savedを壊すので、
                 // b→スピル → call_cf → b復元 → a取得 の順 (レジスタ形はaも取り直し)
                 if kind == 2 || kind == 3 {
                     call_cf(&mut a, machine, 12);
-                    load_reg(&mut a, l, 10, dst);
-                    load_reg(&mut a, l, 11, src);
+                    load_reg(&mut a, l, machine, 10, dst);
+                    load_reg(&mut a, l, machine, 11, src);
                 } else {
-                    load_reg(&mut a, l, 10, dst);
-                    load_reg(&mut a, l, 11, src);
+                    load_reg(&mut a, l, machine, 10, dst);
+                    load_reg(&mut a, l, machine, 11, src);
                 }
                 emit_alu(&mut a, kind)?;
                 if kind != 7 {
-                    store_reg(&mut a, l, 13, dst);
+                    store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, kind, 2);
+                store_cc(&mut a, l, machine, kind, 2);
             }
             JitOp::AluRI { kind, dst, imm } => {
                 if kind == 2 || kind == 3 {
                     call_cf(&mut a, machine, 12);
                 }
-                load_reg(&mut a, l, 10, dst);
+                load_reg(&mut a, l, machine, 10, dst);
                 mov_imm32(&mut a, 11, imm);
                 emit_alu(&mut a, kind)?;
                 if kind != 7 {
-                    store_reg(&mut a, l, 13, dst);
+                    store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, kind, 2);
+                store_cc(&mut a, l, machine, kind, 2);
             }
             JitOp::TestRR { a: ra, b: rb } => {
-                load_reg(&mut a, l, 10, ra);
-                load_reg(&mut a, l, 11, rb);
+                load_reg(&mut a, l, machine, 10, ra);
+                load_reg(&mut a, l, machine, 11, rb);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, 4, 2);
+                store_cc(&mut a, l, machine, 4, 2);
             }
             JitOp::IncDec { reg, dec } => {
                 call_cf(&mut a, machine, 15); // w15 = 旧CF (この後ヘルパを呼ばない区間)
-                load_reg(&mut a, l, 10, reg);
+                load_reg(&mut a, l, machine, 10, reg);
                 mov_imm32(&mut a, 11, 1);
                 dynasm!(a; .arch aarch64; movz w12, 0);
                 if dec {
@@ -462,8 +561,14 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
                 } else {
                     dynasm!(a; .arch aarch64; add w13, w10, 1);
                 }
-                store_reg(&mut a, l, 13, reg);
-                store_cc(&mut a, l, if dec { jit::CC_DEC } else { jit::CC_INC }, 2);
+                store_reg(&mut a, l, machine, 13, reg);
+                store_cc(
+                    &mut a,
+                    l,
+                    machine,
+                    if dec { jit::CC_DEC } else { jit::CC_INC },
+                    2,
+                );
                 mov_abs(&mut a, 9, l.flags as u64);
                 dynasm!(a; .arch aarch64
                     ; ldr w10, [x9]
@@ -473,7 +578,7 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
                 );
             }
             JitOp::ShiftRI { kind, reg, count } => {
-                mov_abs(&mut a, 0, machine as u64);
+                dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, kind as u32);
                 mov_imm32(&mut a, 2, reg as u32);
                 mov_imm32(&mut a, 3, count as u32);
@@ -481,9 +586,9 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
                 dynasm!(a; .arch aarch64; blr x16);
             }
             JitOp::ShiftRC { kind, reg } => {
-                load_reg(&mut a, l, 3, 1); // CL = regs[1]の下位
+                load_reg(&mut a, l, machine, 3, 1); // CL = regs[1]の下位
                 dynasm!(a; .arch aarch64; and w3, w3, 0xff);
-                mov_abs(&mut a, 0, machine as u64);
+                dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, kind as u32);
                 mov_imm32(&mut a, 2, reg as u32);
                 mov_abs(&mut a, 16, h_shift as usize as u64);
@@ -492,15 +597,15 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
             // ---- ロード形 (F1d-b)。w0 = 値、脱出はexitへ ----
             JitOp::MovRM { dst, mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
-                store_reg(&mut a, l, 0, dst);
+                store_reg(&mut a, l, machine, 0, dst);
             }
             JitOp::MovzxBM { dst, mem } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
-                store_reg(&mut a, l, 0, dst); // h_ld8はゼロ拡張済みの32bitを返す
+                store_reg(&mut a, l, machine, 0, dst); // h_ld8はゼロ拡張済みの32bitを返す
             }
             JitOp::MovzxWM { dst, mem } => {
                 emit_load(&mut a, l, machine, &mem, 2, i as u32, off);
-                store_reg(&mut a, l, 0, dst);
+                store_reg(&mut a, l, machine, 0, dst);
             }
             JitOp::AluRM { kind, dst, mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
@@ -512,48 +617,221 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
-                load_reg(&mut a, l, 10, dst);
+                load_reg(&mut a, l, machine, 10, dst);
                 emit_alu(&mut a, kind)?;
                 if kind != 7 {
-                    store_reg(&mut a, l, 13, dst);
+                    store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, kind, 2);
+                store_cc(&mut a, l, machine, kind, 2);
             }
             JitOp::CmpMR { mem, reg } => {
                 // cmp [mem], r — a=mem値, b=reg (向きが逆でないことに注意:
                 // rm=dst形なので a がメモリ側)
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
-                load_reg(&mut a, l, 11, reg);
+                load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
-                store_cc(&mut a, l, 7, 2);
+                store_cc(&mut a, l, machine, 7, 2);
             }
             JitOp::CmpMI { mem, imm } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
-                store_cc(&mut a, l, 7, 2);
+                store_cc(&mut a, l, machine, 7, 2);
             }
             JitOp::TestMR { mem, reg } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
-                load_reg(&mut a, l, 11, reg);
+                load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, 4, 2);
+                store_cc(&mut a, l, machine, 4, 2);
+            }
+            // ---- ストア/RMW形 (F1d-c)。ヘルパ完了後に自ページ世代を照合、
+            //      動いていたら i+1 で脱出 (最後のopなら照合不要 — どのみち終わる) ----
+            JitOp::StoreMR { mem, src } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                load_reg(&mut a, l, machine, 3, src);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_abs(&mut a, 16, h_st32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::StoreMI { mem, imm } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                mov_imm32(&mut a, 3, imm);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_abs(&mut a, 16, h_st32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::AluMR { kind, mem, reg } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                load_reg(&mut a, l, machine, 4, reg);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_imm32(&mut a, 3, kind as u32);
+                mov_abs(&mut a, 16, h_rmw32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::AluMI { kind, mem, imm } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                mov_imm32(&mut a, 4, imm);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_imm32(&mut a, 3, kind as u32);
+                mov_abs(&mut a, 16, h_rmw32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            // ---- スタック形。pushは書き込み=世代照合あり、popは読みだけ ----
+            JitOp::PushR { src } => {
+                load_reg(&mut a, l, machine, 1, src);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::PushI { imm } => {
+                mov_imm32(&mut a, 1, imm);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::PopR { dst } => {
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_abs(&mut a, 16, h_pop32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
+                mov_imm32(&mut a, 10, off);
+                mov_imm32(&mut a, 15, i as u32);
+                dynasm!(a; .arch aarch64; b ->exit; ok:);
+                store_reg(&mut a, l, machine, 0, dst);
+            }
+            JitOp::Leave => {
+                // 読み (SS:[BP]) が確定してから SP=BP+4、BP=読んだ値 (execと同順)
+                load_reg(&mut a, l, machine, 2, 5); // w2 = BP
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, 2); // SS
+                mov_abs(&mut a, 16, h_ld32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
+                mov_imm32(&mut a, 10, off);
+                mov_imm32(&mut a, 15, i as u32);
+                dynasm!(a; .arch aarch64; b ->exit; ok:);
+                load_reg(&mut a, l, machine, 3, 5); // BP (ヘルパ後に取り直し)
+                dynasm!(a; .arch aarch64; add w3, w3, 4);
+                store_reg(&mut a, l, machine, 3, 4); // SP = BP+4
+                store_reg(&mut a, l, machine, 0, 5); // BP = [旧BP]
+            }
+            // ---- 終端: call/ret ----
+            JitOp::CallRel { rel } => {
+                // 戻り番地 = ip0 + off + len を push (脱出したらpushしていない)
+                mov_abs(&mut a, 9, l.ip as u64);
+                mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
+                dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                let taken = off.wrapping_add(len as u32).wrapping_add(rel);
+                mov_imm32(&mut a, 10, taken);
+                mov_imm32(&mut a, 15, n as u32);
+                terminal = true;
+            }
+            JitOp::Ret => {
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_abs(&mut a, 16, h_pop32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
+                mov_imm32(&mut a, 10, off);
+                mov_imm32(&mut a, 15, i as u32);
+                dynasm!(a; .arch aarch64; b ->exit; ok:);
+                // 着地は絶対番地 (popした値) — deltaではなく exit_abs へ
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                mov_imm32(&mut a, 15, n as u32);
+                dynasm!(a; .arch aarch64; b ->exit_abs);
+                terminal = true;
             }
             JitOp::Jcc { cc, rel } => {
-                mov_abs(&mut a, 0, machine as u64);
+                dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, cc as u32);
                 mov_abs(&mut a, 16, h_cond as usize as u64);
                 dynasm!(a; .arch aarch64; blr x16);
                 let not_taken = off.wrapping_add(len as u32);
                 let taken = not_taken.wrapping_add(rel);
-                mov_imm32(&mut a, 10, taken);
-                mov_imm32(&mut a, 11, not_taken);
-                dynasm!(a; .arch aarch64; cmp w0, 0; csel w10, w10, w11, ne);
-                mov_imm32(&mut a, 15, n as u32);
-                terminal = true;
+                if i + 1 == ops.len() {
+                    // 終端形: 両側とも出口 (従来どおり)
+                    mov_imm32(&mut a, 10, taken);
+                    mov_imm32(&mut a, 11, not_taken);
+                    dynasm!(a; .arch aarch64; cmp w0, 0; csel w10, w10, w11, ne);
+                    mov_imm32(&mut a, 15, n as u32);
+                    terminal = true;
+                } else {
+                    // 両側焼き (CAP_CHAIN): 成立側は「完全実行済み i+1」で
+                    // 途中退出、不成立側は同じブロックの続きを走る
+                    dynasm!(a; .arch aarch64; cbz w0, >nt);
+                    mov_imm32(&mut a, 10, taken);
+                    mov_imm32(&mut a, 15, (i + 1) as u32);
+                    dynasm!(a; .arch aarch64; b ->exit; nt:);
+                }
             }
             JitOp::Jmp { rel } => {
                 let taken = off.wrapping_add(len as u32).wrapping_add(rel);
@@ -570,7 +848,8 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
         mov_imm32(&mut a, 10, total_len);
         mov_imm32(&mut a, 15, n as u32);
     }
-    // ---- 共有テール: ip += w10、w15を返す ----
+    // ---- 共有テール: ->exit は ip += w10 (差分)、->exit_abs は ip = w10 (絶対)。
+    //      どちらも w15 (実行済み命令数) を返す ----
     dynasm!(a; .arch aarch64; ->exit:);
     mov_abs(&mut a, 9, l.ip as u64);
     dynasm!(a; .arch aarch64
@@ -578,6 +857,17 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
         ; add w11, w11, w10
         ; str w11, [x9]
         ; mov w0, w15
+        ; ldr x19, [sp, 24]
+        ; ldp x29, x30, [sp]
+        ; add sp, sp, 32
+        ; ret
+        ; ->exit_abs:
+    );
+    mov_abs(&mut a, 9, l.ip as u64);
+    dynasm!(a; .arch aarch64
+        ; str w10, [x9]
+        ; mov w0, w15
+        ; ldr x19, [sp, 24]
         ; ldp x29, x30, [sp]
         ; add sp, sp, 32
         ; ret
@@ -594,9 +884,11 @@ fn emit_block(l: &JitLayout, machine: usize, ops: &[(u8, JitOp)]) -> Option<Bloc
 }
 
 /// 実効オフセットを w<dst> に作る (disp + base + index<<scale)
+#[allow(clippy::too_many_arguments)] // EAの材料そのもの — 束ねる構造体を作る方が嵩む
 fn emit_ea(
     a: &mut dynasmrt::aarch64::Assembler,
     l: &JitLayout,
+    machine: usize,
     dst: u8,
     base: i8,
     index: i8,
@@ -605,11 +897,11 @@ fn emit_ea(
 ) {
     mov_imm32(a, dst, disp);
     if base >= 0 {
-        load_reg(a, l, 11, base as u8);
+        load_reg(a, l, machine, 11, base as u8);
         dynasm!(a; .arch aarch64; add W(dst), W(dst), w11);
     }
     if index >= 0 {
-        load_reg(a, l, 11, index as u8);
+        load_reg(a, l, machine, 11, index as u8);
         match scale {
             0 => dynasm!(a; .arch aarch64; add W(dst), W(dst), w11),
             1 => dynasm!(a; .arch aarch64; add W(dst), W(dst), w11, lsl 1),
@@ -631,8 +923,8 @@ fn emit_load(
     i: u32,
     off: u32,
 ) {
-    emit_ea(a, l, 2, mem.base, mem.index, mem.scale, mem.disp); // w2 = off
-    mov_abs(a, 0, machine as u64);
+    emit_ea(a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp); // w2 = off
+    dynasm!(a; .arch aarch64; mov x0, x19);
     mov_imm32(a, 1, mem.seg as u32);
     let h = match width {
         1 => h_ld8 as usize,
@@ -647,6 +939,37 @@ fn emit_load(
     mov_imm32(a, 10, off); // ip差分 = このopのブロック内オフセット (未実行)
     mov_imm32(a, 15, i); // 実行済みはi個
     dynasm!(a; .arch aarch64; b ->exit; ok:);
+}
+
+/// w0==0 (ヘルパの脱出合図) なら「op iの手前・状態無傷」でexitへ
+fn emit_escape_if_zero(a: &mut dynasmrt::aarch64::Assembler, i: u32, off: u32) {
+    dynasm!(a; .arch aarch64; cbnz w0, >ok);
+    mov_imm32(a, 10, off);
+    mov_imm32(a, 15, i);
+    dynasm!(a; .arch aarch64; b ->exit; ok:);
+}
+
+/// 自ページ世代の照合 (ストア/push後、最後のop以外)。焼いた時の世代と
+/// 違ったら**このopまで実行済み (i+1)** で脱出 — 自分の居るページを
+/// 書き換えたブロックが古い続きを走らない (jit.rs の n+1契約)
+fn emit_genck(
+    a: &mut dynasmrt::aarch64::Assembler,
+    gen_addr: usize,
+    gen: u32,
+    i: usize,
+    off_after: u32,
+    n_ops: usize,
+) {
+    if i + 1 == n_ops || gen_addr == 0 {
+        return; // 最後のopはどのみちブロックが終わる — 次の頭照合が裁く
+    }
+    mov_abs(a, 9, gen_addr as u64);
+    dynasm!(a; .arch aarch64; ldr w1, [x9]);
+    mov_imm32(a, 2, gen);
+    dynasm!(a; .arch aarch64; cmp w1, w2; b.eq >gok);
+    mov_imm32(a, 10, off_after);
+    mov_imm32(a, 15, (i + 1) as u32);
+    dynasm!(a; .arch aarch64; b ->exit; gok:);
 }
 
 /// w10=a, w11=b, (ADC/SBBは w12=cin設定済み) から w13=r を作る。

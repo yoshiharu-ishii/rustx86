@@ -738,6 +738,14 @@ pub fn page_gen(m: &Machine, pa: u32) -> u32 {
     m.dcache.page_gen_of(pa)
 }
 
+/// ブロック頭ページの世代スロットの実番地 (ストア語彙のn+1脱出照合用)。
+/// 生成コードはストアの後にここを読み、焼いた時の世代と違ったら
+/// **そのopまで実行済み (i+1) で脱出**する — 自分の居るページを書き換えた
+/// ブロックが古い続きを走らない (ADR-0020後の世界の契約)
+pub fn page_gen_addr(m: &Machine, pa: u32) -> usize {
+    m.dcache.page_gen_addr_of(pa)
+}
+
 pub fn layout(m: &Machine) -> JitLayout {
     // jit.rs は cpu モジュールの子孫なので、Cpuのprivateフィールドに触れる
     // (alu.rs が cc_* に触れるのと同じ理屈)。アドレスはここで写し取り、
