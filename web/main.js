@@ -155,7 +155,8 @@ function syncControls() {
   setNetLamp(link?.state);
   syncSidebar();
   if (linux) {
-    $('boot').disabled = linux.busy;
+    // 再起動は電源が入っているときの顔。OFFのときは「電源」が入口
+    $('boot').disabled = linux.busy || !linux.booted;
     $('pause').disabled = !linux.booted;
     setPauseFace(!!linux.paused);
     $('snapExport').disabled = !linux.booted;
@@ -842,12 +843,10 @@ $('netForm').addEventListener('submit', e => {
 $('power').addEventListener('click', async () => {
   speaker.mute();
   if (linux) {
-    if (linux.booted) {
-      linux.destroy();
-      linux = null;
-      $('linuxScreen').setAttribute('hidden', '');
-      if (link) link.onFrame = null; // 受け取りをVGA機のpump経由に戻す
-    }
+    // **OFFにしても機械は選ばれたまま。** ルートFS/RAMを選び直して
+    // もう一度入れられる — 実機で電源を切ってもマシンは机に残るのと同じ。
+    // 起動中 (busy) に切るのも許す (組み間違いに気づくのは大抵ログの途中)
+    if (linux.booted || linux.busy) linux.powerOff();
     else await linux.boot();
     syncControls();
     return;
@@ -1291,9 +1290,10 @@ async function select(m, { autoBoot = true } = {}) {
     if (link) link.onFrame = f => linux?.netInject(f);
     dbg.reset();
     syncControls();
-    // 選んだら起動まで進める (ELKS/FreeDOSと同じ作法)。
-    // スナップショットファイルからの復元時は呼び手が boot({snapshot}) する
-    if (autoBoot) await linux.boot();
+    // **Linuxは電源OFFで待つ** — ルートFS/RAMを選んでから電源を入れる
+    // (実機の「組んでから電源」の順)。16bit機は従来どおり選んだら即起動 —
+    // あちらには選ぶ構成が無い。スナップショット復元は呼び手が boot({snapshot}) する
+    if (autoBoot) setStatus('電源OFF — ルートFSとRAMを選んで「電源」で起動');
     syncControls();
     return;
   }
