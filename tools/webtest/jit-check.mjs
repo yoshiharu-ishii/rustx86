@@ -25,6 +25,7 @@ async function freshModule() {
 }
 
 async function boot(useJit) {
+  const t0 = performance.now();
   const { mod, exports } = await freshModule();
   resetJit();
   const emu = mod.Emulator.from_bzimage(kernel, initrd, 'console=ttyS0', 128);
@@ -44,6 +45,8 @@ async function boot(useJit) {
   }
   // 命令数は「シェル到達までTSCが進んだ量」で数える (決定的・精密)
   const instrs = emu.tsc();
+  const wall = ((performance.now() - t0) / 1000).toFixed(1);
+  console.log(`[time] ${useJit ? 'jit' : 'interp'}: ${wall}s`);
   const installed = useJit ? emu.jit_installed() : 0;
   const baked = useJit ? emu.jit_baked() : 0;
   const entries = useJit ? emu.jit_entries() : 0;
