@@ -41,11 +41,16 @@ cp web/*.html web/*.js web/serve.py "$root/"
 cp web/pkg/*.js web/pkg/*.wasm "$root/pkg/"
 # .d.ts と package.json は動作に要らない (型定義はビルド時の産物)
 
-# ---- イメージの取得スクリプト。zipのルートに置く ----
-# (fetch-images.sh は web/ の在り処で自分の位置を判断するので、ルート直下でも動く)
-cp tools/images/fetch-images.sh "$root/"
-mkdir -p "$root/tools/images"
-cp tools/images/mkcpio.py tools/images/extract-vmlinux.sh tools/images/make-mini-initramfs.sh "$root/tools/images/" 2>/dev/null || true
+# ---- イメージの取得スクリプトと道具箱。zipにも同じレイアウトで入れる ----
+# (fetch-images.sh は web/ の在り処で自分の位置を判断するので、ルート直下でも動く。
+#  dockerがあれば道具箱の中で、無ければネイティブで走る — ELKS/FreeDOSの取得は
+#  curl+unzip+mtoolsで足りる。**焼く方 (mini/vmlinux) はdockerが要る** —
+#  /dev/consoleノードを非rootで作る道がコンテナのmknodしか無い)
+cp tools/images/sh/fetch-images.sh "$root/"
+mkdir -p "$root/tools/images/sh"
+cp tools/images/in-linux.sh tools/images/Dockerfile "$root/tools/images/"
+cp tools/images/sh/fetch-images.sh tools/images/sh/extract-vmlinux.sh \
+   tools/images/sh/make-mini-initramfs.sh "$root/tools/images/sh/"
 
 # ---- 2クリックで起動する入口 ----
 # **index.html の直接ダブルクリックでは動かない** — ESモジュールとwasmは

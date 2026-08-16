@@ -244,7 +244,7 @@ export function mountLinux(canvas, opts = {}) {
       } catch (e) {
         status(
           `イメージが読めない: ${e.message}。` +
-            'tools/images/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
+            'tools/images/sh/fetch-images.sh linux と make-mini-initramfs.sh で作り、web/ に置く',
           true,
         );
         busy = false;
@@ -261,7 +261,7 @@ export function mountLinux(canvas, opts = {}) {
       try {
         disk = await fetchWithProgress(`./${usedDisk}`, usedDisk);
       } catch {
-        status(`${usedDisk} が無い (tools/images/make-gcc-disk.sh で作って web/ に置く)。ディスク無しで起動します`, true);
+        status(`${usedDisk} が無い (tools/images/sh/make-gcc-disk.sh で作って web/ に置く)。ディスク無しで起動します`, true);
         usedDisk = '';
       }
     }

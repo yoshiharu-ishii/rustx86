@@ -156,7 +156,7 @@ export const ROOTFS = [
     note:
       'virtio-blkの/dev/vdaにgcc一式 (34MBのsquashfs)。ミニのinitが見つけて' +
       '移り住む。読んだ分しかRAMに載らないので**128MBで済む** — こちらが本命。' +
-      'tools/images/make-gcc-disk.sh で作る',
+      'tools/images/sh/make-gcc-disk.sh で作る',
   },
   {
     name: 'initramfs-gcc',
@@ -166,7 +166,7 @@ export const ROOTFS = [
     note:
       '34MB (展開84MB)。ディスク無しでも動く保険の形。展開した中身が' +
       'そのままtmpfsに載るので、RAMは自動で256MBになる。' +
-      'tools/images/make-gcc-initramfs.sh で作る',
+      'tools/images/sh/make-gcc-initramfs.sh で作る',
   },
 ];
 
