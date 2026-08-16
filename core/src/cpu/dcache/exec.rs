@@ -348,6 +348,13 @@ fn addr_of(m: &Machine, r: &MemRef, size: u32, write: bool) -> u32 {
 /// セグメント適用前の実効オフセット (LEAが使う)
 #[inline]
 fn off_of(m: &Machine, r: &MemRef) -> u32 {
+    // census (P4): 形の動的分布。opstats以外ではコストゼロ
+    if cfg!(feature = "opstats") {
+        let shape = usize::from(r.base >= 0)
+            | (usize::from(r.index >= 0) << 1)
+            | (usize::from(r.disp != 0) << 2);
+        m.ea_counts[shape].set(m.ea_counts[shape].get() + 1);
+    }
     let mut off = r.disp;
     if r.base >= 0 {
         off = off.wrapping_add(m.cpu.regs[r.base as usize]);

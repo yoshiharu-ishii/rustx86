@@ -162,10 +162,16 @@ impl Machine {
             return Ok(la); // PG off: 線形がそのまま物理
         }
         // --- TLBを引く。当たれば表を歩かない ---
+        if cfg!(feature = "opstats") {
+            self.tlb_probes.set(self.tlb_probes.get() + 1);
+        }
         let vpn = la >> 12;
         let slot = (vpn as usize) & (TLB_SLOTS - 1);
         let e = self.tlb[slot].get();
         if e.tag != vpn {
+            if cfg!(feature = "opstats") {
+                self.tlb_misses.set(self.tlb_misses.get() + 1);
+            }
             return self.translate_miss(la, write, slot);
         }
         let base = e.base_flags & !0xFFF;

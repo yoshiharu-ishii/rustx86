@@ -226,6 +226,13 @@ pub struct Machine {
     /// 数えるのは opstats フィーチャを立てたときだけ (通常ビルドではコストゼロ)。
     /// **どの命令をデコードキャッシュに入れるかはこの実測で決める** (推測しない)
     pub op_counts: Vec<u64>,
+    /// census (ADR-0021): TLBの引き数とミス数。opstats時のみ計上。
+    /// D5 (victim TLB) の生死をこの実測で決める — ミス率が床下なら実装しない
+    pub tlb_probes: std::cell::Cell<u64>,
+    pub tlb_misses: std::cell::Cell<u64>,
+    /// census (P4用): 実効アドレスの形の動的分布。opstats時のみ。
+    /// index = base有(1) | index有(2) | disp≠0(4) の3bit
+    pub ea_counts: [std::cell::Cell<u64>; 8],
     /// TLB — 線形→物理の変換の写し。**ページングの最大のボトルネックを消す。**
     ///
     /// ページング有効時、変換1回は2段の表 (PDE→PTE) を読む = 物理メモリ2回。
@@ -341,6 +348,9 @@ impl Machine {
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
             op_counts: vec![0; 512],
+            tlb_probes: std::cell::Cell::new(0),
+            tlb_misses: std::cell::Cell::new(0),
+            ea_counts: Default::default(),
             console: Vec::new(),
             disk: None,
             first_fault: None,
