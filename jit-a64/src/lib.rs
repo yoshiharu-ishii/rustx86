@@ -474,17 +474,19 @@ fn emit_block(
     let n = ops.len() as u16;
     let total_len: u32 = ops.iter().map(|&(len, _)| len as u32).sum();
 
-    // prologue: フレーム + スピル1枠 ([sp,16]) + x19退避 ([sp,24])。
-    // **x19 = Machineの実番地** (callee-saved — ヘルパ呼びでも生きる)。
-    // フィールドアクセスは [x19, #差分] の1命令になる (mov_abs×4の絶対番地
-    // 生成をやめる — ブロック密度がここで決まる)
+    // prologue: フレーム48B。x19=Machine / x20=TLB先頭 / x21=ゲストRAM先頭 を
+    // 掴み置き (callee-saved — ヘルパ呼びでも生きる)。フィールドは [x19,#差分]、
+    // TLBインライン路は x20/x21 相対で走る。スピル1枠は [sp,40]
     dynasm!(a; .arch aarch64
-        ; sub sp, sp, 32
+        ; sub sp, sp, 48
         ; stp x29, x30, [sp]
-        ; str x19, [sp, 24]
+        ; stp x19, x20, [sp, 16]
+        ; str x21, [sp, 32]
         ; mov x29, sp
     );
     mov_abs(&mut a, 19, machine as u64);
+    mov_abs(&mut a, 20, l.tlb as u64);
+    mov_abs(&mut a, 21, l.mem as u64);
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
@@ -611,9 +613,9 @@ fn emit_block(
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 if kind == 2 || kind == 3 {
                     // b (=ロード値) をスピルしてcinを取り、復元
-                    dynasm!(a; .arch aarch64; str w0, [sp, 16]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 40]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 16]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 40]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -857,9 +859,10 @@ fn emit_block(
         ; add w11, w11, w10
         ; str w11, [x9]
         ; mov w0, w15
-        ; ldr x19, [sp, 24]
+        ; ldp x19, x20, [sp, 16]
+        ; ldr x21, [sp, 32]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 32
+        ; add sp, sp, 48
         ; ret
         ; ->exit_abs:
     );
@@ -867,9 +870,10 @@ fn emit_block(
     dynasm!(a; .arch aarch64
         ; str w10, [x9]
         ; mov w0, w15
-        ; ldr x19, [sp, 24]
+        ; ldp x19, x20, [sp, 16]
+        ; ldr x21, [sp, 32]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 32
+        ; add sp, sp, 48
         ; ret
     );
     let start = dynasmrt::AssemblyOffset(0);
@@ -924,6 +928,66 @@ fn emit_load(
     off: u32,
 ) {
     emit_ea(a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp); // w2 = off
+                                                                         // ---- TLBヒットのインライン高速路 (F1d-d、32bitのみ) ----
+                                                                         //
+                                                                         // translate_forのヒット路 (カーネル・読み) の写し: リング0の読みは
+                                                                         // 権限検査もA/D更新も無い — probe+合成だけで物理に届く。
+                                                                         // 外れる条件 (CPL3 / ページ跨ぎ / TLBミス / RAM外) は全部従来ヘルパへ
+                                                                         // (意味論はそちらが原本。インラインはヒットの近道でしかない)。
+                                                                         // PG無効期 (解凍ステブ) はTLBが空なのでタグ不一致→ヘルパ = 従来どおり。
+                                                                         // 注意: opstatsのtlb_probes計上はこの近道を通ると増えない (計測ビルドの
+                                                                         // JITは近道ぶんだけ過小になる — 定規はJIT offで取る約束)
+    if width == 4 {
+        // la = hidden[seg].base + off
+        let base_addr = l.hidden + mem.seg as usize * 12;
+        if let Some(o) = field_off4(machine, base_addr) {
+            dynasm!(a; .arch aarch64; ldr w3, [x19, o]);
+        } else {
+            mov_abs(a, 9, base_addr as u64);
+            dynasm!(a; .arch aarch64; ldr w3, [x9]);
+        }
+        dynasm!(a; .arch aarch64; add w3, w3, w2);
+        // CPL==3 なら遅い道 (U/S検査はヘルパにしか無い)
+        let cs_addr = l.sregs + 2; // sregs[CS=1] (u16)
+        let d = cs_addr.wrapping_sub(machine);
+        if d < 4096 {
+            let d = d as u32;
+            dynasm!(a; .arch aarch64; ldrb w4, [x19, d]);
+        } else {
+            mov_abs(a, 9, cs_addr as u64);
+            dynasm!(a; .arch aarch64; ldrb w4, [x9]);
+        }
+        dynasm!(a; .arch aarch64
+            ; and w4, w4, 3
+            ; cmp w4, 3
+            ; b.eq >slow
+            // ページ跨ぎは遅い道
+            ; and w4, w3, 0xFFF
+            ; cmp w4, 0xFFC
+            ; b.hi >slow
+            // TLB probe: slot = vpn & 4095、エントリは12B刻み
+            ; lsr w5, w3, 12
+            ; and w6, w5, 0xFFF
+            ; add x7, x20, x6, lsl 3
+            ; add x7, x7, x6, lsl 2
+            ; ldp w8, w9, [x7]
+            ; cmp w8, w5
+            ; b.ne >slow
+            // pa = (base_flags & !0xFFF) | (la & 0xFFF)
+            ; and w10, w9, 0xFFFFF000
+            ; orr w10, w10, w4
+        );
+        // RAM範囲 (pa+4 <= len)。128MB級なのでw即値2発で作る
+        mov_imm32(a, 11, (l.mem_len.saturating_sub(4)) as u32);
+        dynasm!(a; .arch aarch64
+            ; cmp w10, w11
+            ; b.hi >slow
+            ; add x12, x21, w10, uxtw
+            ; ldr w0, [x12]
+            ; b >done
+            ; slow:
+        );
+    }
     dynasm!(a; .arch aarch64; mov x0, x19);
     mov_imm32(a, 1, mem.seg as u32);
     let h = match width {
@@ -934,11 +998,11 @@ fn emit_load(
     mov_abs(a, 16, h as u64);
     dynasm!(a; .arch aarch64; blr x16
         ; lsr x1, x0, 32
-        ; cbz x1, >ok
+        ; cbz x1, >done2
     );
     mov_imm32(a, 10, off); // ip差分 = このopのブロック内オフセット (未実行)
     mov_imm32(a, 15, i); // 実行済みはi個
-    dynasm!(a; .arch aarch64; b ->exit; ok:);
+    dynasm!(a; .arch aarch64; b ->exit; done2:; done:);
 }
 
 /// w0==0 (ヘルパの脱出合図) なら「op iの手前・状態無傷」でexitへ
