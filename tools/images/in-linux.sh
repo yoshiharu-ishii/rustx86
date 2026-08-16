@@ -3,6 +3,9 @@
 #
 #   tools/images/in-linux.sh mksquashfs root.d disk.squashfs -comp gzip
 #
+# tools/images/sh/ のスクリプトは先頭の番人がこれを経由して自分で入るので、
+# 普段この入口を手で叩くのは道具を1回借りたいときだけ
+#
 # リポジトリのルートを /w に見せて、そこを作業場所に実行する。
 # イメージ (rustx86-imgtools) が無ければその場で焼く — 初回だけ数十秒。
 #
@@ -19,7 +22,7 @@ command -v docker >/dev/null 2>&1 || {
 }
 docker image inspect rustx86-imgtools >/dev/null 2>&1 || {
   echo "道具箱を焼く (初回のみ)..." >&2
-  docker build -q -t rustx86-imgtools tools/images/imgtools >&2
+  docker build -q -t rustx86-imgtools -f tools/images/Dockerfile tools/images >&2
 }
 
 exec docker run --rm -v "$PWD:/w" -w /w rustx86-imgtools "$@"

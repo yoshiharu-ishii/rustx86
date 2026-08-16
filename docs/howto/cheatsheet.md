@@ -1,18 +1,18 @@
 # チートシート — よく打つコマンド
 
-増えてきたコマンドの早見表。**まず `tools/images/fetch-images.sh` でイメージを揃える**
+増えてきたコマンドの早見表。**まず `tools/images/sh/fetch-images.sh` でイメージを揃える**
 (GPL配布物はリポジトリに置かない方針 — 入手経路はこのスクリプト一つ)。
 詳しい背景はリンク先へ。ここは「手が覚える前に引く表」。
 
 ## イメージを揃える (最初に一度)
 
 ```bash
-tools/images/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
-tools/images/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
-tools/images/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
-tools/images/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
-tools/images/make-mini-initramfs.sh     # busyboxの最小initramfsを組む (Docker道具箱の中で走る)
-tools/images/make-gcc-disk.sh           # gcc入りのディスク (squashfs)。焼き方の詳細は howto/images.md
+tools/images/sh/fetch-images.sh            # 全部 (ELKS / FreeDOS / Linux)
+tools/images/sh/fetch-images.sh linux      # Linux (vmlinux + initramfs) だけ
+tools/images/sh/fetch-images.sh test386    # CPU互換テストROM (nasmで焼く)
+tools/images/sh/extract-vmlinux.sh         # bzImage から vmlinux を取り出す
+tools/images/sh/make-mini-initramfs.sh     # busyboxの最小initramfsを組む (Docker道具箱の中で走る)
+tools/images/sh/make-gcc-disk.sh           # gcc入りのディスク (squashfs)。焼き方の詳細は howto/images.md
 ```
 
 ## 走らせる
@@ -65,7 +65,7 @@ TEST386_TRACE=1 cargo run --release --example test386
 ```
 
 番号→内容は test386 の README、命令→番地は `test386.lst`
-(`tools/images/fetch-images.sh test386` が作業ディレクトリに残す) で引く。
+(`tools/images/sh/fetch-images.sh test386` が作業ディレクトリに残す) で引く。
 
 ## コード検査 (CIと同じもの、手元で)
 

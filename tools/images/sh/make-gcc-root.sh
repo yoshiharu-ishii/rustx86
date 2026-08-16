@@ -1,17 +1,17 @@
 #!/bin/sh
 # gcc入りrootfsの木を組む (共有部品)。
 #
-#   tools/images/make-gcc-root.sh <出力dir>
+#   tools/images/sh/make-gcc-root.sh <出力dir>
 #
 # ミニinitramfsの中身に Alpine の gcc/binutils/musl-dev を重ね、
 # 開発者向けの荷物を削って「Cが1本通る最小の木」を作る。
 # **詰め方は呼ぶ側の仕事**: initramfs (cpio+gz) にするのも、
 # ディスク (squashfs) にするのも、この木が同じ出発点になる。
 set -e
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 # イメージ焼きは道具箱 (Linuxコンテナ) の中で (make-mini-initramfs.shと同じ判断)
 [ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
-[ -f images/initramfs-mini ] || { echo "images/initramfs-mini が無い (tools/images/make-mini-initramfs.sh)"; exit 1; }
+[ -f images/initramfs-mini ] || { echo "images/initramfs-mini が無い (tools/images/sh/make-mini-initramfs.sh)"; exit 1; }
 root=$1
 [ -n "$root" ] || { echo "使い方: make-gcc-root.sh <出力dir>"; exit 1; }
 # 以降 cd するので、出力先は絶対パスに直しておく

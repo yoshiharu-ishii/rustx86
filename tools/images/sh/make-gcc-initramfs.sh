@@ -10,13 +10,13 @@
 # (圧縮イメージと展開後の中身が同時にRAMに載るため)。同じ木をディスクで積む
 # make-gcc-disk.sh なら128MBで済む — こちらは「ディスク無しでも動く」用の保険。
 #
-# 使い方: tools/images/make-gcc-initramfs.sh
+# 使い方: tools/images/sh/make-gcc-initramfs.sh
 set -e
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../.."
 # イメージ焼きは道具箱 (Linuxコンテナ) の中で (make-mini-initramfs.shと同じ判断)
 [ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
-sh tools/images/make-gcc-root.sh "$work/root"
+sh tools/images/sh/make-gcc-root.sh "$work/root"
 
 # 1本のcpioに詰め直す。/dev/console のノードはミニ側と同じ理由で足す
 mkdir -p "$work/root/dev"

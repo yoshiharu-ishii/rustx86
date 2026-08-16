@@ -312,14 +312,12 @@ jobs:
           path: |
             images/test386.bin
             images/test386-EE-reference.txt
-          key: test386-rom-v1-${{ hashFiles('tools/images/fetch-images.sh') }}
+          key: test386-rom-v2-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: test386 ROMのビルド (nasm)
         if: steps.rom-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nasm
-          tools/images/fetch-images.sh test386
+          tools/images/sh/fetch-images.sh test386
 
       - name: test386 実行 (POST完走 + EE照合)
         id: t386
@@ -388,18 +386,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip mtools
-          tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos
-          tools/images/fetch-images.sh linux
-          tools/images/extract-vmlinux.sh
-          tools/images/make-mini-initramfs.sh
+          tools/images/sh/fetch-images.sh elks
+          tools/images/sh/fetch-images.sh freedos
+          tools/images/sh/fetch-images.sh linux
+          tools/images/sh/extract-vmlinux.sh
+          tools/images/sh/make-mini-initramfs.sh
 
       - name: wasm-pack の用意
         run: |
@@ -501,18 +497,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip mtools
-          tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos
-          tools/images/fetch-images.sh linux
-          tools/images/extract-vmlinux.sh
-          tools/images/make-mini-initramfs.sh
+          tools/images/sh/fetch-images.sh elks
+          tools/images/sh/fetch-images.sh freedos
+          tools/images/sh/fetch-images.sh linux
+          tools/images/sh/extract-vmlinux.sh
+          tools/images/sh/make-mini-initramfs.sh
 
       - name: 保存と復元の検査
         id: snaptest
@@ -570,7 +564,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # イメージ (GPL配布物) はリポジトリに置かず、毎回スクリプトで取得する。
-      # 入手経路は tools/images/fetch-images.sh ただ一つ — CIだけの取り方を作ると
+      # 入手経路は tools/images/sh/fetch-images.sh ただ一つ — CIだけの取り方を作ると
       # 手元と食い違う。Actionsのキャッシュは配布ではなくCI内部の控え
       # **同じキーなら同じ中身にする。** 3つのジョブが同じキーで別々の組を
       # 入れていたため、先に走った方の中身が全員に配られていた。ELKSの無い
@@ -580,18 +574,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip mtools
-          tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos
-          tools/images/fetch-images.sh linux
-          tools/images/extract-vmlinux.sh
-          tools/images/make-mini-initramfs.sh
+          tools/images/sh/fetch-images.sh elks
+          tools/images/sh/fetch-images.sh freedos
+          tools/images/sh/fetch-images.sh linux
+          tools/images/sh/extract-vmlinux.sh
+          tools/images/sh/make-mini-initramfs.sh
 
       - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
         id: regress
@@ -697,18 +689,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v4-${{ hashFiles('tools/images/fetch-images.sh', 'tools/images/extract-vmlinux.sh', 'tools/images/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/imgtools/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cpio unzip mtools
-          tools/images/fetch-images.sh elks
-          tools/images/fetch-images.sh freedos
-          tools/images/fetch-images.sh linux
-          tools/images/extract-vmlinux.sh
-          tools/images/make-mini-initramfs.sh
+          tools/images/sh/fetch-images.sh elks
+          tools/images/sh/fetch-images.sh freedos
+          tools/images/sh/fetch-images.sh linux
+          tools/images/sh/extract-vmlinux.sh
+          tools/images/sh/make-mini-initramfs.sh
 
       - name: wasm-pack の用意
         run: |
