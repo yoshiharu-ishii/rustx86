@@ -13,3 +13,7 @@ dynasmrt = "5"
 [[bin]]
 name = "jboot"
 path = "src/bin/jboot.rs"
+
+[features]
+# gcc窓のオペコード度数センサス (jcmd) — coreの計測を束ねる
+opstats = ["rustx86-core/opstats"]
