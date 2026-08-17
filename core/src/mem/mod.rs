@@ -659,6 +659,18 @@ impl Machine {
         true
     }
 
+    /// JIT用の inc/dec [mem] (Grp5/0,1 — CF不変)。意味論は従来と同じ inc_dec_w
+    pub fn jit_try_incdec32(&mut self, seg: usize, off: u32, dec: bool) -> bool {
+        let Some(pa) = self.fast_rmw32_addr(seg, off) else {
+            return false;
+        };
+        let a = u32::from_le_bytes(self.mem[pa..pa + 4].try_into().unwrap());
+        let v = crate::cpu::alu::inc_dec_w(&mut self.cpu, a, dec, true);
+        self.mem[pa..pa + 4].copy_from_slice(&v.to_le_bytes());
+        self.dcache.note_write(pa as u32);
+        true
+    }
+
     /// JIT用のRMW (`alu [mem], b`)。exec.rsのfast RMW armの写し —
     /// 書き込み権限で先に変換 (writable⊆readable) するので、cc更新後に
     /// 失敗する道が無い。ALUは従来と同じ alu_w、書いたら note_write

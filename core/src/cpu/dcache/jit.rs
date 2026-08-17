@@ -292,6 +292,54 @@ pub enum JitOp {
         dst8: u8,
         imm: u8,
     },
+    // ---- F1d-f2 (センサス上位から)。moffsは既存のメモリ形に畳むので
+    //      新opは要らない ----
+    /// setcc r8 / [m8] (0F 90-9F)。条件はh_cond (意味論の原本 = alu::condition)
+    SetccR {
+        cc: u8,
+        dst8: u8,
+    },
+    SetccM {
+        cc: u8,
+        mem: JitMem,
+    },
+    /// test r32, imm / test [mem], imm / test [m8], imm8 (Grp3のkind0/1 —
+    /// フラグだけ、ロードだけ)
+    TestRI {
+        reg: u8,
+        imm: u32,
+    },
+    TestMI {
+        mem: JitMem,
+        imm: u32,
+    },
+    Test8MI {
+        mem: JitMem,
+        imm: u8,
+    },
+    /// inc/dec [mem] (FF/0,1)。CF不変のRMW — ヘルパ1呼び (inc_dec_w委譲)
+    IncDecM {
+        mem: JitMem,
+        dec: bool,
+    },
+    /// push [mem] (FF/6)。ロード→push (どちらも既存の脱出モデル)
+    PushM {
+        mem: JitMem,
+    },
+    /// 終端: jmp r/m32 (FF/4) — 着地は絶対番地
+    JmpIndR {
+        reg: u8,
+    },
+    JmpIndM {
+        mem: JitMem,
+    },
+    /// 終端: call r/m32 (FF/2) — 戻り番地をpushしてから絶対番地へ
+    CallIndR {
+        reg: u8,
+    },
+    CallIndM {
+        mem: JitMem,
+    },
 }
 
 /// 語彙の世代 (collectに渡す)。wasm生成器は凍結時点のF1B、ネイティブはV2
@@ -464,6 +512,102 @@ fn convert(u: &Uop, caps: u32) -> Option<(JitOp, bool)> {
                 dst8: reg,
                 mem: mr.into(),
             }),
+            // ---- F1d-f2: moffs (A0-A3) は絶対番地のメモリ形に畳む ----
+            Uop::MovAMoffs { load, seg, off } => {
+                let mem = JitMem {
+                    base: -1,
+                    index: -1,
+                    scale: 0,
+                    seg,
+                    disp: off,
+                };
+                Some(if load {
+                    JitOp::MovRM { dst: 0, mem }
+                } else {
+                    JitOp::StoreMR { mem, src: 0 }
+                })
+            }
+            Uop::Mov8AMoffs { load, seg, off } => {
+                let mem = JitMem {
+                    base: -1,
+                    index: -1,
+                    scale: 0,
+                    seg,
+                    disp: off,
+                };
+                Some(if load {
+                    JitOp::Mov8RM { dst8: 0, mem }
+                } else {
+                    JitOp::Store8MR { mem, src8: 0 }
+                })
+            }
+            // ---- setcc (0F 90-9F) ----
+            Uop::SetCC {
+                cc,
+                rm: Rm::Reg(dst8),
+            } => Some(JitOp::SetccR { cc, dst8 }),
+            Uop::SetCC {
+                cc,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::SetccM { cc, mem: mr.into() }),
+            // ---- test imm (Grp3のkind0/1。not/negは語彙外のまま) ----
+            Uop::Grp3w {
+                kind,
+                rm: Rm::Reg(reg),
+                imm,
+            } if kind < 2 => Some(JitOp::TestRI { reg, imm }),
+            Uop::Grp3w {
+                kind,
+                rm: Rm::Mem(mr),
+                imm,
+            } if kind < 2 => Some(JitOp::TestMI {
+                mem: mr.into(),
+                imm,
+            }),
+            Uop::Grp3b {
+                kind,
+                rm: Rm::Mem(mr),
+                imm,
+            } if kind < 2 => Some(JitOp::Test8MI {
+                mem: mr.into(),
+                imm,
+            }),
+            // ---- grp5 (FF): inc/dec・push・間接分岐 ----
+            Uop::Grp5 {
+                kind: k @ (0 | 1),
+                rm: Rm::Reg(reg),
+            } => Some(JitOp::IncDec { reg, dec: k == 1 }),
+            Uop::Grp5 {
+                kind: k @ (0 | 1),
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::IncDecM {
+                mem: mr.into(),
+                dec: k == 1,
+            }),
+            Uop::Grp5 {
+                kind: 6,
+                rm: Rm::Reg(reg),
+            } => Some(JitOp::PushR { src: reg }),
+            Uop::Grp5 {
+                kind: 6,
+                rm: Rm::Mem(mr),
+            } => Some(JitOp::PushM { mem: mr.into() }),
+            Uop::Grp5 {
+                kind: 4,
+                rm: Rm::Reg(reg),
+            } => return Some((JitOp::JmpIndR { reg }, true)),
+            Uop::Grp5 {
+                kind: 4,
+                rm: Rm::Mem(mr),
+            } => return Some((JitOp::JmpIndM { mem: mr.into() }, true)),
+            Uop::Grp5 {
+                kind: 2,
+                rm: Rm::Reg(reg),
+            } => return Some((JitOp::CallIndR { reg }, true)),
+            Uop::Grp5 {
+                kind: 2,
+                rm: Rm::Mem(mr),
+            } => return Some((JitOp::CallIndM { mem: mr.into() }, true)),
             _ => None,
         };
         if let Some(op) = v2 {
@@ -618,6 +762,32 @@ pub(crate) fn in_vocab(u: &Uop) -> bool {
     convert(u, CAP_VOCAB2).is_some()
 }
 
+/// collectを止めたuopの度数 (opstats専用 — ブロック断片化の犯人捜し)。
+/// 計上はbake時 (cold) なので実行時間は汚さない。数字は「そのuopが
+/// ブロックの端を作った回数」— 語彙拡大の的の一次資料
+#[cfg(feature = "opstats")]
+thread_local! {
+    static VOCAB_MISS: std::cell::RefCell<std::collections::HashMap<&'static str, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(feature = "opstats")]
+fn note_vocab_miss(u: &Uop) {
+    VOCAB_MISS.with(|m| {
+        *m.borrow_mut().entry(super::uop_name(u)).or_insert(0) += 1;
+    });
+}
+
+/// 度数の写しを降順で返す (jcmd等の観測口)
+#[cfg(feature = "opstats")]
+pub fn vocab_miss_report() -> Vec<(&'static str, u64)> {
+    VOCAB_MISS.with(|m| {
+        let mut v: Vec<_> = m.borrow().iter().map(|(&k, &c)| (k, c)).collect();
+        v.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        v
+    })
+}
+
 /// `pa` から**走路ごと**切り出す (F1b-3のタイル焼き)。
 ///
 /// collect_block は語彙外の命令で切れる。動的実測では語彙内が81%も
@@ -652,7 +822,14 @@ pub fn collect_run_caps(
                 blk.ops.last(),
                 Some((
                     _,
-                    JitOp::Jcc { .. } | JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret
+                    JitOp::Jcc { .. }
+                        | JitOp::Jmp { .. }
+                        | JitOp::CallRel { .. }
+                        | JitOp::Ret
+                        | JitOp::JmpIndR { .. }
+                        | JitOp::JmpIndM { .. }
+                        | JitOp::CallIndR { .. }
+                        | JitOp::CallIndM { .. }
                 ))
             );
             let hit_cap = blk.ops.len() >= cap;
@@ -708,6 +885,8 @@ pub fn collect_block_caps(m: &Machine, pa: u32, cap: usize, caps: u32) -> Option
             break; // デコード不能の手前まで
         };
         let Some((op, term)) = convert(&uop, caps) else {
+            #[cfg(feature = "opstats")]
+            note_vocab_miss(&uop);
             break; // JIT対象外の手前まで
         };
         ops.push((len, op));
