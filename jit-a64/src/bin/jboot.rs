@@ -77,6 +77,8 @@ fn main() {
                     installed,
                     demoted
                 );
+                let (linked, unlinked) = rustx86_jit_a64::chain_stats();
+                println!("連結: 結線{linked} 剥がし{unlinked}");
                 println!("カバレッジ: {:.2}%", m.jit_instrs as f64 * 100.0 / n as f64);
             }
             return;

@@ -435,6 +435,7 @@ version = "0.1.0"
 dependencies = [
  "dynasm",
  "dynasmrt",
+ "libc",
  "rustx86-core",
 ]
 
