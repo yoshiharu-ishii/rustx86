@@ -9,6 +9,8 @@ edition = "2021"
 rustx86-core = { path = "../core" }
 dynasm = "5"
 dynasmrt = "5"
+# 連結パッチ (mprotect + icache無効化) 用
+libc = "0.2"
 
 [[bin]]
 name = "jboot"

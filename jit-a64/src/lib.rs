@@ -129,15 +129,47 @@ unsafe extern "C" fn h_pop32(m: *mut Machine) -> u64 {
     }
 }
 
+/// 連結サイト (F1d-i、ADR-0024)。焼き時にスタブをプレースホルダで焼き、
+/// リンク時はmovz/movkのimm16とsubsのimm12のビット畑だけ書き換える
+struct ChainSite {
+    /// 差し替える `b ->exit` のオフセット (リンク時に元語を控える)
+    branch_off: usize,
+    orig_word: u32,
+    linked: bool,
+    target_pa: u32,
+    /// スタブ先頭 (b branch_off→stub_off の飛び先)
+    stub_off: usize,
+    /// スタブ内のパッチ点 (movz x9×4 / movz w12×2 / subs / movz x16×4 の先頭)
+    gen_addr_off: usize,
+    gen_imm_off: usize,
+    n_off: usize,
+    body_movs_off: usize,
+}
+
+/// 飛び込みの台帳 (剥がし用)。from_serialで飛び元自身の入れ替わりを検出
+struct Incoming {
+    from_slot: usize,
+    from_serial: u64,
+    branch_off: usize,
+    orig_word: u32,
+}
+
 /// 焼けたブロック
 struct Block {
-    /// 引数はプロローグの掴み置き: x0=Machine, x1=TLB先頭, x2=RAM先頭。
-    /// 定数焼き込み (mov_abs×3 ≈ 9-12命令/入場) を3命令のmovに変える
-    entry: unsafe extern "C" fn(usize, usize, usize, usize) -> u64,
+    /// 引数はプロローグの掴み置き: x0=Machine, x1=TLB先頭, x2=RAM先頭、
+    /// x3=ヘルパ表、x4=予算 (w23へ)
+    entry: unsafe extern "C" fn(usize, usize, usize, usize, usize) -> u64,
     /// バッファの寿命の所有 (dropで実行可能メモリが消えるので手放さない)
-    _buf: dynasmrt::ExecutableBuffer,
+    buf: dynasmrt::ExecutableBuffer,
     n: u16,
     gen: u32,
+    /// 入れ替わり検出用の通し番号 (Rtが振る)
+    serial: u64,
+    /// プロローグを飛ばした本体入口 (連結はフレームを飛び元と共有する)
+    body_off: usize,
+    /// 出ていく連結サイトと、飛び込んでくるリンクの台帳
+    out: Vec<ChainSite>,
+    incoming: Vec<Incoming>,
     /// 損益の観測 (F1d-f): 入場数と実行命令数。taken分岐の早期退出で
     /// 「大きく焼けても2命令で出る」ブロックは入場税が勝つ — 標本が
     /// たまったら平均で裁いて負けブロックは負の印に降格する
@@ -224,6 +256,11 @@ struct Rt {
     pub installed: u64,
     /// 損益判定で負の印に降格した数
     pub demoted: u64,
+    /// Blockの通し番号 (剥がし台帳のserial照合用)
+    next_serial: u64,
+    /// 観測: 張ったリンク / 剥がしたリンク
+    pub linked: u64,
+    pub unlinked: u64,
 }
 
 thread_local! {
@@ -256,6 +293,9 @@ pub unsafe fn attach(m: &mut Machine) {
         slots,
         baked: 0,
         demoted: 0,
+        next_serial: 1,
+        linked: 0,
+        unlinked: 0,
         rejected: 0,
         installed: 0,
     }));
@@ -295,6 +335,191 @@ pub fn stats() -> (u64, u64, usize, u64) {
     })
 }
 
+// macOSのライブラリ関数: 命令キャッシュの無効化 (パッチ後に必須)
+unsafe extern "C" {
+    fn sys_icache_invalidate(start: *mut core::ffi::c_void, len: usize);
+}
+
+/// 実行可能バッファの命令語を書き換える (mprotect RW→書換→RX→icache無効化)。
+/// 単一スレッド前提 — 書換中に生成コードは走らない (RTと同じ規律)
+unsafe fn patch_code(buf: &dynasmrt::ExecutableBuffer, patches: &[(usize, u32)]) {
+    if patches.is_empty() {
+        return;
+    }
+    let base = buf.ptr(dynasmrt::AssemblyOffset(0)) as usize;
+    let lo = patches.iter().map(|&(o, _)| base + o).min().unwrap();
+    let hi = patches.iter().map(|&(o, _)| base + o + 4).max().unwrap();
+    let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    let alo = lo & !(ps - 1);
+    let len = hi.div_ceil(ps) * ps - alo;
+    unsafe {
+        libc::mprotect(alo as *mut _, len, libc::PROT_READ | libc::PROT_WRITE);
+        for &(off, w) in patches {
+            ((base + off) as *mut u32).write(w);
+        }
+        libc::mprotect(alo as *mut _, len, libc::PROT_READ | libc::PROT_EXEC);
+        sys_icache_invalidate(lo as *mut _, hi - lo);
+    }
+}
+
+fn read_word(buf: &dynasmrt::ExecutableBuffer, off: usize) -> u32 {
+    unsafe { ((buf.ptr(dynasmrt::AssemblyOffset(0)) as usize + off) as *const u32).read() }
+}
+
+/// movz/movkのimm16畑 (bits 5..21) を差し替える
+fn imm16_patch(word: u32, imm: u16) -> u32 {
+    (word & !(0xFFFFu32 << 5)) | ((imm as u32) << 5)
+}
+
+/// subs (imm形) のimm12畑 (bits 10..22) を差し替える
+fn imm12_patch(word: u32, imm: u16) -> u32 {
+    (word & !(0xFFFu32 << 10)) | (((imm as u32) & 0xFFF) << 10)
+}
+
+/// 無条件分岐 `b` の命令語 (word単位の相対)
+fn b_word(from_off: usize, to_off: usize) -> u32 {
+    let delta = (to_off as i64 - from_off as i64) / 4;
+    0x1400_0000 | ((delta as u32) & 0x03FF_FFFF)
+}
+
+/// 飛び元ブロック (slots[si]) の未リンクサイトを、焼けている連結先と結線する。
+/// 呼びどころ: bake直後と損益再審の生き残り側 (毎入場は探索しない)。
+/// 単一スレッド前提の生ポインタで2スロットに触る — 自己リンク (ti==si) も
+/// スコープを分ければ自然に通る
+fn try_link(rt: &mut Rt, si: usize) {
+    let slots_ptr = rt.slots.as_mut_ptr();
+    let machine = rt.machine;
+    let (a_serial, n_sites) = {
+        let a_slot = unsafe { &mut *slots_ptr.add(si) };
+        let Some(ab) = a_slot.block.as_mut() else {
+            return;
+        };
+        (ab.serial, ab.out.len())
+    };
+    let mut linked_now = 0u64;
+    for k in 0..n_sites {
+        // サイト情報 (Aの借用は都度手放す)
+        let (already, tpa) = {
+            let ab = unsafe { (*slots_ptr.add(si)).block.as_mut().unwrap() };
+            (ab.out[k].linked, ab.out[k].target_pa)
+        };
+        if already {
+            continue;
+        }
+        let ti = ((tpa ^ (tpa >> 12)) as usize) & (JSLOTS - 1);
+        // 連結先の情報
+        let (t_gen_addr, t_gen, t_n, t_body) = {
+            let t_slot = unsafe { &*slots_ptr.add(ti) };
+            if t_slot.tag != tpa {
+                continue;
+            }
+            let Some(tb) = t_slot.block.as_ref() else {
+                continue;
+            };
+            let cur = jit::page_gen(unsafe { &*machine }, tpa);
+            if tb.gen != cur {
+                continue; // 腐った連結先には張らない
+            }
+            (
+                jit::page_gen_addr(unsafe { &*machine }, tpa),
+                tb.gen,
+                tb.n as u32,
+                tb.entry as usize + tb.body_off,
+            )
+        };
+        // Aのスタブへ定数を書き、分岐を差し替え
+        let (branch_off, orig) = {
+            let ab = unsafe { (*slots_ptr.add(si)).block.as_mut().unwrap() };
+            let site = &mut ab.out[k];
+            let orig = read_word(&ab.buf, site.branch_off);
+            site.orig_word = orig;
+            let mut patches: Vec<(usize, u32)> = Vec::with_capacity(12);
+            for j in 0..4 {
+                let off = site.gen_addr_off + j * 4;
+                let w = read_word(&ab.buf, off);
+                patches.push((
+                    off,
+                    imm16_patch(w, ((t_gen_addr >> (16 * j)) & 0xFFFF) as u16),
+                ));
+            }
+            for j in 0..2 {
+                let off = site.gen_imm_off + j * 4;
+                let w = read_word(&ab.buf, off);
+                patches.push((off, imm16_patch(w, ((t_gen >> (16 * j)) & 0xFFFF) as u16)));
+            }
+            let w = read_word(&ab.buf, site.n_off);
+            patches.push((site.n_off, imm12_patch(w, t_n as u16)));
+            for j in 0..4 {
+                let off = site.body_movs_off + j * 4;
+                let w = read_word(&ab.buf, off);
+                patches.push((off, imm16_patch(w, ((t_body >> (16 * j)) & 0xFFFF) as u16)));
+            }
+            patches.push((site.branch_off, b_word(site.branch_off, site.stub_off)));
+            unsafe { patch_code(&ab.buf, &patches) };
+            site.linked = true;
+            (site.branch_off, orig)
+        };
+        // 連結先のincoming台帳へ (自己リンクなら自分に積む — 同じスコープでOK)
+        {
+            let t_slot = unsafe { &mut *slots_ptr.add(ti) };
+            if let Some(tb) = t_slot.block.as_mut() {
+                tb.incoming.push(Incoming {
+                    from_slot: si,
+                    from_serial: a_serial,
+                    branch_off,
+                    orig_word: orig,
+                });
+            }
+        }
+        linked_now += 1;
+    }
+    rt.linked += linked_now;
+}
+
+/// ブロックを捨てる前の義務 (ADR-0024の生存契約): 飛び込みリンクを剥がす。
+/// 世代照合はゲスト可視のSMCしか守らない — ホスト側の退去 (衝突・降格) で
+/// 剥がし忘れると、飛び元が解放済みメモリへ飛ぶ
+fn unlink_incoming(rt: &mut Rt, si: usize) {
+    let slots_ptr = rt.slots.as_mut_ptr();
+    let incoming = {
+        let s_slot = unsafe { &mut *slots_ptr.add(si) };
+        let Some(bl) = s_slot.block.as_mut() else {
+            return;
+        };
+        std::mem::take(&mut bl.incoming)
+    };
+    let mut n_unlinked = 0u64;
+    for inc in incoming {
+        if inc.from_slot == si {
+            continue; // 自己リンク: 自分ごと消えるので剥がし不要
+        }
+        let a_slot = unsafe { &mut *slots_ptr.add(inc.from_slot) };
+        if let Some(ab) = a_slot.block.as_mut() {
+            if ab.serial == inc.from_serial {
+                unsafe { patch_code(&ab.buf, &[(inc.branch_off, inc.orig_word)]) };
+                if let Some(site) = ab.out.iter_mut().find(|st| st.branch_off == inc.branch_off) {
+                    site.linked = false;
+                }
+                n_unlinked += 1;
+            }
+        }
+    }
+    rt.unlinked += n_unlinked;
+}
+
+/// 観測: (張ったリンク, 剥がしたリンク)
+pub fn chain_stats() -> (u64, u64) {
+    RT.with(|cell| {
+        let p = cell.get();
+        if p.is_null() {
+            (0, 0)
+        } else {
+            let r = unsafe { &*p };
+            (r.linked, r.unlinked)
+        }
+    })
+}
+
 fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     {
         // ctx = attachで渡したRtの生ポインタ。TLS (macOSはtlv呼び1本) を
@@ -308,49 +533,70 @@ fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
         let rt = unsafe { &mut *p };
         // 命令頭は少数ページに密集する — ページ番号を混ぜて散らす
         let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
-        let slot = &mut rt.slots[si];
-        if slot.tag == pa {
-            let Some(b) = &mut slot.block else {
-                return 0; // 焼けない頭 (語彙外・短すぎ・負け判定) の負の印
+        if rt.slots[si].tag == pa {
+            // 判定を先に済ませて借用を手放す (unlink/try_linkがrt全体を使うため)
+            enum Act {
+                Reject,
+                Stale,
+                Run(unsafe extern "C" fn(usize, usize, usize, usize, usize) -> u64),
+            }
+            let act = match rt.slots[si].block.as_ref() {
+                None => Act::Reject, // 焼けない頭 (語彙外・短すぎ・負け判定) の負の印
+                Some(b) if b.gen != gen => Act::Stale,
+                Some(b) if b.n as u32 > budget => Act::Reject, // 予算に収まらない
+                Some(b) => Act::Run(b.entry),
             };
-            if b.gen != gen {
-                // 世代落ち (自己書き換え)。捨てて、次の来訪で焼き直す
-                slot.tag = TAG_FREE;
-                slot.block = None;
-                rt.installed -= 1;
-                return 0;
-            }
-            if b.n as u32 > budget {
-                return 0; // tick窓かチェーン残りに収まらない
-            }
-            let entry = b.entry;
-            // 生成コードがMachineを書く間、Rtへの参照は使い切っている
-            let k = unsafe {
-                entry(
-                    rt.machine as usize,
-                    rt.layout.tlb,
-                    rt.layout.mem,
-                    rt.helpers.as_ptr() as usize,
-                )
-            } as u32;
-            // 損益の観測: 256入場ごとに平均実行命令数で裁く**ローリング再審**。
-            // 一度きりの審査だと、ブート期に良平均で通ったブロックが定常WLの
-            // 分岐早退 (平均1.9命令) でも走り続ける — 局面は変わるものとして扱う
-            let b = slot.block.as_mut().unwrap();
-            b.enters += 1;
-            b.execd += k;
-            if b.enters == PROFIT_SAMPLE {
-                if b.execd < PROFIT_SAMPLE * PROFIT_MIN_AVG {
-                    // 入場税が勝つブロック — 負の印に降格 (tagは残す)
+            match act {
+                Act::Reject => return 0,
+                Act::Stale => {
+                    // 世代落ち (自己書き換え)。捨てる前に飛び込みリンクを剥がす
+                    unlink_incoming(rt, si);
+                    let slot = &mut rt.slots[si];
+                    slot.tag = TAG_FREE;
                     slot.block = None;
                     rt.installed -= 1;
-                    rt.demoted += 1;
-                } else {
-                    b.enters = 0;
-                    b.execd = 0;
+                    return 0;
+                }
+                Act::Run(entry) => {
+                    // 生成コードがMachineを書く間、Rtへの参照は使い切っている
+                    let k = unsafe {
+                        entry(
+                            rt.machine as usize,
+                            rt.layout.tlb,
+                            rt.layout.mem,
+                            rt.helpers.as_ptr() as usize,
+                            budget as usize,
+                        )
+                    } as u32;
+                    // 損益の観測: 256入場ごとのローリング再審 (F1d-f)。
+                    // 連結ホップは表口を通らないので、数字は表口の入場だけ
+                    // (ADR-0024の既知の歪み — 正しさは剥がし台帳が守る)
+                    let b = rt.slots[si].block.as_mut().unwrap();
+                    b.enters += 1;
+                    b.execd += k;
+                    let mut fate = 0u8; // 1=降格 2=再結線
+                    if b.enters == PROFIT_SAMPLE {
+                        if b.execd < PROFIT_SAMPLE * PROFIT_MIN_AVG {
+                            fate = 1;
+                        } else {
+                            b.enters = 0;
+                            b.execd = 0;
+                            fate = 2;
+                        }
+                    }
+                    if fate == 1 {
+                        // 入場税が勝つブロック — 剥がしてから負の印に降格
+                        unlink_incoming(rt, si);
+                        rt.slots[si].block = None;
+                        rt.installed -= 1;
+                        rt.demoted += 1;
+                    } else if fate == 2 {
+                        // 再審の生き残り — 未リンクのサイトを結線してみる
+                        try_link(rt, si);
+                    }
+                    return k;
                 }
             }
-            return k;
         }
         // ミス: 衝突退去 (直接マップ — dropで旧ブロックのメモリごと返す) か初訪
         // ---- 焼く (同期、初訪のみ)。collectは&Machineを覗くだけ ----
@@ -358,6 +604,7 @@ fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
         let neg = |rt: &mut Rt| {
             rt.rejected += 1;
             if rt.slots[si].block.is_some() {
+                unlink_incoming(rt, si); // 退去 — 飛び込みを剥がしてから
                 rt.installed -= 1;
             }
             rt.slots[si] = Slot {
@@ -380,24 +627,30 @@ fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
         }
         let machine_addr = rt.machine as usize;
         let gen_addr = jit::page_gen_addr(m, pa);
-        let Some(mut block) = emit_block(&rt.layout, machine_addr, &ops, gen_addr, gen) else {
+        let Some(mut block) = emit_block(&rt.layout, machine_addr, &ops, gen_addr, gen, pa) else {
             neg(rt);
             return 0;
         };
         block.gen = gen;
+        block.serial = rt.next_serial;
+        rt.next_serial += 1;
         // fillと同じ義務: このページに「コードあり」を立てる (立て忘れると
         // note_writeが素通りして世代が動かず、SMC/DMA上書きを見逃す)
         unsafe { jit::mark_code_page(&mut *rt.machine, pa) };
         rt.baked += 1;
         let n = block.n as u32;
         let entry = block.entry;
-        if rt.slots[si].block.is_none() {
+        if rt.slots[si].block.is_some() {
+            unlink_incoming(rt, si); // 衝突退去 — 剥がしてから入れ替える
+        } else {
             rt.installed += 1;
         }
         rt.slots[si] = Slot {
             tag: pa,
             block: Some(Box::new(block)),
         };
+        // bake直後の結線 (自己ループはここで即結線される)
+        try_link(rt, si);
         if n > budget {
             return 0;
         }
@@ -407,6 +660,7 @@ fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
                 rt.layout.tlb,
                 rt.layout.mem,
                 rt.helpers.as_ptr() as usize,
+                budget as usize,
             ) as u32
         }
     }
@@ -744,6 +998,82 @@ fn emit_cond_inline(a: &mut dynasmrt::aarch64::Assembler, kind: u8, w: u8, cc: u
     true
 }
 
+/// 連結候補の `b ->exit` を焼く (F1d-i)。着地が同一物理ページならサイトを
+/// 記録して後段でスタブも焼く — リンクされるまでは従来の出口と同じ挙動
+fn chain_branch(
+    a: &mut dynasmrt::aarch64::Assembler,
+    sites: &mut Vec<ChainSite>,
+    head_pa: u32,
+    taken_delta: u32,
+) {
+    let target_pa = head_pa.wrapping_add(taken_delta);
+    // 後方 (ループ) だけに絞る: 全直接出口に72Bのスタブを焼くと符号量の税
+    // (C11の教訓) が結線の利得を食う — v1実測で窓-1%。前方は再訪の玉
+    let backward = (taken_delta as i32) <= 0;
+    if backward && target_pa >> 12 == head_pa >> 12 {
+        sites.push(ChainSite {
+            branch_off: a.offset().0,
+            orig_word: 0,
+            linked: false,
+            target_pa,
+            stub_off: 0,
+            gen_addr_off: 0,
+            gen_imm_off: 0,
+            n_off: 0,
+            body_movs_off: 0,
+        });
+    }
+    dynasm!(a; .arch aarch64; b ->exit);
+}
+
+/// 連結スタブ (プレースホルダ焼き)。契約 (ADR-0024): w10=delta / w15=count は
+/// 差し替え元の直前で設定済み。ipを更新し、B世代とw23予算を検査して
+/// 通ればBの本体へ (フレーム共有)。落ちたら ->exit_done (w0=w24)
+fn emit_chain_stub(
+    a: &mut dynasmrt::aarch64::Assembler,
+    l: &JitLayout,
+    machine: usize,
+    site: &mut ChainSite,
+) {
+    site.stub_off = a.offset().0;
+    ip_addr_to_x9(a, l, machine);
+    dynasm!(a; .arch aarch64
+        ; ldr w11, [x9]
+        ; add w11, w11, w10
+        ; str w11, [x9]
+        ; add w24, w24, w15
+    );
+    site.gen_addr_off = a.offset().0;
+    dynasm!(a; .arch aarch64
+        ; movz x9, 0
+        ; movk x9, 0, lsl 16
+        ; movk x9, 0, lsl 32
+        ; movk x9, 0, lsl 48
+        ; ldr w11, [x9]
+    );
+    site.gen_imm_off = a.offset().0;
+    dynasm!(a; .arch aarch64
+        ; movz w12, 0
+        ; movk w12, 0, lsl 16
+        ; cmp w11, w12
+        ; b.ne ->exit_done
+    );
+    site.n_off = a.offset().0;
+    dynasm!(a; .arch aarch64
+        ; subs w23, w23, 0
+        ; b.mi ->exit_done
+    );
+    site.body_movs_off = a.offset().0;
+    dynasm!(a; .arch aarch64
+        ; movz x16, 0
+        ; movk x16, 0, lsl 16
+        ; movk x16, 0, lsl 32
+        ; movk x16, 0, lsl 48
+        ; br x16
+    );
+    // branch_off の b ->exit を b stub に差し替えるのはリンク時 (orig語を控える)
+}
+
 /// ブロックを機械語へ。戻り値 None = このopは焼けない (呼び手が弾く)
 /// ブロックを機械語へ。戻り値 None = このopは焼けない (呼び手が弾く)。
 ///
@@ -759,6 +1089,7 @@ fn emit_block(
     ops: &[(u8, JitOp)],
     gen_addr: usize,
     gen: u32,
+    head_pa: u32,
 ) -> Option<Block> {
     let mut a = dynasmrt::aarch64::Assembler::new().ok()?;
     let n = ops.len() as u16;
@@ -767,17 +1098,26 @@ fn emit_block(
     // prologue: フレーム48B。x19=Machine / x20=TLB先頭 / x21=ゲストRAM先頭 を
     // 掴み置き (callee-saved — ヘルパ呼びでも生きる)。フィールドは [x19,#差分]、
     // TLBインライン路は x20/x21 相対で走る。スピル1枠は [sp,40]
+    let n_imm = n as u32;
     dynasm!(a; .arch aarch64
-        ; sub sp, sp, 64
+        ; sub sp, sp, 80
         ; stp x29, x30, [sp]
         ; stp x19, x20, [sp, 16]
         ; stp x21, x22, [sp, 32]
+        ; stp x23, x24, [sp, 48]
         ; mov x29, sp
         ; mov x19, x0   // Machine (呼び手が渡す — 焼き込みより9命令軽い)
         ; mov x20, x1   // TLB先頭
         ; mov x21, x2   // RAM先頭
         ; mov x22, x3   // ヘルパ表 (ldr 1命令でヘルパ番地)
+        // ---- 連結の帳簿 (F1d-i、ADR-0024) ----
+        // w23 = このブロックを引いた後の予算残り (チェーンのtick境界保証)
+        // w24 = チェーンで実行済みの命令数 (出口で w0 = w24 + w15)
+        ; sub w23, w4, n_imm
+        ; movz w24, 0
     );
+    let body_off = a.offset().0; // 連結の飛び込み口 (プロローグ共有はしない)
+    let mut sites: Vec<ChainSite> = Vec::new();
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
@@ -917,9 +1257,9 @@ fn emit_block(
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 if kind == 2 || kind == 3 {
                     // b (=ロード値) をスピルしてcinを取り、復元
-                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 64]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -1109,6 +1449,7 @@ fn emit_block(
                 let taken = off.wrapping_add(len as u32).wrapping_add(rel);
                 mov_imm32(&mut a, 10, taken);
                 mov_imm32(&mut a, 15, n as u32);
+                chain_branch(&mut a, &mut sites, head_pa, taken);
                 terminal = true;
             }
             JitOp::Ret => {
@@ -1151,13 +1492,15 @@ fn emit_block(
                     dynasm!(a; .arch aarch64; cbz w0, >nt);
                     mov_imm32(&mut a, 10, taken);
                     mov_imm32(&mut a, 15, (i + 1) as u32);
-                    dynasm!(a; .arch aarch64; b ->exit; nt:);
+                    chain_branch(&mut a, &mut sites, head_pa, taken);
+                    dynasm!(a; .arch aarch64; nt:);
                 }
             }
             JitOp::Jmp { rel } => {
                 let taken = off.wrapping_add(len as u32).wrapping_add(rel);
                 mov_imm32(&mut a, 10, taken);
                 mov_imm32(&mut a, 15, n as u32);
+                chain_branch(&mut a, &mut sites, head_pa, taken);
                 terminal = true;
             }
             // ---- 8bit形 (F1d-f)。材料はalu8と同じ: a/bはゼロ拡張、
@@ -1216,9 +1559,9 @@ fn emit_block(
             JitOp::Alu8RM { kind, dst8, mem } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 if kind == 2 || kind == 3 {
-                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 64]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -1380,11 +1723,11 @@ fn emit_block(
                     load_helper(&mut a, H_COND);
                     dynasm!(a; .arch aarch64; blr x16);
                 }
-                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                 emit_ea(
                     &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
                 );
-                dynasm!(a; .arch aarch64; ldr w3, [sp, 48]; mov x0, x19);
+                dynasm!(a; .arch aarch64; ldr w3, [sp, 64]; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 load_helper(&mut a, H_ST8);
                 dynasm!(a; .arch aarch64; blr x16);
@@ -1475,28 +1818,28 @@ fn emit_block(
             JitOp::CallIndR { reg } => {
                 // 的を先に読む (pushでSP/メモリが動く前の値 — call esp系の意味を守る)
                 load_reg(&mut a, l, machine, 10, reg);
-                dynasm!(a; .arch aarch64; str w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w10, [sp, 64]);
                 ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
                 load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 64]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
             }
             JitOp::CallIndM { mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
-                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                 ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
                 load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 64]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
@@ -1548,33 +1891,51 @@ fn emit_block(
         ; ldr w11, [x9]
         ; add w11, w11, w10
         ; str w11, [x9]
-        ; mov w0, w15
+        ; add w0, w24, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 48]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 80
         ; ret
         ; ->exit_abs:
     );
     ip_addr_to_x9(&mut a, l, machine);
     dynasm!(a; .arch aarch64
         ; str w10, [x9]
-        ; mov w0, w15
+        ; add w0, w24, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 48]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 80
+        ; ret
+        // ---- 連結スタブの脱落口: ipは連結先頭に更新済み・実行数はw24 ----
+        ; ->exit_done:
+        ; mov w0, w24
+        ; ldp x19, x20, [sp, 16]
+        ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 48]
+        ; ldp x29, x30, [sp]
+        ; add sp, sp, 80
         ; ret
     );
+    for site in &mut sites {
+        emit_chain_stub(&mut a, l, machine, site);
+    }
     let start = dynasmrt::AssemblyOffset(0);
     let buf = a.finalize().ok()?;
-    let entry: unsafe extern "C" fn(usize, usize, usize, usize) -> u64 =
+    let entry: unsafe extern "C" fn(usize, usize, usize, usize, usize) -> u64 =
         unsafe { std::mem::transmute(buf.ptr(start)) };
     Some(Block {
         entry,
-        _buf: buf,
+        buf,
         n,
         gen: 0, // 呼び手が上書き
+        serial: 0,
+        body_off,
+        out: sites,
+        incoming: Vec::new(),
         enters: 0,
         execd: 0,
     })

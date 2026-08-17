@@ -179,5 +179,7 @@ fn main() {
             installed,
             demoted
         );
+        let (linked, unlinked) = rustx86_jit_a64::chain_stats();
+        println!("[jcmd] 連結: 結線{linked} 剥がし{unlinked}");
     }
 }
