@@ -278,6 +278,7 @@ impl Emulator {
         unsafe { self.jit_rt.attach(&mut self.m as *mut Machine) };
         self.m.jit = Some(rustx86_core::jit::JitHook {
             try_enter: jit::try_enter,
+            ctx: 0, // wasmはTLSが実質静的アクセスなので持ち込み不要
         });
     }
 

@@ -131,7 +131,9 @@ unsafe extern "C" fn h_pop32(m: *mut Machine) -> u64 {
 
 /// 焼けたブロック
 struct Block {
-    entry: unsafe extern "C" fn() -> u64,
+    /// 引数はプロローグの掴み置き: x0=Machine, x1=TLB先頭, x2=RAM先頭。
+    /// 定数焼き込み (mov_abs×3 ≈ 9-12命令/入場) を3命令のmovに変える
+    entry: unsafe extern "C" fn(usize, usize, usize, usize) -> u64,
     /// バッファの寿命の所有 (dropで実行可能メモリが消えるので手放さない)
     _buf: dynasmrt::ExecutableBuffer,
     n: u16,
@@ -154,19 +156,66 @@ const PROFIT_MIN_AVG: u32 = 3;
 /// block: None かつ tag一致 = 「焼けない頭」の負の印 (collect再挑戦を防ぐ)
 struct Slot {
     tag: u32,
-    block: Option<Block>,
+    /// Boxの先に置く — Slotを16Bに保ち2Mスロット表を32MiBに抑える
+    /// (インライン時は~56B×2M=128MiB、プローブのキャッシュ密度も悪い)
+    block: Option<Box<Block>>,
 }
 
 /// 直接マップのスロット数。taken分岐の着地 (~1/7命令) が毎回引くので、
-/// HashMapでは税が勝つ (F1a-5 #58の教訓の再演を2026-08-16に実測 —
-/// 67M probesで+1.9s)。64Kでは頭50k超に対して衝突リベイクが327k発生
-/// したので256Kへ (スロット構造は薄く、ブロック本体はBoxの先)
+/// HashMapでは税が勝つ (F1a-5 #58の教訓 — 67M probesで+1.9s)。
+/// 64K→256Kでも8bit語彙拡大後のgcc課程で衝突再焼き359k回 (-13 MIPS) が
+/// 出たので2Mへ (スロットは16B、ブロック本体はBoxの先)
 const JSLOTS: usize = 2 * 1024 * 1024;
 const TAG_FREE: u32 = 0xFFFF_FFFF;
+
+/// ヘルパ表の添字 (生成コードは x22=表先頭 から ldr 1命令で引く —
+/// mov_absの3命令が1命令になる。呼び頻度の高いWLほど効く)
+const H_CF: u32 = 0;
+const H_COND: u32 = 1;
+const H_SHIFT: u32 = 2;
+const H_LD32: u32 = 3;
+const H_LD16: u32 = 4;
+const H_LD8: u32 = 5;
+const H_ST32: u32 = 6;
+const H_RMW32: u32 = 7;
+const H_ST8: u32 = 8;
+const H_RMW8: u32 = 9;
+const H_GRP3B8: u32 = 10;
+const H_INCDEC32: u32 = 11;
+const H_PUSH32: u32 = 12;
+const H_POP32: u32 = 13;
+const N_HELPERS: usize = 14;
+
+fn helper_table() -> [usize; N_HELPERS] {
+    let mut t = [0usize; N_HELPERS];
+    t[H_CF as usize] = h_cf as usize;
+    t[H_COND as usize] = h_cond as usize;
+    t[H_SHIFT as usize] = h_shift as usize;
+    t[H_LD32 as usize] = h_ld32 as usize;
+    t[H_LD16 as usize] = h_ld16 as usize;
+    t[H_LD8 as usize] = h_ld8 as usize;
+    t[H_ST32 as usize] = h_st32 as usize;
+    t[H_RMW32 as usize] = h_rmw32 as usize;
+    t[H_ST8 as usize] = h_st8 as usize;
+    t[H_RMW8 as usize] = h_rmw8 as usize;
+    t[H_GRP3B8 as usize] = h_grp3b8 as usize;
+    t[H_INCDEC32 as usize] = h_incdec32 as usize;
+    t[H_PUSH32 as usize] = h_push32 as usize;
+    t[H_POP32 as usize] = h_pop32 as usize;
+    t
+}
+
+/// x16 = ヘルパ表[idx] (x22相対ldr 1命令)
+fn load_helper(a: &mut dynasmrt::aarch64::Assembler, idx: u32) {
+    let off = idx * 8;
+    dynasm!(a; .arch aarch64; ldr x16, [x22, off]);
+}
 
 struct Rt {
     layout: JitLayout,
     machine: *mut Machine,
+    /// ヘルパ表 (Rtと同じくleak済み番地 — 生成コードにx3で渡す)
+    helpers: [usize; N_HELPERS],
     /// ブロック頭 pa → ブロックの直接マップ
     slots: Vec<Slot>,
     /// 観測: 焼いた数 / 語彙で落とした数 / 据付中の数
@@ -203,6 +252,7 @@ pub unsafe fn attach(m: &mut Machine) {
     let rt = Box::leak(Box::new(Rt {
         layout,
         machine: m as *mut Machine,
+        helpers: helper_table(),
         slots,
         baked: 0,
         demoted: 0,
@@ -210,7 +260,10 @@ pub unsafe fn attach(m: &mut Machine) {
         installed: 0,
     }));
     RT.with(|cell| cell.set(rt as *mut Rt));
-    m.jit = Some(JitHook { try_enter });
+    m.jit = Some(JitHook {
+        try_enter,
+        ctx: rt as *mut Rt as usize,
+    });
 }
 
 /// 環境変数 RUSTX86_JIT による標準の取り付け口 (タスク: ON/OFFの外部フラグ統一)。
@@ -242,9 +295,11 @@ pub fn stats() -> (u64, u64, usize, u64) {
     })
 }
 
-fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
-    RT.with(|cell| {
-        let p = cell.get();
+fn try_enter(ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
+    {
+        // ctx = attachで渡したRtの生ポインタ。TLS (macOSはtlv呼び1本) を
+        // 入場路から消す — RTはstats()等の観測口のためだけに残る
+        let p = ctx as *mut Rt;
         if p.is_null() {
             return 0;
         }
@@ -270,7 +325,14 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
             }
             let entry = b.entry;
             // 生成コードがMachineを書く間、Rtへの参照は使い切っている
-            let k = unsafe { entry() } as u32;
+            let k = unsafe {
+                entry(
+                    rt.machine as usize,
+                    rt.layout.tlb,
+                    rt.layout.mem,
+                    rt.helpers.as_ptr() as usize,
+                )
+            } as u32;
             // 損益の観測: 256入場ごとに平均実行命令数で裁く**ローリング再審**。
             // 一度きりの審査だと、ブート期に良平均で通ったブロックが定常WLの
             // 分岐早退 (平均1.9命令) でも走り続ける — 局面は変わるものとして扱う
@@ -334,13 +396,20 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
         }
         rt.slots[si] = Slot {
             tag: pa,
-            block: Some(block),
+            block: Some(Box::new(block)),
         };
         if n > budget {
             return 0;
         }
-        unsafe { entry() as u32 }
-    })
+        unsafe {
+            entry(
+                rt.machine as usize,
+                rt.layout.tlb,
+                rt.layout.mem,
+                rt.helpers.as_ptr() as usize,
+            ) as u32
+        }
+    }
 }
 
 /// レジスタ形だけの前置列を切り出す (メモリ・スタック・8bit形の手前で打ち切り)。
@@ -582,8 +651,20 @@ fn store_cc(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize,
 /// h_cf(machine) を呼び、結果 (0/1) を w<dst> に。x0-x17は死ぬ
 fn call_cf(a: &mut dynasmrt::aarch64::Assembler, _machine: usize, dst: u8) {
     dynasm!(a; .arch aarch64; mov x0, x19);
-    mov_abs(a, 16, h_cf as usize as u64);
+    load_helper(a, H_CF);
     dynasm!(a; .arch aarch64; blr x16; mov W(dst), w0);
+}
+
+/// x9 = ipの実番地。Machine先頭からの差がimm12に収まれば add 1命令
+/// (mov_absの3-4命令はブロック出口ごとに払う税だった)
+fn ip_addr_to_x9(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize) {
+    let d = l.ip.wrapping_sub(machine);
+    if d < 4096 {
+        let d = d as u32;
+        dynasm!(a; .arch aarch64; add x9, x19, d);
+    } else {
+        mov_abs(a, 9, l.ip as u64);
+    }
 }
 
 /// 次のopが「読む前にccを完全上書きする純レジスタop」か (g1、ADR-0023)。
@@ -687,15 +768,16 @@ fn emit_block(
     // 掴み置き (callee-saved — ヘルパ呼びでも生きる)。フィールドは [x19,#差分]、
     // TLBインライン路は x20/x21 相対で走る。スピル1枠は [sp,40]
     dynasm!(a; .arch aarch64
-        ; sub sp, sp, 48
+        ; sub sp, sp, 64
         ; stp x29, x30, [sp]
         ; stp x19, x20, [sp, 16]
-        ; str x21, [sp, 32]
+        ; stp x21, x22, [sp, 32]
         ; mov x29, sp
+        ; mov x19, x0   // Machine (呼び手が渡す — 焼き込みより9命令軽い)
+        ; mov x20, x1   // TLB先頭
+        ; mov x21, x2   // RAM先頭
+        ; mov x22, x3   // ヘルパ表 (ldr 1命令でヘルパ番地)
     );
-    mov_abs(&mut a, 19, machine as u64);
-    mov_abs(&mut a, 20, l.tlb as u64);
-    mov_abs(&mut a, 21, l.mem as u64);
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
@@ -806,7 +888,7 @@ fn emit_block(
                 mov_imm32(&mut a, 1, kind as u32);
                 mov_imm32(&mut a, 2, reg as u32);
                 mov_imm32(&mut a, 3, count as u32);
-                mov_abs(&mut a, 16, h_shift as usize as u64);
+                load_helper(&mut a, H_SHIFT);
                 dynasm!(a; .arch aarch64; blr x16);
             }
             JitOp::ShiftRC { kind, reg } => {
@@ -815,7 +897,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, kind as u32);
                 mov_imm32(&mut a, 2, reg as u32);
-                mov_abs(&mut a, 16, h_shift as usize as u64);
+                load_helper(&mut a, H_SHIFT);
                 dynasm!(a; .arch aarch64; blr x16);
             }
             // ---- ロード形 (F1d-b)。w0 = 値、脱出はexitへ ----
@@ -835,9 +917,9 @@ fn emit_block(
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 if kind == 2 || kind == 3 {
                     // b (=ロード値) をスピルしてcinを取り、復元
-                    dynasm!(a; .arch aarch64; str w0, [sp, 40]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 40]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -888,7 +970,7 @@ fn emit_block(
                 load_reg(&mut a, l, machine, 3, src);
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
-                mov_abs(&mut a, 16, h_st32 as usize as u64);
+                load_helper(&mut a, H_ST32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -907,7 +989,7 @@ fn emit_block(
                 mov_imm32(&mut a, 3, imm);
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
-                mov_abs(&mut a, 16, h_st32 as usize as u64);
+                load_helper(&mut a, H_ST32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -927,7 +1009,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 mov_imm32(&mut a, 3, kind as u32);
-                mov_abs(&mut a, 16, h_rmw32 as usize as u64);
+                load_helper(&mut a, H_RMW32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -947,7 +1029,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 mov_imm32(&mut a, 3, kind as u32);
-                mov_abs(&mut a, 16, h_rmw32 as usize as u64);
+                load_helper(&mut a, H_RMW32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -963,7 +1045,7 @@ fn emit_block(
             JitOp::PushR { src } => {
                 load_reg(&mut a, l, machine, 1, src);
                 dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -978,7 +1060,7 @@ fn emit_block(
             JitOp::PushI { imm } => {
                 mov_imm32(&mut a, 1, imm);
                 dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -992,7 +1074,7 @@ fn emit_block(
             }
             JitOp::PopR { dst } => {
                 dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_abs(&mut a, 16, h_pop32 as usize as u64);
+                load_helper(&mut a, H_POP32);
                 dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
                 mov_imm32(&mut a, 10, off);
                 mov_imm32(&mut a, 15, i as u32);
@@ -1004,7 +1086,7 @@ fn emit_block(
                 load_reg(&mut a, l, machine, 2, 5); // w2 = BP
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, 2); // SS
-                mov_abs(&mut a, 16, h_ld32 as usize as u64);
+                load_helper(&mut a, H_LD32);
                 dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
                 mov_imm32(&mut a, 10, off);
                 mov_imm32(&mut a, 15, i as u32);
@@ -1017,11 +1099,11 @@ fn emit_block(
             // ---- 終端: call/ret ----
             JitOp::CallRel { rel } => {
                 // 戻り番地 = ip0 + off + len を push (脱出したらpushしていない)
-                mov_abs(&mut a, 9, l.ip as u64);
+                ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2);
                 dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 let taken = off.wrapping_add(len as u32).wrapping_add(rel);
@@ -1031,7 +1113,7 @@ fn emit_block(
             }
             JitOp::Ret => {
                 dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_abs(&mut a, 16, h_pop32 as usize as u64);
+                load_helper(&mut a, H_POP32);
                 dynasm!(a; .arch aarch64; blr x16; lsr x1, x0, 32; cbz x1, >ok);
                 mov_imm32(&mut a, 10, off);
                 mov_imm32(&mut a, 15, i as u32);
@@ -1051,7 +1133,7 @@ fn emit_block(
                 if !last_inlined {
                     dynasm!(a; .arch aarch64; mov x0, x19);
                     mov_imm32(&mut a, 1, cc as u32);
-                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    load_helper(&mut a, H_COND);
                     dynasm!(a; .arch aarch64; blr x16);
                 }
                 let not_taken = off.wrapping_add(len as u32);
@@ -1134,9 +1216,9 @@ fn emit_block(
             JitOp::Alu8RM { kind, dst8, mem } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 if kind == 2 || kind == 3 {
-                    dynasm!(a; .arch aarch64; str w0, [sp, 40]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 40]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -1190,7 +1272,7 @@ fn emit_block(
                 mov_imm32(&mut a, 1, kind as u32);
                 mov_imm32(&mut a, 2, reg8 as u32);
                 mov_imm32(&mut a, 3, imm as u32);
-                mov_abs(&mut a, 16, h_grp3b8 as usize as u64);
+                load_helper(&mut a, H_GRP3B8);
                 dynasm!(a; .arch aarch64; blr x16);
             }
             // ---- 8bitの書く形。ストア後の自ページ世代照合は32bit形と同じ契約 ----
@@ -1201,7 +1283,7 @@ fn emit_block(
                 load_reg8(&mut a, l, machine, 3, src8);
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
-                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                load_helper(&mut a, H_ST8);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1220,7 +1302,7 @@ fn emit_block(
                 mov_imm32(&mut a, 3, imm as u32);
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
-                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                load_helper(&mut a, H_ST8);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1240,7 +1322,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 mov_imm32(&mut a, 3, kind as u32);
-                mov_abs(&mut a, 16, h_rmw8 as usize as u64);
+                load_helper(&mut a, H_RMW8);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1260,7 +1342,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 mov_imm32(&mut a, 3, kind as u32);
-                mov_abs(&mut a, 16, h_rmw8 as usize as u64);
+                load_helper(&mut a, H_RMW8);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1281,7 +1363,7 @@ fn emit_block(
                 if !last_inlined {
                     dynasm!(a; .arch aarch64; mov x0, x19);
                     mov_imm32(&mut a, 1, cc as u32);
-                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    load_helper(&mut a, H_COND);
                     dynasm!(a; .arch aarch64; blr x16);
                 }
                 store_reg8(&mut a, l, machine, 0, dst8);
@@ -1295,16 +1377,16 @@ fn emit_block(
                 if !inlined {
                     dynasm!(a; .arch aarch64; mov x0, x19);
                     mov_imm32(&mut a, 1, cc as u32);
-                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    load_helper(&mut a, H_COND);
                     dynasm!(a; .arch aarch64; blr x16);
                 }
-                dynasm!(a; .arch aarch64; str w0, [sp, 40]);
+                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
                 emit_ea(
                     &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
                 );
-                dynasm!(a; .arch aarch64; ldr w3, [sp, 40]; mov x0, x19);
+                dynasm!(a; .arch aarch64; ldr w3, [sp, 48]; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
-                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                load_helper(&mut a, H_ST8);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1349,7 +1431,7 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 mov_imm32(&mut a, 3, dec as u32);
-                mov_abs(&mut a, 16, h_incdec32 as usize as u64);
+                load_helper(&mut a, H_INCDEC32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1364,7 +1446,7 @@ fn emit_block(
             JitOp::PushM { mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w1, w0; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
                 emit_genck(
@@ -1393,28 +1475,28 @@ fn emit_block(
             JitOp::CallIndR { reg } => {
                 // 的を先に読む (pushでSP/メモリが動く前の値 — call esp系の意味を守る)
                 load_reg(&mut a, l, machine, 10, reg);
-                dynasm!(a; .arch aarch64; str w10, [sp, 40]);
-                mov_abs(&mut a, 9, l.ip as u64);
+                dynasm!(a; .arch aarch64; str w10, [sp, 48]);
+                ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 40]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
             }
             JitOp::CallIndM { mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
-                dynasm!(a; .arch aarch64; str w0, [sp, 40]);
-                mov_abs(&mut a, 9, l.ip as u64);
+                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
-                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 40]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
@@ -1461,32 +1543,33 @@ fn emit_block(
     // ---- 共有テール: ->exit は ip += w10 (差分)、->exit_abs は ip = w10 (絶対)。
     //      どちらも w15 (実行済み命令数) を返す ----
     dynasm!(a; .arch aarch64; ->exit:);
-    mov_abs(&mut a, 9, l.ip as u64);
+    ip_addr_to_x9(&mut a, l, machine);
     dynasm!(a; .arch aarch64
         ; ldr w11, [x9]
         ; add w11, w11, w10
         ; str w11, [x9]
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
-        ; ldr x21, [sp, 32]
+        ; ldp x21, x22, [sp, 32]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 48
+        ; add sp, sp, 64
         ; ret
         ; ->exit_abs:
     );
-    mov_abs(&mut a, 9, l.ip as u64);
+    ip_addr_to_x9(&mut a, l, machine);
     dynasm!(a; .arch aarch64
         ; str w10, [x9]
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
-        ; ldr x21, [sp, 32]
+        ; ldp x21, x22, [sp, 32]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 48
+        ; add sp, sp, 64
         ; ret
     );
     let start = dynasmrt::AssemblyOffset(0);
     let buf = a.finalize().ok()?;
-    let entry: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(buf.ptr(start)) };
+    let entry: unsafe extern "C" fn(usize, usize, usize, usize) -> u64 =
+        unsafe { std::mem::transmute(buf.ptr(start)) };
     Some(Block {
         entry,
         _buf: buf,
@@ -1601,11 +1684,11 @@ fn emit_load(
     dynasm!(a; .arch aarch64; mov x0, x19);
     mov_imm32(a, 1, mem.seg as u32);
     let h = match width {
-        1 => h_ld8 as usize,
-        2 => h_ld16 as usize,
-        _ => h_ld32 as usize,
+        1 => H_LD8,
+        2 => H_LD16,
+        _ => H_LD32,
     };
-    mov_abs(a, 16, h as u64);
+    load_helper(a, h);
     dynasm!(a; .arch aarch64; blr x16
         ; lsr x1, x0, 32
         ; cbz x1, >done2

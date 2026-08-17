@@ -617,7 +617,7 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
                         break; // IRQ保留中はインタプリタが1命令粒度で受ける
                     }
                     let budget = extra.saturating_add(1).min(m.tick_countdown as u64) as u32;
-                    let n = (h.try_enter)(pa, m.dcache.page_gen_of(pa), budget);
+                    let n = (h.try_enter)(h.ctx, pa, m.dcache.page_gen_of(pa), budget);
                     if n == 0 {
                         break;
                     }
