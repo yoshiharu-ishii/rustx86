@@ -908,7 +908,7 @@ impl JitRt {
 /// coreのJitHook.try_enter に挿す実行口 (jit-a64と同じ契約):
 /// 焼けたブロックがあり世代が合い予算に収まるなら実行して実行数を返す。
 /// 無ければ焼いてジョブへ積み (据え付けはJSのpump待ち)、0を返す
-pub fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
+pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     let p = RT.with(|c| c.get());
     if p.is_null() {
         return 0;
