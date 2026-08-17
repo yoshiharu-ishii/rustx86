@@ -586,6 +586,83 @@ fn call_cf(a: &mut dynasmrt::aarch64::Assembler, _machine: usize, dst: u8) {
     dynasm!(a; .arch aarch64; blr x16; mov W(dst), w0);
 }
 
+/// 次のopが「読む前にccを完全上書きする純レジスタop」か (g1、ADR-0023)。
+/// ADC/SBB (CFを読む)・IncDec (CF退避)・シフト (count=0でフラグ不変)・
+/// メモリ形 (脱出しうる = 手前のccが観測されうる) は含めない
+fn overwrites_cc_pure(op: &JitOp) -> bool {
+    match *op {
+        JitOp::AluRR { kind, .. }
+        | JitOp::AluRI { kind, .. }
+        | JitOp::Alu8RR { kind, .. }
+        | JitOp::Alu8RI { kind, .. } => kind != 2 && kind != 3,
+        JitOp::TestRR { .. } | JitOp::TestRI { .. } | JitOp::Test8RR { .. } => true,
+        _ => false,
+    }
+}
+
+/// g2 (ADR-0023): 直前opの材料 (w10=a, w11=b, w13=r) が生きている前提で、
+/// ホストフラグから条件を w0 (0/1) に作る。false = 写像なし (呼び手はh_condへ)。
+/// 8bit (w=0) は上位バイトに寄せて (lsl 24) C/V/N/Z の桁を合わせる。
+/// 論理kind (or/and/xor) はx86でCF=OF=0 — `cmp r, 0` はC=1/V=0だが、
+/// 全16条件の真理値が一致する (B→lo=偽=CF、BE→ls=Z、A→hi=!Z、L→lt=N…)。
+/// 写像の正しさは tests/cond_inline.rs が全kind×全cc×両幅で全数照合する
+fn emit_cond_inline(a: &mut dynasmrt::aarch64::Assembler, kind: u8, w: u8, cc: u8) -> bool {
+    if cc == 10 || cc == 11 {
+        return false; // パリティ (P/NP) は遅延評価器だけが知っている
+    }
+    // ADDのキャリーはARMのCと同極性 (subs系は借り=!Cで逆)。BE/A (CF|ZFの合成)
+    // はARMの単一条件に無い — h_condへ。cc2/3はcs/ccに差し替える (下のmatch)
+    if kind == 0 && (cc == 6 || cc == 7) {
+        return false;
+    }
+    match kind {
+        0 => {
+            // ADD: 実際に足してNZCVを得る
+            if w == 2 {
+                dynasm!(a; .arch aarch64; adds w4, w10, w11);
+            } else {
+                dynasm!(a; .arch aarch64; lsl w4, w10, 24; lsl w5, w11, 24; adds w4, w4, w5);
+            }
+        }
+        5 | 7 => {
+            // SUB/CMP: subs後のARM条件はx86 jccと1対1
+            if w == 2 {
+                dynasm!(a; .arch aarch64; cmp w10, w11);
+            } else {
+                dynasm!(a; .arch aarch64; lsl w4, w10, 24; lsl w5, w11, 24; cmp w4, w5);
+            }
+        }
+        1 | 4 | 6 => {
+            // OR/AND/XOR: 結果からN/Zを得る
+            if w == 2 {
+                dynasm!(a; .arch aarch64; cmp w13, 0);
+            } else {
+                dynasm!(a; .arch aarch64; lsl w4, w13, 24; cmp w4, 0);
+            }
+        }
+        _ => return false, // ADC/SBB — cinが絡む材料はh_condへ
+    }
+    match cc {
+        0 => dynasm!(a; .arch aarch64; cset w0, vs),
+        1 => dynasm!(a; .arch aarch64; cset w0, vc),
+        2 if kind == 0 => dynasm!(a; .arch aarch64; cset w0, cs),
+        3 if kind == 0 => dynasm!(a; .arch aarch64; cset w0, cc),
+        2 => dynasm!(a; .arch aarch64; cset w0, lo),
+        3 => dynasm!(a; .arch aarch64; cset w0, hs),
+        4 => dynasm!(a; .arch aarch64; cset w0, eq),
+        5 => dynasm!(a; .arch aarch64; cset w0, ne),
+        6 => dynasm!(a; .arch aarch64; cset w0, ls),
+        7 => dynasm!(a; .arch aarch64; cset w0, hi),
+        8 => dynasm!(a; .arch aarch64; cset w0, mi),
+        9 => dynasm!(a; .arch aarch64; cset w0, pl),
+        12 => dynasm!(a; .arch aarch64; cset w0, lt),
+        13 => dynasm!(a; .arch aarch64; cset w0, ge),
+        14 => dynasm!(a; .arch aarch64; cset w0, le),
+        _ => dynasm!(a; .arch aarch64; cset w0, gt),
+    }
+    true
+}
+
 /// ブロックを機械語へ。戻り値 None = このopは焼けない (呼び手が弾く)
 /// ブロックを機械語へ。戻り値 None = このopは焼けない (呼び手が弾く)。
 ///
@@ -622,7 +699,14 @@ fn emit_block(
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
+    // g2の状態: 直前opのcc材料 (kind, 幅) がw10/w11/w13に生きているか。
+    // Jcc/SetccRはインラインで通れば材料を壊さない (last_inlined)
+    let mut cc_known: Option<(u8, u8)> = None;
+    let mut last_inlined = false;
     for (i, &(len, op)) in ops.iter().enumerate() {
+        // g1 (ADR-0023): 次opが観測されうる前にccを完全上書きするなら、
+        // このopのcc材料ストアは死んでいる — 書かない
+        let skip_cc = i + 1 < ops.len() && overwrites_cc_pure(&ops[i + 1].1);
         match op {
             JitOp::MovRI { dst, imm } => {
                 mov_imm32(&mut a, 10, imm);
@@ -665,7 +749,9 @@ fn emit_block(
                 if kind != 7 {
                     store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, machine, kind, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 2);
+                }
             }
             JitOp::AluRI { kind, dst, imm } => {
                 if kind == 2 || kind == 3 {
@@ -677,13 +763,17 @@ fn emit_block(
                 if kind != 7 {
                     store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, machine, kind, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 2);
+                }
             }
             JitOp::TestRR { a: ra, b: rb } => {
                 load_reg(&mut a, l, machine, 10, ra);
                 load_reg(&mut a, l, machine, 11, rb);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 2);
+                }
             }
             JitOp::IncDec { reg, dec } => {
                 call_cf(&mut a, machine, 15); // w15 = 旧CF (この後ヘルパを呼ばない区間)
@@ -756,7 +846,9 @@ fn emit_block(
                 if kind != 7 {
                     store_reg(&mut a, l, machine, 13, dst);
                 }
-                store_cc(&mut a, l, machine, kind, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 2);
+                }
             }
             JitOp::CmpMR { mem, reg } => {
                 // cmp [mem], r — a=mem値, b=reg (向きが逆でないことに注意:
@@ -765,21 +857,27 @@ fn emit_block(
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
-                store_cc(&mut a, l, machine, 7, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 7, 2);
+                }
             }
             JitOp::CmpMI { mem, imm } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
-                store_cc(&mut a, l, machine, 7, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 7, 2);
+                }
             }
             JitOp::TestMR { mem, reg } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 2);
+                }
             }
             // ---- ストア/RMW形 (F1d-c)。ヘルパ完了後に自ページ世代を照合、
             //      動いていたら i+1 で脱出 (最後のopなら照合不要 — どのみち終わる) ----
@@ -945,10 +1043,17 @@ fn emit_block(
                 terminal = true;
             }
             JitOp::Jcc { cc, rel } => {
-                dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_imm32(&mut a, 1, cc as u32);
-                mov_abs(&mut a, 16, h_cond as usize as u64);
-                dynasm!(a; .arch aarch64; blr x16);
+                // g2: 直前opの材料が生きていればホストフラグで判定 (h_cond節約)
+                last_inlined = match cc_known {
+                    Some((k, w)) => emit_cond_inline(&mut a, k, w, cc),
+                    None => false,
+                };
+                if !last_inlined {
+                    dynasm!(a; .arch aarch64; mov x0, x19);
+                    mov_imm32(&mut a, 1, cc as u32);
+                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    dynasm!(a; .arch aarch64; blr x16);
+                }
                 let not_taken = off.wrapping_add(len as u32);
                 let taken = not_taken.wrapping_add(rel);
                 if i + 1 == ops.len() {
@@ -1007,7 +1112,9 @@ fn emit_block(
                 if kind != 7 {
                     store_reg8(&mut a, l, machine, 13, dst8);
                 }
-                store_cc(&mut a, l, machine, kind, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 0);
+                }
             }
             JitOp::Alu8RI { kind, dst8, imm } => {
                 if kind == 2 || kind == 3 {
@@ -1020,7 +1127,9 @@ fn emit_block(
                 if kind != 7 {
                     store_reg8(&mut a, l, machine, 13, dst8);
                 }
-                store_cc(&mut a, l, machine, kind, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 0);
+                }
             }
             JitOp::Alu8RM { kind, dst8, mem } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
@@ -1037,34 +1146,44 @@ fn emit_block(
                 if kind != 7 {
                     store_reg8(&mut a, l, machine, 13, dst8);
                 }
-                store_cc(&mut a, l, machine, kind, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, kind, 0);
+                }
             }
             JitOp::Cmp8MR { mem, reg8 } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg8(&mut a, l, machine, 11, reg8);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
-                store_cc(&mut a, l, machine, 7, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 7, 0);
+                }
             }
             JitOp::Cmp8MI { mem, imm } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm as u32);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
-                store_cc(&mut a, l, machine, 7, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 7, 0);
+                }
             }
             JitOp::Test8RR { a8, b8 } => {
                 load_reg8(&mut a, l, machine, 10, a8);
                 load_reg8(&mut a, l, machine, 11, b8);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 0);
+                }
             }
             JitOp::Test8MR { mem, reg8 } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg8(&mut a, l, machine, 11, reg8);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 0);
+                }
             }
             JitOp::Grp3b8R { kind, reg8, imm } => {
                 dynasm!(a; .arch aarch64; mov x0, x19);
@@ -1155,18 +1274,31 @@ fn emit_block(
             }
             // ---- F1d-f2 (センサス上位): setcc・test imm・grp5 ----
             JitOp::SetccR { cc, dst8 } => {
-                dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_imm32(&mut a, 1, cc as u32);
-                mov_abs(&mut a, 16, h_cond as usize as u64);
-                dynasm!(a; .arch aarch64; blr x16);
+                last_inlined = match cc_known {
+                    Some((k, w)) => emit_cond_inline(&mut a, k, w, cc),
+                    None => false,
+                };
+                if !last_inlined {
+                    dynasm!(a; .arch aarch64; mov x0, x19);
+                    mov_imm32(&mut a, 1, cc as u32);
+                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    dynasm!(a; .arch aarch64; blr x16);
+                }
                 store_reg8(&mut a, l, machine, 0, dst8);
             }
             JitOp::SetccM { cc, mem } => {
                 // 条件を先に取る (副作用なし)。ストアが脱出点
-                dynasm!(a; .arch aarch64; mov x0, x19);
-                mov_imm32(&mut a, 1, cc as u32);
-                mov_abs(&mut a, 16, h_cond as usize as u64);
-                dynasm!(a; .arch aarch64; blr x16; str w0, [sp, 40]);
+                let inlined = match cc_known {
+                    Some((k, w)) => emit_cond_inline(&mut a, k, w, cc),
+                    None => false,
+                };
+                if !inlined {
+                    dynasm!(a; .arch aarch64; mov x0, x19);
+                    mov_imm32(&mut a, 1, cc as u32);
+                    mov_abs(&mut a, 16, h_cond as usize as u64);
+                    dynasm!(a; .arch aarch64; blr x16);
+                }
+                dynasm!(a; .arch aarch64; str w0, [sp, 40]);
                 emit_ea(
                     &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
                 );
@@ -1188,21 +1320,27 @@ fn emit_block(
                 load_reg(&mut a, l, machine, 10, reg);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 2);
+                }
             }
             JitOp::TestMI { mem, imm } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 2);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 2);
+                }
             }
             JitOp::Test8MI { mem, imm } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm as u32);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
-                store_cc(&mut a, l, machine, 4, 0);
+                if !skip_cc {
+                    store_cc(&mut a, l, machine, 4, 0);
+                }
             }
             JitOp::IncDecM { mem, dec } => {
                 emit_ea(
@@ -1282,6 +1420,37 @@ fn emit_block(
                 terminal = true;
             }
         }
+        // g2の帳簿: このopが材料をw10/w11/w13に残したか
+        cc_known = match op {
+            JitOp::AluRR { kind, .. } | JitOp::AluRI { kind, .. } | JitOp::AluRM { kind, .. }
+                if kind != 2 && kind != 3 =>
+            {
+                Some((kind, 2))
+            }
+            JitOp::Alu8RR { kind, .. }
+            | JitOp::Alu8RI { kind, .. }
+            | JitOp::Alu8RM { kind, .. }
+                if kind != 2 && kind != 3 =>
+            {
+                Some((kind, 0))
+            }
+            JitOp::TestRR { .. }
+            | JitOp::TestRI { .. }
+            | JitOp::TestMR { .. }
+            | JitOp::TestMI { .. } => Some((4, 2)),
+            JitOp::Test8RR { .. } | JitOp::Test8MR { .. } | JitOp::Test8MI { .. } => Some((4, 0)),
+            JitOp::CmpMR { .. } | JitOp::CmpMI { .. } => Some((7, 2)),
+            JitOp::Cmp8MR { .. } | JitOp::Cmp8MI { .. } => Some((7, 0)),
+            // インラインで通ったJcc/SetccRは材料を壊さない (w0/w4/w5だけ)
+            JitOp::Jcc { .. } | JitOp::SetccR { .. } => {
+                if last_inlined {
+                    cc_known
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
         off = off.wrapping_add(len as u32);
     }
     if !terminal {
