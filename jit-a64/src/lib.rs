@@ -94,6 +94,23 @@ unsafe extern "C" fn h_rmw32(m: *mut Machine, seg: u32, off: u32, kind: u32, b: 
     (*m).jit_try_rmw32(seg as usize, off, kind as u8, b) as u32
 }
 
+/// 8bitストア (意味論はfast_write8へ委譲)。1=完了 / 0=脱出
+unsafe extern "C" fn h_st8(m: *mut Machine, seg: u32, off: u32, val: u32) -> u32 {
+    (*m).jit_try_write8(seg as usize, off, val as u8) as u32
+}
+
+/// 8bit RMW `alu [m8], b` (read→alu8→write+note_writeをヘルパ1呼びで)
+unsafe extern "C" fn h_rmw8(m: *mut Machine, seg: u32, off: u32, kind: u32, b: u32) -> u32 {
+    (*m).jit_try_rmw8(seg as usize, off, kind as u8, b as u8) as u32
+}
+
+/// F6 kind0-3 レジスタ形 (test/not/neg) — 実行体はcore側 (grp3b8_reg)。
+/// NEGのCF上書きが遅延材料に畳めないのでヘルパ1呼び (#PF不能・脱出不要)
+unsafe extern "C" fn h_grp3b8(m: *mut Machine, kind: u32, reg8: u32, imm: u32) -> u32 {
+    jit::grp3b8_reg(&mut *m, kind as u8, reg8 as u8, imm as u8);
+    0
+}
+
 /// push (SP更新は書き込み確定後 — 意味論はexec.rsのfast_push32と同一実体)
 unsafe extern "C" fn h_push32(m: *mut Machine, val: u32) -> u32 {
     (*m).jit_try_push32(val) as u32
@@ -114,7 +131,17 @@ struct Block {
     _buf: dynasmrt::ExecutableBuffer,
     n: u16,
     gen: u32,
+    /// 損益の観測 (F1d-f): 入場数と実行命令数。taken分岐の早期退出で
+    /// 「大きく焼けても2命令で出る」ブロックは入場税が勝つ — 標本が
+    /// たまったら平均で裁いて負けブロックは負の印に降格する
+    enters: u32,
+    execd: u32,
 }
+
+/// 損益判定の標本数と、生き残りに要る平均実行命令数 (入場の固定費
+/// ≒ インタプリタ2-3命令ぶん、の実測から)
+const PROFIT_SAMPLE: u32 = 256;
+const PROFIT_MIN_AVG: u32 = 3;
 
 /// 直接マップのスロット。**ブロックはスロットが所有する** — 衝突退去は
 /// dropで、メモリはJSLOTS×ブロック分で有界 (初版はblocks Vecに溜め込み、
@@ -129,7 +156,7 @@ struct Slot {
 /// HashMapでは税が勝つ (F1a-5 #58の教訓の再演を2026-08-16に実測 —
 /// 67M probesで+1.9s)。64Kでは頭50k超に対して衝突リベイクが327k発生
 /// したので256Kへ (スロット構造は薄く、ブロック本体はBoxの先)
-const JSLOTS: usize = 256 * 1024;
+const JSLOTS: usize = 2 * 1024 * 1024;
 const TAG_FREE: u32 = 0xFFFF_FFFF;
 
 struct Rt {
@@ -141,6 +168,8 @@ struct Rt {
     pub baked: u64,
     pub rejected: u64,
     pub installed: u64,
+    /// 損益判定で負の印に降格した数
+    pub demoted: u64,
 }
 
 thread_local! {
@@ -171,6 +200,7 @@ pub unsafe fn attach(m: &mut Machine) {
         machine: m as *mut Machine,
         slots,
         baked: 0,
+        demoted: 0,
         rejected: 0,
         installed: 0,
     }));
@@ -194,15 +224,15 @@ pub unsafe fn attach_if_enabled(m: &mut Machine) -> bool {
     on
 }
 
-/// 観測値 (焼いた数, 語彙で落とした数, 据付中ブロック数)
-pub fn stats() -> (u64, u64, usize) {
+/// 観測値 (焼いた数, 語彙で落とした数, 据付中ブロック数, 損益降格数)
+pub fn stats() -> (u64, u64, usize, u64) {
     RT.with(|cell| {
         let p = cell.get();
         if p.is_null() {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         } else {
             let r = unsafe { &*p };
-            (r.baked, r.rejected, r.installed as usize)
+            (r.baked, r.rejected, r.installed as usize, r.demoted)
         }
     })
 }
@@ -220,8 +250,8 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
         let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
         let slot = &mut rt.slots[si];
         if slot.tag == pa {
-            let Some(b) = &slot.block else {
-                return 0; // 焼けない頭 (語彙外・短すぎ) の負の印
+            let Some(b) = &mut slot.block else {
+                return 0; // 焼けない頭 (語彙外・短すぎ・負け判定) の負の印
             };
             if b.gen != gen {
                 // 世代落ち (自己書き換え)。捨てて、次の来訪で焼き直す
@@ -235,7 +265,25 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
             }
             let entry = b.entry;
             // 生成コードがMachineを書く間、Rtへの参照は使い切っている
-            return unsafe { entry() } as u32;
+            let k = unsafe { entry() } as u32;
+            // 損益の観測: 256入場ごとに平均実行命令数で裁く**ローリング再審**。
+            // 一度きりの審査だと、ブート期に良平均で通ったブロックが定常WLの
+            // 分岐早退 (平均1.9命令) でも走り続ける — 局面は変わるものとして扱う
+            let b = slot.block.as_mut().unwrap();
+            b.enters += 1;
+            b.execd += k;
+            if b.enters == PROFIT_SAMPLE {
+                if b.execd < PROFIT_SAMPLE * PROFIT_MIN_AVG {
+                    // 入場税が勝つブロック — 負の印に降格 (tagは残す)
+                    slot.block = None;
+                    rt.installed -= 1;
+                    rt.demoted += 1;
+                } else {
+                    b.enters = 0;
+                    b.execd = 0;
+                }
+            }
+            return k;
         }
         // ミス: 衝突退去 (直接マップ — dropで旧ブロックのメモリごと返す) か初訪
         // ---- 焼く (同期、初訪のみ)。collectは&Machineを覗くだけ ----
@@ -256,8 +304,11 @@ fn try_enter(pa: u32, gen: u32, budget: u32) -> u32 {
             return 0;
         };
         let ops = reg_only_prefix(&blk.ops);
-        if ops.len() < 2 {
-            neg(rt); // 1命令はインタプリタと同着 — 呼び出し税だけ損
+        if ops.len() < 4 {
+            // 小物はインタプリタに残す — 入場 (呼び出し+プロローグ+毎opロード/
+            // ストア) の固定費が2-3命令では回収できない (F1d-f実測: 平均1.7命令/
+            // 入場の嵐でgcc窓が-40%)。負の印で以後のプローブは即返し
+            neg(rt);
             return 0;
         }
         let machine_addr = rt.machine as usize;
@@ -313,6 +364,24 @@ fn reg_only_prefix(ops: &[(u8, JitOp)]) -> Vec<(u8, JitOp)> {
                 | JitOp::TestMR { .. }
                 | JitOp::MovzxBM { .. }
                 | JitOp::MovzxWM { .. }
+                // ---- 8bit形 (F1d-f)。cc1の主食 — 材料はalu8の写し (cc_w=0) ----
+                | JitOp::Mov8RI { .. }
+                | JitOp::Mov8RR { .. }
+                | JitOp::Mov8RM { .. }
+                | JitOp::MovzxBR { .. }
+                | JitOp::MovzxWR { .. }
+                | JitOp::Alu8RR { .. }
+                | JitOp::Alu8RI { .. }
+                | JitOp::Alu8RM { .. }
+                | JitOp::Cmp8MR { .. }
+                | JitOp::Cmp8MI { .. }
+                | JitOp::Test8RR { .. }
+                | JitOp::Test8MR { .. }
+                | JitOp::Grp3b8R { .. }
+                | JitOp::Store8MR { .. }
+                | JitOp::Store8MI { .. }
+                | JitOp::Rmw8MR { .. }
+                | JitOp::Rmw8MI { .. }
                 // ---- ストア/スタック形 (F1d-c)。ストアの後は自ページ世代を
                 //      照合し、動いていたらn+1で脱出 (jit.rsの契約) ----
                 | JitOp::StoreMR { .. }
@@ -414,6 +483,46 @@ fn store_reg(
     } else {
         mov_abs(a, 9, addr as u64);
         dynasm!(a; .arch aarch64; str W(src), [x9]);
+    }
+}
+
+/// guest 8bitレジスタのバイト番地 (ホストはLE: AL = regs[0]の第0バイト、
+/// AH = regs[0]の第1バイト — reg8 0-3 = AL CL DL BL / 4-7 = AH CH DH BH)
+fn reg8_addr(l: &JitLayout, r8: u8) -> usize {
+    l.regs + (r8 as usize & 3) * 4 + usize::from(r8 >= 4)
+}
+
+/// guest 8bitレジスタを w<dst> へ (ldrbはゼロ拡張 — alu8の `a as u32` と同じ)
+fn load_reg8(
+    a: &mut dynasmrt::aarch64::Assembler,
+    l: &JitLayout,
+    machine: usize,
+    dst: u8,
+    r8: u8,
+) {
+    let addr = reg8_addr(l, r8);
+    if let Some(off) = field_off1(machine, addr) {
+        dynasm!(a; .arch aarch64; ldrb W(dst), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; ldrb W(dst), [x9]);
+    }
+}
+
+/// w<src> の下位1バイトを guest 8bitレジスタへ (他のバイトは不変 = set_reg8)
+fn store_reg8(
+    a: &mut dynasmrt::aarch64::Assembler,
+    l: &JitLayout,
+    machine: usize,
+    src: u8,
+    r8: u8,
+) {
+    let addr = reg8_addr(l, r8);
+    if let Some(off) = field_off1(machine, addr) {
+        dynasm!(a; .arch aarch64; strb W(src), [x19, off]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; strb W(src), [x9]);
     }
 }
 
@@ -844,7 +953,186 @@ fn emit_block(
                 mov_imm32(&mut a, 15, n as u32);
                 terminal = true;
             }
-            _ => return None, // 語彙フィルタが弾くはずの網
+            // ---- 8bit形 (F1d-f)。材料はalu8と同じ: a/bはゼロ拡張、
+            //      cc_rは**幅でマスク** (alu_lazyの & mask を写す)。cc_w=0 ----
+            JitOp::Mov8RI { dst8, imm } => {
+                mov_imm32(&mut a, 10, imm as u32);
+                store_reg8(&mut a, l, machine, 10, dst8);
+            }
+            JitOp::Mov8RR { dst8, src8 } => {
+                load_reg8(&mut a, l, machine, 10, src8);
+                store_reg8(&mut a, l, machine, 10, dst8);
+            }
+            JitOp::Mov8RM { dst8, mem } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                store_reg8(&mut a, l, machine, 0, dst8);
+            }
+            JitOp::MovzxBR { dst, src8 } => {
+                load_reg8(&mut a, l, machine, 10, src8); // ldrbがゼロ拡張済み
+                store_reg(&mut a, l, machine, 10, dst);
+            }
+            JitOp::MovzxWR { dst, src } => {
+                load_reg(&mut a, l, machine, 10, src);
+                dynasm!(a; .arch aarch64; uxth w10, w10);
+                store_reg(&mut a, l, machine, 10, dst);
+            }
+            JitOp::Alu8RR { kind, dst8, src8 } => {
+                if kind == 2 || kind == 3 {
+                    call_cf(&mut a, machine, 12);
+                }
+                load_reg8(&mut a, l, machine, 10, dst8);
+                load_reg8(&mut a, l, machine, 11, src8);
+                emit_alu(&mut a, kind)?;
+                dynasm!(a; .arch aarch64; and w13, w13, 0xff);
+                if kind != 7 {
+                    store_reg8(&mut a, l, machine, 13, dst8);
+                }
+                store_cc(&mut a, l, machine, kind, 0);
+            }
+            JitOp::Alu8RI { kind, dst8, imm } => {
+                if kind == 2 || kind == 3 {
+                    call_cf(&mut a, machine, 12);
+                }
+                load_reg8(&mut a, l, machine, 10, dst8);
+                mov_imm32(&mut a, 11, imm as u32);
+                emit_alu(&mut a, kind)?;
+                dynasm!(a; .arch aarch64; and w13, w13, 0xff);
+                if kind != 7 {
+                    store_reg8(&mut a, l, machine, 13, dst8);
+                }
+                store_cc(&mut a, l, machine, kind, 0);
+            }
+            JitOp::Alu8RM { kind, dst8, mem } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                if kind == 2 || kind == 3 {
+                    dynasm!(a; .arch aarch64; str w0, [sp, 40]);
+                    call_cf(&mut a, machine, 12);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 40]);
+                } else {
+                    dynasm!(a; .arch aarch64; mov w11, w0);
+                }
+                load_reg8(&mut a, l, machine, 10, dst8);
+                emit_alu(&mut a, kind)?;
+                dynasm!(a; .arch aarch64; and w13, w13, 0xff);
+                if kind != 7 {
+                    store_reg8(&mut a, l, machine, 13, dst8);
+                }
+                store_cc(&mut a, l, machine, kind, 0);
+            }
+            JitOp::Cmp8MR { mem, reg8 } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                load_reg8(&mut a, l, machine, 11, reg8);
+                dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
+                store_cc(&mut a, l, machine, 7, 0);
+            }
+            JitOp::Cmp8MI { mem, imm } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                mov_imm32(&mut a, 11, imm as u32);
+                dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
+                store_cc(&mut a, l, machine, 7, 0);
+            }
+            JitOp::Test8RR { a8, b8 } => {
+                load_reg8(&mut a, l, machine, 10, a8);
+                load_reg8(&mut a, l, machine, 11, b8);
+                dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
+                store_cc(&mut a, l, machine, 4, 0);
+            }
+            JitOp::Test8MR { mem, reg8 } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                load_reg8(&mut a, l, machine, 11, reg8);
+                dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
+                store_cc(&mut a, l, machine, 4, 0);
+            }
+            JitOp::Grp3b8R { kind, reg8, imm } => {
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, kind as u32);
+                mov_imm32(&mut a, 2, reg8 as u32);
+                mov_imm32(&mut a, 3, imm as u32);
+                mov_abs(&mut a, 16, h_grp3b8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+            }
+            // ---- 8bitの書く形。ストア後の自ページ世代照合は32bit形と同じ契約 ----
+            JitOp::Store8MR { mem, src8 } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                load_reg8(&mut a, l, machine, 3, src8);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::Store8MI { mem, imm } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                mov_imm32(&mut a, 3, imm as u32);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::Rmw8MR { kind, mem, reg8 } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                load_reg8(&mut a, l, machine, 4, reg8);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_imm32(&mut a, 3, kind as u32);
+                mov_abs(&mut a, 16, h_rmw8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::Rmw8MI { kind, mem, imm } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                mov_imm32(&mut a, 4, imm as u32);
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_imm32(&mut a, 3, kind as u32);
+                mov_abs(&mut a, 16, h_rmw8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
         }
         off = off.wrapping_add(len as u32);
     }
@@ -887,6 +1175,8 @@ fn emit_block(
         _buf: buf,
         n,
         gen: 0, // 呼び手が上書き
+        enters: 0,
+        execd: 0,
     })
 }
 

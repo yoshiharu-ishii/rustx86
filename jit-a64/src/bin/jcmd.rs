@@ -60,7 +60,7 @@ fn main() {
     let (mut fed, mut done_at) = (false, None::<usize>);
     let mut spent: u64 = 0;
     // コマンド窓の計測 (feed時点からDONEMARKまで)
-    let mut win_start: Option<(u64, std::time::Instant, u64)> = None; // (spent, wall, jit_instrs)
+    let mut win_start: Option<(u64, std::time::Instant, u64, u64)> = None; // (spent, wall, jit_instrs, jit_entries)
     while spent < budget {
         m.run(2_000_000);
         spent += 2_000_000;
@@ -70,7 +70,7 @@ fn main() {
                 m.devices.uart.rx.push_back(b);
             }
             fed = true;
-            win_start = Some((spent, std::time::Instant::now(), m.jit_instrs));
+            win_start = Some((spent, std::time::Instant::now(), m.jit_instrs, m.jit_entries));
         }
         if fed && done_at.is_none() {
             if let Some(at) = out.rfind("DONEMARK") {
@@ -96,7 +96,7 @@ fn main() {
     }
     // ゲストのtime出力ごとシリアルを出す (実測の原本)
     print!("{}", String::from_utf8_lossy(&m.devices.uart.tx));
-    let (s0, w0, j0) = win_start.unwrap();
+    let (s0, w0, j0, e0) = win_start.unwrap();
     let win_instr = spent - s0;
     let win_wall = w0.elapsed().as_secs_f64();
     println!("\n[jcmd] JIT: {}", if jit_on { "on" } else { "off" });
@@ -113,15 +113,17 @@ fn main() {
         fnv(&m.devices.uart.tx)
     );
     if jit_on {
-        let (baked, rejected, installed) = rustx86_jit_a64::stats();
+        let (baked, rejected, installed, demoted) = rustx86_jit_a64::stats();
         println!(
-            "[jcmd] jit: 窓内実行{}M命令 (窓カバレッジ{:.1}%) / 総入場{}回 / 焼き{} 棄却{} 据付{}",
+            "[jcmd] jit: 窓内実行{}M命令 (窓カバレッジ{:.1}%) / 窓内入場{}M回 (平均{:.1}命令) / 焼き{} 棄却{} 据付{} 降格{}",
             (m.jit_instrs - j0) / 1_000_000,
             (m.jit_instrs - j0) as f64 * 100.0 / win_instr as f64,
-            m.jit_entries,
+            (m.jit_entries - e0) / 1_000_000,
+            (m.jit_instrs - j0) as f64 / (m.jit_entries - e0).max(1) as f64,
             baked,
             rejected,
-            installed
+            installed,
+            demoted
         );
     }
 }

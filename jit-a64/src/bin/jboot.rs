@@ -66,15 +66,16 @@ fn main() {
                 fnv(&m.devices.uart.tx)
             );
             if jit_on {
-                let (baked, rejected, installed) = rustx86_jit_a64::stats();
+                let (baked, rejected, installed, demoted) = rustx86_jit_a64::stats();
                 println!(
-                    "jit: 実行{}M命令 / 入場{}回 (平均{:.1}命令) / 焼き{} 棄却{} 据付{}",
+                    "jit: 実行{}M命令 / 入場{}回 (平均{:.1}命令) / 焼き{} 棄却{} 据付{} 降格{}",
                     m.jit_instrs / 1_000_000,
                     m.jit_entries,
                     m.jit_instrs as f64 / m.jit_entries.max(1) as f64,
                     baked,
                     rejected,
-                    installed
+                    installed,
+                    demoted
                 );
                 println!("カバレッジ: {:.2}%", m.jit_instrs as f64 * 100.0 / n as f64);
             }

@@ -265,6 +265,33 @@ pub enum JitOp {
         dst8: u8,
         mem: JitMem,
     },
+    // ---- ここから8bitの書く形 (F1d-f)。ストア後の自ページ世代照合 (n+1脱出)
+    //      は32bit形と同じ契約 ----
+    /// mov [m8], r8 / mov [m8], imm8
+    Store8MR {
+        mem: JitMem,
+        src8: u8,
+    },
+    Store8MI {
+        mem: JitMem,
+        imm: u8,
+    },
+    /// ALU [m8], r8 / imm8 — read→alu8→write をヘルパ1呼びで (kind7は来ない)
+    Rmw8MR {
+        kind: u8,
+        mem: JitMem,
+        reg8: u8,
+    },
+    Rmw8MI {
+        kind: u8,
+        mem: JitMem,
+        imm: u8,
+    },
+    /// mov r8, imm8 (C6のレジスタ形)
+    Mov8RI {
+        dst8: u8,
+        imm: u8,
+    },
 }
 
 /// 語彙の世代 (collectに渡す)。wasm生成器は凍結時点のF1B、ネイティブはV2
@@ -346,7 +373,7 @@ fn convert(u: &Uop, caps: u32) -> Option<(JitOp, bool)> {
                 dst8: reg,
                 mem: mr.into(),
             }),
-            // rm=dst形のmem: kind7 (CMP) はロードだけ、他 (RMW8) は語彙外のまま
+            // rm=dst形のmem: kind7 (CMP) はロードだけ、他はRMW8 (F1d-f)
             Uop::Alu8RmR {
                 kind: 7,
                 rm: Rm::Mem(mr),
@@ -355,6 +382,43 @@ fn convert(u: &Uop, caps: u32) -> Option<(JitOp, bool)> {
                 mem: mr.into(),
                 reg8: reg,
             }),
+            Uop::Alu8RmR {
+                kind,
+                rm: Rm::Mem(mr),
+                reg,
+            } => Some(JitOp::Rmw8MR {
+                kind,
+                mem: mr.into(),
+                reg8: reg,
+            }),
+            Uop::Grp18RmImm {
+                kind,
+                rm: Rm::Mem(mr),
+                imm,
+            } if kind != 7 => Some(JitOp::Rmw8MI {
+                kind,
+                mem: mr.into(),
+                imm,
+            }),
+            // ---- 8bitストア (F1d-f) ----
+            Uop::Mov8RmR {
+                rm: Rm::Mem(mr),
+                reg,
+            } => Some(JitOp::Store8MR {
+                mem: mr.into(),
+                src8: reg,
+            }),
+            Uop::MovRm8Imm {
+                rm: Rm::Mem(mr),
+                imm,
+            } => Some(JitOp::Store8MI {
+                mem: mr.into(),
+                imm,
+            }),
+            Uop::MovRm8Imm {
+                rm: Rm::Reg(dst8),
+                imm,
+            } => Some(JitOp::Mov8RI { dst8, imm }),
             Uop::Grp18RmImm {
                 kind,
                 rm: Rm::Reg(dst8),
@@ -747,6 +811,25 @@ pub fn page_gen(m: &Machine, pa: u32) -> u32 {
 /// ブロックが古い続きを走らない (ADR-0020後の世界の契約)
 pub fn page_gen_addr(m: &Machine, pa: u32) -> usize {
     m.dcache.page_gen_addr_of(pa)
+}
+
+/// Grp3b8R (F6 kind0-3、レジスタ形) の実行体 — exec.rsのcold_grp3bのReg腕と
+/// 同じ部品 (alu8/set_flag/set_reg8) を呼ぶ。NEGのCF上書きが遅延材料に
+/// 畳めないので、生成コードはこれをヘルパ1呼びで使う (#PF不能・脱出不要)
+pub fn grp3b8_reg(m: &mut Machine, kind: u8, reg8: u8, imm: u8) {
+    use super::super::alu::alu8;
+    let a = m.cpu.reg8(reg8 as usize);
+    match kind {
+        0 | 1 => {
+            alu8(&mut m.cpu, 4, a, imm); // TEST: フラグだけ
+        }
+        2 => m.cpu.set_reg8(reg8 as usize, !a), // NOT: フラグ不変
+        _ => {
+            let r = alu8(&mut m.cpu, 5, 0, a); // NEG = 0 - a
+            m.cpu.set_flag(super::super::CF, a != 0);
+            m.cpu.set_reg8(reg8 as usize, r);
+        }
+    }
 }
 
 /// ブロックを焼いたページに「コードあり」を立てる (fillと同じ義務)。

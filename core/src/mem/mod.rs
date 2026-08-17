@@ -642,6 +642,23 @@ impl Machine {
         self.fast_write32(seg, off, val).is_some()
     }
 
+    /// JIT用の8bitストア (F1d-f)。意味論はfast_write8へ委譲 — 32bit版と同じ契約
+    pub fn jit_try_write8(&mut self, seg: usize, off: u32, val: u8) -> bool {
+        self.fast_write8(seg, off, val).is_some()
+    }
+
+    /// JIT用の8bit RMW (`alu [m8], b`)。32bit版と同じ形 — ALUは従来と同じ alu8
+    pub fn jit_try_rmw8(&mut self, seg: usize, off: u32, kind: u8, b: u8) -> bool {
+        let Some(pa) = self.fast_rmw8_addr(seg, off) else {
+            return false;
+        };
+        let a = self.mem[pa];
+        let v = crate::cpu::alu::alu8(&mut self.cpu, kind, a, b);
+        self.mem[pa] = v;
+        self.dcache.note_write(pa as u32);
+        true
+    }
+
     /// JIT用のRMW (`alu [mem], b`)。exec.rsのfast RMW armの写し —
     /// 書き込み権限で先に変換 (writable⊆readable) するので、cc更新後に
     /// 失敗する道が無い。ALUは従来と同じ alu_w、書いたら note_write
