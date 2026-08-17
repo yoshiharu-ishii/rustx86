@@ -493,13 +493,7 @@ fn reg8_addr(l: &JitLayout, r8: u8) -> usize {
 }
 
 /// guest 8bitレジスタを w<dst> へ (ldrbはゼロ拡張 — alu8の `a as u32` と同じ)
-fn load_reg8(
-    a: &mut dynasmrt::aarch64::Assembler,
-    l: &JitLayout,
-    machine: usize,
-    dst: u8,
-    r8: u8,
-) {
+fn load_reg8(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize, dst: u8, r8: u8) {
     let addr = reg8_addr(l, r8);
     if let Some(off) = field_off1(machine, addr) {
         dynasm!(a; .arch aarch64; ldrb W(dst), [x19, off]);

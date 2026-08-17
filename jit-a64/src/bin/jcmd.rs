@@ -70,7 +70,12 @@ fn main() {
                 m.devices.uart.rx.push_back(b);
             }
             fed = true;
-            win_start = Some((spent, std::time::Instant::now(), m.jit_instrs, m.jit_entries));
+            win_start = Some((
+                spent,
+                std::time::Instant::now(),
+                m.jit_instrs,
+                m.jit_entries,
+            ));
         }
         if fed && done_at.is_none() {
             if let Some(at) = out.rfind("DONEMARK") {
