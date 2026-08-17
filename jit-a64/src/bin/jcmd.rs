@@ -147,7 +147,23 @@ fn main() {
             } else {
                 format!("0F{:02X}", i - 256)
             };
-            println!("  {name:>5}  {:>7}M  {pct:5.1}%  累積{cum:5.1}%", c / 1_000_000);
+            println!(
+                "  {name:>5}  {:>7}M  {pct:5.1}%  累積{cum:5.1}%",
+                c / 1_000_000
+            );
+        }
+    }
+    #[cfg(feature = "opstats")]
+    if jit_on {
+        let miss = rustx86_core::jit::vocab_miss_report();
+        let total: u64 = miss.iter().map(|&(_, c)| c).sum();
+        println!("[jcmd] collectを止めたuop上位 (全{}k回):", total / 1000);
+        for &(name, c) in miss.iter().take(15) {
+            println!(
+                "  {name:<28} {:>6}k  {:4.1}%",
+                c / 1000,
+                c as f64 * 100.0 / total as f64
+            );
         }
     }
     if jit_on {
