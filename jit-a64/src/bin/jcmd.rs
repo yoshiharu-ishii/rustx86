@@ -57,6 +57,9 @@ fn main() {
     );
 
     let t0 = std::time::Instant::now();
+    // opstats: 窓のオペコード度数 (feed時点のスナップショットとの差分)
+    #[allow(unused_mut, unused_variables)]
+    let mut win_ops: Vec<u64> = Vec::new();
     let (mut fed, mut done_at) = (false, None::<usize>);
     let mut spent: u64 = 0;
     // コマンド窓の計測 (feed時点からDONEMARKまで)
@@ -76,6 +79,9 @@ fn main() {
                 m.jit_instrs,
                 m.jit_entries,
             ));
+            if cfg!(feature = "opstats") {
+                win_ops = m.op_counts.clone();
+            }
         }
         if fed && done_at.is_none() {
             if let Some(at) = out.rfind("DONEMARK") {
@@ -117,6 +123,49 @@ fn main() {
         win_instr,
         fnv(&m.devices.uart.tx)
     );
+    if cfg!(feature = "opstats") && !win_ops.is_empty() {
+        let delta: Vec<u64> = m
+            .op_counts
+            .iter()
+            .zip(&win_ops)
+            .map(|(a, b)| a - b)
+            .collect();
+        let total: u64 = delta.iter().sum();
+        let mut idx: Vec<usize> = (0..512).collect();
+        idx.sort_by_key(|&i| std::cmp::Reverse(delta[i]));
+        println!("[jcmd] 窓のオペコード上位 (全{}M命令):", total / 1_000_000);
+        let mut cum = 0.0;
+        for &i in idx.iter().take(30) {
+            let c = delta[i];
+            if c == 0 {
+                break;
+            }
+            let pct = c as f64 * 100.0 / total as f64;
+            cum += pct;
+            let name = if i < 256 {
+                format!("{:02X}", i)
+            } else {
+                format!("0F{:02X}", i - 256)
+            };
+            println!(
+                "  {name:>5}  {:>7}M  {pct:5.1}%  累積{cum:5.1}%",
+                c / 1_000_000
+            );
+        }
+    }
+    #[cfg(feature = "opstats")]
+    if jit_on {
+        let miss = rustx86_core::jit::vocab_miss_report();
+        let total: u64 = miss.iter().map(|&(_, c)| c).sum();
+        println!("[jcmd] collectを止めたuop上位 (全{}k回):", total / 1000);
+        for &(name, c) in miss.iter().take(15) {
+            println!(
+                "  {name:<28} {:>6}k  {:4.1}%",
+                c / 1000,
+                c as f64 * 100.0 / total as f64
+            );
+        }
+    }
     if jit_on {
         let (baked, rejected, installed, demoted) = rustx86_jit_a64::stats();
         println!(

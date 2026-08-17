@@ -111,6 +111,11 @@ unsafe extern "C" fn h_grp3b8(m: *mut Machine, kind: u32, reg8: u32, imm: u32) -
     0
 }
 
+/// inc/dec [mem] (CF不変のRMW — inc_dec_w委譲)。1=完了 / 0=脱出
+unsafe extern "C" fn h_incdec32(m: *mut Machine, seg: u32, off: u32, dec: u32) -> u32 {
+    (*m).jit_try_incdec32(seg as usize, off, dec != 0) as u32
+}
+
 /// push (SP更新は書き込み確定後 — 意味論はexec.rsのfast_push32と同一実体)
 unsafe extern "C" fn h_push32(m: *mut Machine, val: u32) -> u32 {
     (*m).jit_try_push32(val) as u32
@@ -382,6 +387,18 @@ fn reg_only_prefix(ops: &[(u8, JitOp)]) -> Vec<(u8, JitOp)> {
                 | JitOp::Store8MI { .. }
                 | JitOp::Rmw8MR { .. }
                 | JitOp::Rmw8MI { .. }
+                // ---- F1d-f2 (センサス上位): setcc・test imm・grp5 ----
+                | JitOp::SetccR { .. }
+                | JitOp::SetccM { .. }
+                | JitOp::TestRI { .. }
+                | JitOp::TestMI { .. }
+                | JitOp::Test8MI { .. }
+                | JitOp::IncDecM { .. }
+                | JitOp::PushM { .. }
+                | JitOp::JmpIndR { .. }
+                | JitOp::JmpIndM { .. }
+                | JitOp::CallIndR { .. }
+                | JitOp::CallIndM { .. }
                 // ---- ストア/スタック形 (F1d-c)。ストアの後は自ページ世代を
                 //      照合し、動いていたらn+1で脱出 (jit.rsの契約) ----
                 | JitOp::StoreMR { .. }
@@ -402,7 +419,16 @@ fn reg_only_prefix(ops: &[(u8, JitOp)]) -> Vec<(u8, JitOp)> {
         }
         out.push((len, op));
         // Jccは終端にしない (CAP_CHAIN両側焼き — 不成立側を同じブロックで続ける)
-        if matches!(op, JitOp::Jmp { .. } | JitOp::CallRel { .. } | JitOp::Ret) {
+        if matches!(
+            op,
+            JitOp::Jmp { .. }
+                | JitOp::CallRel { .. }
+                | JitOp::Ret
+                | JitOp::JmpIndR { .. }
+                | JitOp::JmpIndM { .. }
+                | JitOp::CallIndR { .. }
+                | JitOp::CallIndM { .. }
+        ) {
             break;
         }
     }
@@ -1126,6 +1152,134 @@ fn emit_block(
                     off.wrapping_add(len as u32),
                     ops.len(),
                 );
+            }
+            // ---- F1d-f2 (センサス上位): setcc・test imm・grp5 ----
+            JitOp::SetccR { cc, dst8 } => {
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, cc as u32);
+                mov_abs(&mut a, 16, h_cond as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                store_reg8(&mut a, l, machine, 0, dst8);
+            }
+            JitOp::SetccM { cc, mem } => {
+                // 条件を先に取る (副作用なし)。ストアが脱出点
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, cc as u32);
+                mov_abs(&mut a, 16, h_cond as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16; str w0, [sp, 40]);
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                dynasm!(a; .arch aarch64; ldr w3, [sp, 40]; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_abs(&mut a, 16, h_st8 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::TestRI { reg, imm } => {
+                load_reg(&mut a, l, machine, 10, reg);
+                mov_imm32(&mut a, 11, imm);
+                dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
+                store_cc(&mut a, l, machine, 4, 2);
+            }
+            JitOp::TestMI { mem, imm } => {
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                mov_imm32(&mut a, 11, imm);
+                dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
+                store_cc(&mut a, l, machine, 4, 2);
+            }
+            JitOp::Test8MI { mem, imm } => {
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                mov_imm32(&mut a, 11, imm as u32);
+                dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
+                store_cc(&mut a, l, machine, 4, 0);
+            }
+            JitOp::IncDecM { mem, dec } => {
+                emit_ea(
+                    &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
+                );
+                dynasm!(a; .arch aarch64; mov x0, x19);
+                mov_imm32(&mut a, 1, mem.seg as u32);
+                mov_imm32(&mut a, 3, dec as u32);
+                mov_abs(&mut a, 16, h_incdec32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            JitOp::PushM { mem } => {
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w1, w0; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                emit_genck(
+                    &mut a,
+                    gen_addr,
+                    gen,
+                    i,
+                    off.wrapping_add(len as u32),
+                    ops.len(),
+                );
+            }
+            // ---- 終端: 間接分岐 (着地は絶対番地 — exit_abs) ----
+            JitOp::JmpIndR { reg } => {
+                load_reg(&mut a, l, machine, 10, reg);
+                mov_imm32(&mut a, 15, n as u32);
+                dynasm!(a; .arch aarch64; b ->exit_abs);
+                terminal = true;
+            }
+            JitOp::JmpIndM { mem } => {
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                dynasm!(a; .arch aarch64; mov w10, w0);
+                mov_imm32(&mut a, 15, n as u32);
+                dynasm!(a; .arch aarch64; b ->exit_abs);
+                terminal = true;
+            }
+            JitOp::CallIndR { reg } => {
+                // 的を先に読む (pushでSP/メモリが動く前の値 — call esp系の意味を守る)
+                load_reg(&mut a, l, machine, 10, reg);
+                dynasm!(a; .arch aarch64; str w10, [sp, 40]);
+                mov_abs(&mut a, 9, l.ip as u64);
+                mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
+                dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 40]);
+                mov_imm32(&mut a, 15, n as u32);
+                dynasm!(a; .arch aarch64; b ->exit_abs);
+                terminal = true;
+            }
+            JitOp::CallIndM { mem } => {
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                dynasm!(a; .arch aarch64; str w0, [sp, 40]);
+                mov_abs(&mut a, 9, l.ip as u64);
+                mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
+                dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
+                mov_abs(&mut a, 16, h_push32 as usize as u64);
+                dynasm!(a; .arch aarch64; blr x16);
+                emit_escape_if_zero(&mut a, i as u32, off);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 40]);
+                mov_imm32(&mut a, 15, n as u32);
+                dynasm!(a; .arch aarch64; b ->exit_abs);
+                terminal = true;
             }
         }
         off = off.wrapping_add(len as u32);
