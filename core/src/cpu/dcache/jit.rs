@@ -940,6 +940,12 @@ pub struct JitLayout {
     pub vram_hi: u32,
     /// jit_budget (このブロック実行の最大命令数) の番地 — F1c-c4
     pub jit_budget: usize,
+    /// fastmem (ADR-0026): fm_mirror / fm_ok フィールドの**番地** (値は
+    /// 実行時に読む — スナップショット復元でミラーが差し替わるため)。
+    /// fm_on = layout採取時に有効だったか (バケ時の経路選択)
+    pub fm_mirror_field: usize,
+    pub fm_ok_field: usize,
+    pub fm_on: bool,
     /// ページングが有効か見るためのCR0の番地 (bit31=PG。PG無効時は恒等変換 —
     /// 高速路はTLBを引かず la をそのまま物理に使ってよい…とはせず、
     /// **PG無効時もTLBは恒等で埋まらないので必ずヘルパへ**。生成コードは
@@ -1046,6 +1052,9 @@ pub fn layout(m: &Machine) -> JitLayout {
         vram_lo: crate::bus::VRAM_TEXT_BASE,
         vram_hi: crate::bus::VRAM_TEXT_END,
         jit_budget: &m.jit_budget as *const u32 as usize,
+        fm_mirror_field: &m.fm_mirror as *const usize as usize,
+        fm_ok_field: &m.fm_ok as *const usize as usize,
+        fm_on: m.fm_mirror != 0,
         cr0: &m.cpu.cr0 as *const u32 as usize,
     }
 }

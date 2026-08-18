@@ -80,6 +80,11 @@ fn main() {
                 );
                 println!("カバレッジ: {:.2}%", m.jit_instrs as f64 * 100.0 / n as f64);
             }
+            #[cfg(all(unix, not(target_arch = "wasm32")))]
+            if let Some(fm) = &m.fastmem {
+                let (now, fills, flushes) = fm.stats();
+                println!("fastmem: 群{now}張り (累積{fills} 全剥がし{flushes}回)");
+            }
             return;
         }
         if m.halted {

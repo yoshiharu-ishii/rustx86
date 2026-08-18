@@ -27,6 +27,11 @@ impl Machine {
             e.tag = TLB_INVALID;
             slot.set(e);
         }
+        // fastmemミラーも同じ合図で剥がす (ソフトTLBと同じ意味論 — ADR-0026)
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        if let Some(fm) = &self.fastmem {
+            fm.flush_all();
+        }
     }
 
     /// TLBの1ページだけ無効化する (INVLPG)。ページテーブルの1エントリを
@@ -36,6 +41,10 @@ impl Machine {
         let mut e = self.tlb[slot].get();
         e.tag = TLB_INVALID;
         self.tlb[slot].set(e);
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        if let Some(fm) = &self.fastmem {
+            fm.flush_page(la);
+        }
     }
 
     /// RAMのバイト数 (= 実際の確保量)
@@ -246,7 +255,34 @@ impl Machine {
         if write {
             self.queue_ad(w.leaf_addr, 0x40);
         }
+        // fastmem: 検査を通った変換だけがミラー候補になる (ADR-0026)。
+        // 群の兄弟はTLBを覗くだけ — ここで歩き直すとAビットが立って
+        // ゲスト可視の挙動が変わる
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        self.fastmem_fill(la);
         Ok(w.base | (la & 0xFFF))
+    }
+
+    /// 線形ページ la>>12 の属する群がTLB上で揃っていればミラーを張る
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    fn fastmem_fill(&self, la: u32) {
+        let Some(fm) = &self.fastmem else { return };
+        let group = fm.group();
+        let head = ((la >> 12) as usize / group * group) as u32;
+        if fm.is_mapped(head) {
+            return;
+        }
+        let mut sibs = [(0u32, false); 4];
+        for (i, s) in sibs.iter_mut().enumerate().take(group) {
+            let lp = head + i as u32;
+            let slot = (lp as usize) & (TLB_SLOTS - 1);
+            let e = self.tlb[slot].get();
+            if e.tag != lp {
+                return; // 兄弟がまだ — その兄弟のミスがまた試す
+            }
+            *s = (e.base_flags >> 12, e.base_flags & 2 != 0);
+        }
+        fm.note_fill(head, &sibs[..group]);
     }
 
     /// ヒットしたが D 未設定のページへの書き込み初回: 控えに dirty を立て、

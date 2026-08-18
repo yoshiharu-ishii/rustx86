@@ -70,6 +70,15 @@ impl GuestRam {
         }
     }
 
+    /// 共有バッキングのfd (fastmemミラーの張り元)。Vec置き場ならNone
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub fn backing_fd(&self) -> Option<libc::c_int> {
+        match &self.inner {
+            Inner::Vec(_) => None,
+            Inner::Mapped(m) => Some(m.fd),
+        }
+    }
+
     /// fastmem写像が生きているか (観測口)
     pub fn is_fastmem(&self) -> bool {
         #[cfg(all(unix, not(target_arch = "wasm32")))]
