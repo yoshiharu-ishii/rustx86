@@ -8,6 +8,8 @@ pub mod cpu;
 pub mod debug;
 pub mod dev;
 pub mod disk;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub mod fastmem;
 pub mod mem;
 pub mod snapshot;
 // JITビュー (F1d)。焼き候補ブロックとフィールド実番地表を外の生成器へ渡す口
@@ -129,6 +131,14 @@ pub const PIT_CLOCKS_PER_TICK: u32 = INSTRUCTIONS_PER_TICK / 64;
 pub struct Machine {
     pub cpu: Cpu,
     pub mem: GuestRam,
+    /// 線形ミラー (fastmem 段2、ADR-0026)。RUSTX86_FASTMEM=1のときだけSome
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub fastmem: Option<fastmem::Fastmem>,
+    /// 生成コードが実行時に読むミラー先頭/有効表先頭 (0 = fastmem無効)。
+    /// 全ビルドに存在する (JitLayoutを一様に保つ)。スナップショット復元で
+    /// ミラーが作り直されたら書き換わる — 生成コードは毎入場ここを読む
+    pub fm_mirror: usize,
+    pub fm_ok: usize,
     /// 保留中のハードウェア割り込みベクタ。IFが立っている命令境界で受け付ける。
     /// Tier 2a で 8259 PIC がここへ挙手する
     pub pending_irq: Option<u8>,
@@ -351,9 +361,14 @@ impl Machine {
 
     /// 仕様を指定して作る。RAMサイズがプロファイルで決まる
     pub fn with_profile(profile: MachineProfile) -> Self {
-        Self {
+        #[allow(unused_mut)]
+        let mut m = Self {
             cpu: Cpu::new(),
             mem: GuestRam::new(profile.ram_bytes),
+            #[cfg(all(unix, not(target_arch = "wasm32")))]
+            fastmem: None,
+            fm_mirror: 0,
+            fm_ok: 0,
             pending_irq: None,
             pic_service: false,
             pending_fault: std::cell::Cell::new(None),
@@ -414,6 +429,31 @@ impl Machine {
             ad_queue: std::cell::RefCell::new(Vec::new()),
             ad_pending: std::cell::Cell::new(false),
             pending_seg_fault: std::cell::Cell::new(None),
+        };
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        m.fastmem_init();
+        m
+    }
+
+    /// fastmemミラーを (再) 構築する (ADR-0026 段2)。RAMがVec置き場なら
+    /// 何もしない (フラグoff/wasm/失敗時 = 現行経路)。スナップショット復元で
+    /// RAMが差し替わったときも呼ぶ — fm_mirror/fm_okは生成コードが毎入場
+    /// 読むので、ここで書き換えれば古いブロックも新しいミラーを見る
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub(crate) fn fastmem_init(&mut self) {
+        self.fastmem = self
+            .mem
+            .backing_fd()
+            .and_then(|fd| fastmem::Fastmem::new(fd, self.mem.len()));
+        match &self.fastmem {
+            Some(fm) => {
+                self.fm_mirror = fm.mirror_base();
+                self.fm_ok = fm.ok_base();
+            }
+            None => {
+                self.fm_mirror = 0;
+                self.fm_ok = 0;
+            }
         }
     }
 

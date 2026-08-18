@@ -440,7 +440,9 @@ impl Machine {
         m.pic_service = m.devices.pic[0].has_pending();
         m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
         m.mem = crate::GuestRam::from_vec(mem);
-        // デコード済み命令の写しも同じ理由で総入れ替え (RAMサイズも変わりうる)
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        m.fastmem_init(); // RAM実体が替わった — ミラーもfdから作り直す
+                          // デコード済み命令の写しも同じ理由で総入れ替え (RAMサイズも変わりうる)
         m.dcache = cpu::dcache::DecodeCache::new(m.mem.len());
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)

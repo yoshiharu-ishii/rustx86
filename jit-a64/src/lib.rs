@@ -655,6 +655,18 @@ fn call_cf(a: &mut dynasmrt::aarch64::Assembler, _machine: usize, dst: u8) {
     dynasm!(a; .arch aarch64; blr x16; mov W(dst), w0);
 }
 
+/// x<dst> = *(u64*)addr (x19相対のldrで届けば1命令)
+fn ldr_x_field(a: &mut dynasmrt::aarch64::Assembler, machine: usize, addr: usize, dst: u8) {
+    let d = addr.wrapping_sub(machine);
+    if d < 32768 && d.is_multiple_of(8) {
+        let d = d as u32;
+        dynasm!(a; .arch aarch64; ldr X(dst), [x19, d]);
+    } else {
+        mov_abs(a, 9, addr as u64);
+        dynasm!(a; .arch aarch64; ldr X(dst), [x9]);
+    }
+}
+
 /// x9 = ipの実番地。Machine先頭からの差がimm12に収まれば add 1命令
 /// (mov_absの3-4命令はブロック出口ごとに払う税だった)
 fn ip_addr_to_x9(a: &mut dynasmrt::aarch64::Assembler, l: &JitLayout, machine: usize) {
@@ -768,16 +780,24 @@ fn emit_block(
     // 掴み置き (callee-saved — ヘルパ呼びでも生きる)。フィールドは [x19,#差分]、
     // TLBインライン路は x20/x21 相対で走る。スピル1枠は [sp,40]
     dynasm!(a; .arch aarch64
-        ; sub sp, sp, 64
+        ; sub sp, sp, 80
         ; stp x29, x30, [sp]
         ; stp x19, x20, [sp, 16]
         ; stp x21, x22, [sp, 32]
+        ; stp x23, x24, [sp, 48]
         ; mov x29, sp
         ; mov x19, x0   // Machine (呼び手が渡す — 焼き込みより9命令軽い)
         ; mov x20, x1   // TLB先頭
         ; mov x21, x2   // RAM先頭
         ; mov x22, x3   // ヘルパ表 (ldr 1命令でヘルパ番地)
     );
+    if l.fm_on {
+        // fastmem (ADR-0026): ミラー/有効表の先頭を**実行時に**読む —
+        // スナップショット復元で差し替わっても、古いブロックが新しい
+        // ミラーを見る (番地を焼き込まない)
+        ldr_x_field(&mut a, machine, l.fm_mirror_field, 23);
+        ldr_x_field(&mut a, machine, l.fm_ok_field, 24);
+    }
 
     let mut off: u32 = 0; // ブロック頭からのバイトオフセット (ip差分用)
     let mut terminal = false;
@@ -917,9 +937,9 @@ fn emit_block(
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
                 if kind == 2 || kind == 3 {
                     // b (=ロード値) をスピルしてcinを取り、復元
-                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 64]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -1216,9 +1236,9 @@ fn emit_block(
             JitOp::Alu8RM { kind, dst8, mem } => {
                 emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
                 if kind == 2 || kind == 3 {
-                    dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                    dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                     call_cf(&mut a, machine, 12);
-                    dynasm!(a; .arch aarch64; ldr w11, [sp, 48]);
+                    dynasm!(a; .arch aarch64; ldr w11, [sp, 64]);
                 } else {
                     dynasm!(a; .arch aarch64; mov w11, w0);
                 }
@@ -1380,11 +1400,11 @@ fn emit_block(
                     load_helper(&mut a, H_COND);
                     dynasm!(a; .arch aarch64; blr x16);
                 }
-                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                 emit_ea(
                     &mut a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp,
                 );
-                dynasm!(a; .arch aarch64; ldr w3, [sp, 48]; mov x0, x19);
+                dynasm!(a; .arch aarch64; ldr w3, [sp, 64]; mov x0, x19);
                 mov_imm32(&mut a, 1, mem.seg as u32);
                 load_helper(&mut a, H_ST8);
                 dynasm!(a; .arch aarch64; blr x16);
@@ -1475,28 +1495,28 @@ fn emit_block(
             JitOp::CallIndR { reg } => {
                 // 的を先に読む (pushでSP/メモリが動く前の値 — call esp系の意味を守る)
                 load_reg(&mut a, l, machine, 10, reg);
-                dynasm!(a; .arch aarch64; str w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w10, [sp, 64]);
                 ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
                 load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 64]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
             }
             JitOp::CallIndM { mem } => {
                 emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
-                dynasm!(a; .arch aarch64; str w0, [sp, 48]);
+                dynasm!(a; .arch aarch64; str w0, [sp, 64]);
                 ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
                 dynasm!(a; .arch aarch64; ldr w1, [x9]; add w1, w1, w2; mov x0, x19);
                 load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
                 emit_escape_if_zero(&mut a, i as u32, off);
-                dynasm!(a; .arch aarch64; ldr w10, [sp, 48]);
+                dynasm!(a; .arch aarch64; ldr w10, [sp, 64]);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
                 terminal = true;
@@ -1551,8 +1571,9 @@ fn emit_block(
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 48]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 80
         ; ret
         ; ->exit_abs:
     );
@@ -1562,8 +1583,9 @@ fn emit_block(
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 48]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 80
         ; ret
     );
     let start = dynasmrt::AssemblyOffset(0);
@@ -1621,16 +1643,67 @@ fn emit_load(
     off: u32,
 ) {
     emit_ea(a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp); // w2 = off
-                                                                         // ---- TLBヒットのインライン高速路 (F1d-d、32bitのみ) ----
+                                                                         // ---- fastmem線形ミラー路 (ADR-0026 段2、全幅・CPL3も速い道) ----
                                                                          //
-                                                                         // translate_forのヒット路 (カーネル・読み) の写し: リング0の読みは
-                                                                         // 権限検査もA/D更新も無い — probe+合成だけで物理に届く。
-                                                                         // 外れる条件 (CPL3 / ページ跨ぎ / TLBミス / RAM外) は全部従来ヘルパへ
-                                                                         // (意味論はそちらが原本。インラインはヒットの近道でしかない)。
-                                                                         // PG無効期 (解凍ステブ) はTLBが空なのでタグ不一致→ヘルパ = 従来どおり。
-                                                                         // 注意: opstatsのtlb_probes計上はこの近道を通ると増えない (計測ビルドの
-                                                                         // JITは近道ぶんだけ過小になる — 定規はJIT offで取る約束)
-    if width == 4 {
+                                                                         // 有効表 (1バイト/線形ページ、bit0=カーネル可読 bit1=ユーザ可読) を引き、
+                                                                         // 立っていればミラー (x23) から直接読む。表を立てるのはtranslate_missの
+                                                                         // 検査を通った変換だけ・剥がすのはソフトTLBと同じ合図 — 意味論は
+                                                                         // TLBヒット読みと同一 (fastmem.rsの契約)。外れは従来ヘルパへ
+    if l.fm_on {
+        // lin = hidden[seg].base + off → w3
+        let base_addr = l.hidden + mem.seg as usize * 12;
+        if let Some(o) = field_off4(machine, base_addr) {
+            dynasm!(a; .arch aarch64; ldr w3, [x19, o]);
+        } else {
+            mov_abs(a, 9, base_addr as u64);
+            dynasm!(a; .arch aarch64; ldr w3, [x9]);
+        }
+        dynasm!(a; .arch aarch64; add w3, w3, w2);
+        // ページ跨ぎ (幅による)。1バイトは跨げない
+        if width == 4 {
+            dynasm!(a; .arch aarch64; and w4, w3, 0xFFF; cmp w4, 0xFFC; b.hi >slow);
+        } else if width == 2 {
+            dynasm!(a; .arch aarch64; and w4, w3, 0xFFF; cmp w4, 0xFFE; b.hi >slow);
+        }
+        // 要求ビット = 1 << (CPL==3)。カーネルはbit0、ユーザはbit1
+        let cs_addr = l.sregs + 2;
+        let d = cs_addr.wrapping_sub(machine);
+        if d < 4096 {
+            let d = d as u32;
+            dynasm!(a; .arch aarch64; ldrb w4, [x19, d]);
+        } else {
+            mov_abs(a, 9, cs_addr as u64);
+            dynasm!(a; .arch aarch64; ldrb w4, [x9]);
+        }
+        dynasm!(a; .arch aarch64
+            ; and w4, w4, 3
+            ; cmp w4, 3
+            ; cset w4, eq                // 0=カーネル / 1=ユーザ
+            ; lsr w5, w3, 12             // 線形ページ番号
+            ; ldrb w6, [x24, w5, uxtw]   // 有効表
+            ; lsr w6, w6, w4
+            ; tbz w6, 0, >slow
+            ; add x9, x23, w3, uxtw      // ミラー + lin
+        );
+        match width {
+            1 => dynasm!(a; .arch aarch64; ldrb w0, [x9]),
+            2 => dynasm!(a; .arch aarch64; ldrh w0, [x9]),
+            _ => dynasm!(a; .arch aarch64; ldr w0, [x9]),
+        }
+        dynasm!(a; .arch aarch64; b >done; slow:);
+        // ミラー外れ → 従来ヘルパ (下の共通コード)。TLBインライン路は
+        // fastmem有効時は重ねない (二重の速い道はI-cacheの無駄)
+    }
+    // ---- TLBヒットのインライン高速路 (F1d-d、32bitのみ) ----
+    //
+    // translate_forのヒット路 (カーネル・読み) の写し: リング0の読みは
+    // 権限検査もA/D更新も無い — probe+合成だけで物理に届く。
+    // 外れる条件 (CPL3 / ページ跨ぎ / TLBミス / RAM外) は全部従来ヘルパへ
+    // (意味論はそちらが原本。インラインはヒットの近道でしかない)。
+    // PG無効期 (解凍ステブ) はTLBが空なのでタグ不一致→ヘルパ = 従来どおり。
+    // 注意: opstatsのtlb_probes計上はこの近道を通ると増えない (計測ビルドの
+    // JITは近道ぶんだけ過小になる — 定規はJIT offで取る約束)
+    if width == 4 && !l.fm_on {
         // la = hidden[seg].base + off
         let base_addr = l.hidden + mem.seg as usize * 12;
         if let Some(o) = field_off4(machine, base_addr) {
