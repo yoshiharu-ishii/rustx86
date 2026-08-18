@@ -82,8 +82,8 @@ fn main() {
             }
             #[cfg(all(unix, not(target_arch = "wasm32")))]
             if let Some(fm) = &m.fastmem {
-                let (now, fills, flushes) = fm.stats();
-                println!("fastmem: 群{now}張り (累積{fills} 全剥がし{flushes}回)");
+                let (now, g, fills, flushes) = fm.stats();
+                println!("fastmem: 群{now}張り (うちG{g}・累積{fills}・フラッシュ{flushes}回)");
             }
             return;
         }

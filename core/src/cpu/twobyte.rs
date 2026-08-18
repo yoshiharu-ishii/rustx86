@@ -231,11 +231,21 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     2 => m.cpu.cr2 = v,
                     3 => {
                         // ページディレクトリが替わる = アドレス空間の切り替え。
-                        // 古い写しは全部捨てる (プロセス切り替えの心臓部)
+                        // **グローバルページ (PGE) は生き延びる**のが正規の
+                        // 意味論 — カーネル空間の写しを守る (非Gだけ捨てる)
                         m.cpu.cr3 = v;
-                        m.tlb_flush();
+                        m.tlb_flush_nonglobal();
                     }
-                    4 => m.cpu.cr4 = v,
+                    4 => {
+                        // PGE/PSE等のページング関連ビットが動いたらG込みで
+                        // 全捨て (CR4.PGEトグルはGを流す唯一の全消し手段)。
+                        // mov cr4は稀なので変化があれば無条件に捨てて安全側
+                        let changed = m.cpu.cr4 != v;
+                        m.cpu.cr4 = v;
+                        if changed {
+                            m.tlb_flush();
+                        }
+                    }
                     _ => panic!("unimplemented write of CR{cr}"),
                 }
             }
@@ -305,7 +315,9 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.regs[AX] = 0x0633;
                     m.cpu.regs[BX] = 0;
                     m.cpu.regs[CX] = 0;
-                    // FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2。
+                    // FPU|TSC|CX8|PGE|CMOV|MMX|FXSR|SSE|SSE2。
+                    // PGE (bit13) はfastmem/TLBのG保持とセットで名乗る
+                    // (ADR-0026追記 — mov cr3でカーネル写しが生き延びる)。
                     // FXSRを名乗る = カーネルはFXSAVE/FXRSTORでXMMを退避し始める。
                     // MMXはSSE2を名乗った時点で事実上必須 (libcryptoはCPUIDの
                     // MMXビットを見ずに使う)。名乗った分は全部実装してある
@@ -313,6 +325,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.regs[DX] = (1 << 0)
                         | (1 << 4)
                         | (1 << 8)
+                        | (1 << 13)
                         | (1 << 15)
                         | (1 << 23)
                         | (1 << 24)

@@ -45,8 +45,10 @@ pub struct Fastmem {
     ram_len: usize,
     /// ホストページ/ゲストページ比 (1 or 4)。張る単位 = この数の連続ページ
     group: usize,
-    /// 張った群の先頭ページ番号 (剥がし用)。順序不問
-    mapped: RefCell<Vec<u32>>,
+    /// 張った群の先頭ページ番号 (剥がし用、G/非Gで別居 —
+    /// mov cr3の非Gフラッシュが**Gの山を歩かない**ため)。順序不問
+    mapped_g: RefCell<Vec<u32>>,
+    mapped_ng: RefCell<Vec<u32>>,
     /// 観測: 累積の張り/全剥がし回数
     fills: Cell<u64>,
     flushes: Cell<u64>,
@@ -84,7 +86,8 @@ impl Fastmem {
                 fd,
                 ram_len,
                 group: host_page / 4096,
-                mapped: RefCell::new(Vec::new()),
+                mapped_g: RefCell::new(Vec::new()),
+                mapped_ng: RefCell::new(Vec::new()),
                 fills: Cell::new(0),
                 flushes: Cell::new(0),
             })
@@ -105,20 +108,23 @@ impl Fastmem {
     ///
     /// # 群の判定
     /// `lin_page` は群整列済みの線形ページ番号 (呼び手が保証)。
-    /// siblings[i] = 群内iページ目の (物理ページ番号, user_ok)。
-    /// 全員が物理連続・群整列で、RAM内に収まるときだけ張る
-    pub fn note_fill(&self, lin_page: u32, siblings: &[(u32, bool)]) {
+    /// siblings[i] = 群内iページ目の (物理ページ番号, user_ok, global)。
+    /// 全員が物理連続・群整列で、RAM内に収まるときだけ張る。
+    /// **全員G**のときだけ群をグローバル扱い (mov cr3を生き延びる)
+    pub fn note_fill(&self, lin_page: u32, siblings: &[(u32, bool, bool)]) {
         debug_assert_eq!(siblings.len(), self.group);
         // 物理: 群整列 + 連続
         let base_pfn = siblings[0].0;
         if base_pfn as usize % self.group != 0 {
             return;
         }
-        for (i, &(pfn, _)) in siblings.iter().enumerate() {
+        for (i, &(pfn, _, _)) in siblings.iter().enumerate() {
             if pfn != base_pfn + i as u32 {
                 return;
             }
         }
+        let global = siblings.iter().all(|&(_, _, g)| g);
+        // (張り先の記録は末尾で — mmap成功後)
         let phys = (base_pfn as usize) << 12;
         let len = self.group << 12;
         if phys + len > self.ram_len {
@@ -139,11 +145,15 @@ impl Fastmem {
                 return;
             }
         }
-        for (i, &(_, user_ok)) in siblings.iter().enumerate() {
+        for (i, &(_, user_ok, _)) in siblings.iter().enumerate() {
             let ok = OK_KERNEL_R | if user_ok { OK_USER_R } else { 0 };
             self.ok[lin_page as usize + i].set(ok);
         }
-        self.mapped.borrow_mut().push(lin_page);
+        if global {
+            self.mapped_g.borrow_mut().push(lin_page);
+        } else {
+            self.mapped_ng.borrow_mut().push(lin_page);
+        }
         self.fills.set(self.fills.get() + 1);
     }
 
@@ -151,8 +161,9 @@ impl Fastmem {
     /// 被せ、有効表は張った群だけ消す (1MiBのmemsetを毎回はしない)
     pub fn flush_all(&self) {
         self.flushes.set(self.flushes.get() + 1);
-        let mut mapped = self.mapped.borrow_mut();
-        if mapped.is_empty() {
+        let mut mapped_g = self.mapped_g.borrow_mut();
+        let mut mapped = self.mapped_ng.borrow_mut();
+        if mapped.is_empty() && mapped_g.is_empty() {
             return;
         }
         unsafe {
@@ -166,7 +177,30 @@ impl Fastmem {
             );
             debug_assert!(p != libc::MAP_FAILED);
         }
-        for lin_page in mapped.drain(..) {
+        for lin_page in mapped.drain(..).chain(mapped_g.drain(..)) {
+            for i in 0..self.group {
+                self.ok[lin_page as usize + i].set(0);
+            }
+        }
+    }
+
+    /// 非グローバルだけ剥がす (mov cr3 — PGEの正規の意味論)。
+    /// G群は写像も有効表も生かす: カーネル半分がプロセス切替を生き延びる
+    pub fn flush_nonglobal(&self) {
+        self.flushes.set(self.flushes.get() + 1);
+        let len = self.group << 12;
+        for lin_page in self.mapped_ng.borrow_mut().drain(..) {
+            unsafe {
+                let p = libc::mmap(
+                    self.mirror.add((lin_page as usize) << 12) as *mut libc::c_void,
+                    len,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+                    -1,
+                    0,
+                );
+                debug_assert!(p != libc::MAP_FAILED);
+            }
             for i in 0..self.group {
                 self.ok[lin_page as usize + i].set(0);
             }
@@ -193,21 +227,20 @@ impl Fastmem {
         for i in 0..self.group {
             self.ok[group_head as usize + i].set(0);
         }
-        self.mapped.borrow_mut().retain(|&g| g != group_head);
+        self.mapped_g.borrow_mut().retain(|&g| g != group_head);
+        self.mapped_ng.borrow_mut().retain(|&g| g != group_head);
     }
 
-    /// 観測: (今張っている群, 累積で張った群, 全剥がし回数)
-    pub fn stats(&self) -> (usize, u64, u64) {
-        (
-            self.mapped.borrow().len(),
-            self.fills.get(),
-            self.flushes.get(),
-        )
+    /// 観測: (今張っている群, うちG群, 累積で張った群, フラッシュ回数)
+    pub fn stats(&self) -> (usize, usize, u64, u64) {
+        let g = self.mapped_g.borrow().len();
+        let ng = self.mapped_ng.borrow().len();
+        (g + ng, g, self.fills.get(), self.flushes.get())
     }
 
     /// 観測: 張っている群の数
     pub fn mapped_groups(&self) -> usize {
-        self.mapped.borrow().len()
+        self.mapped_g.borrow().len() + self.mapped_ng.borrow().len()
     }
 
     /// ホストページ/ゲストページ比 (張る単位)
