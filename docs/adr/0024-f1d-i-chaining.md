@@ -1,6 +1,6 @@
 # 0024: F1d-i — TB chaining (直接ブロック連結) と決定性の契約
 
-日付: 2026-08-18 / 状態: **実装検証の上で不採用** (実装は feat/f1d-i-chaining ブランチに寝かせ — 下の追記参照) / 関係: [0023](0023-f1d-g-density.md), [0022](0022-cpu-round3-before-gfx.md)
+日付: 2026-08-18 / 状態: **実装検証の上で不採用** (実装はタグ **exp/f1d-i-chaining** に寝かせ — 下の追記参照) / 関係: [0023](0023-f1d-g-density.md), [0022](0022-cpu-round3-before-gfx.md)
 
 ## 背景
 
