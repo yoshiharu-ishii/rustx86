@@ -1081,3 +1081,18 @@ coreは無傷 — wasm/src/jit.rsだけ。
 gcc窓のwasm JITが-13%赤いのは窓内10万回級の焼き直しが原因で、次に
 効かせるならbakeのworker退避か焼き記録の持ち越し (ブラウザ側の玉)。
 還流自体は構造的に仕事を減らすだけ (退行なし・門番2コース緑) なので採用
+
+## 2026-08-18: F2 fastmem 段1 — RAMの置き場を差し替える (挙動不変)
+
+ADR-0026採用 (ユーザー裁定「互換を壊さないなら」)。段1はGuestRam抽象:
+
+- `Machine::mem` を `Vec<u8>` → `GuestRam` (Deref<[u8]>) に。既定/wasmはVecの
+  まま、unixネイティブ+`RUSTX86_FASTMEM=1`で**4GiB PROT_NONE予約の先頭に
+  共有バッキング (Linux=memfd / macOS=無名化shm) を実写像**
+- 共有バッキングなのは第2段の線形ミラー (同一物理ページの多重仮想写像) の
+  ため — Vec (私有匿名) ではミラーが張れない
+- 検証: fastmem on/off × JIT on/off の4通りで指紋完全一致 (jboot 970M・
+  jcmd 518M)、204テスト緑、wasmチェック緑。**置き場だけ変えて挙動不変**
+
+次 (段2): 線形ミラーの遅延構築・TLBフラッシュ点での差分剥がし・
+Dirty遅延マップ・SMC/VRAMのページ保護化 (note_writeの意味を保護で写す)
