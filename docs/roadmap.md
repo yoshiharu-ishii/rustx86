@@ -54,7 +54,7 @@ RTL8029をLinuxに見せるには設定空間の列挙が要ったからであ�
 | 4 | **32bit Linuxが起動する** ← 当初の完成ライン | ✅ **完了** — **互換ピラミッドL1全緑** (test386完全合格、CI常設 2026-08-12)。virtio-blk は Tier 8 へ移した (Linuxはinitramfsで起動するのでディスクは要らない) |
 | 5 | **そのLinuxから本物のホストにpingが届く** | ✅ ping・http・**https** まで到達 (2026-08-14)。5d 本測定が半分残り |
 | — | **CPU第3ラウンド (F1d)** — 税なしJITで200 MIPS圏へ | ✅ **完結** (2026-08-18) — テンプレートJIT a〜h + tick=256 ([ADR-0025](adr/0025-tick-256.md)) で**ブート133 MIPS・gcc窓でもJIT優位・総合-17%**。chainingは不採用の学び ([ADR-0024](adr/0024-f1d-i-chaining.md))。残り鉱脈は [jit-roadmap3](reference/jit-roadmap3.md) |
-| — | **F2: fastmem** — ホストMMUでゲストメモリを写像、2倍級 | ← **次はここ** (2026-08-18 決定、[ADR-0026](adr/0026-fastmem.md)。opt-in・意味論不変・SMCは保護で両立。macOS 16KiBページ制約はLinux/WSL2定規と分けて裁く) |
+| — | **F2: fastmem** — ホストMMUでゲストメモリを写像 | **段2+PGEまで実装検証の上で不採用・寝かせ** (2026-08-18、[ADR-0026](adr/0026-fastmem.md)追記) — 正しさ全緑・G保持も設計どおり動いたが、検査前置き×全ロード > ヒット利得 (macOS 16KiB制約でユーザー空間が張れない)。再訪条件はADR。段1 (GuestRam抽象) はマージ済みのまま無害。**次の10%級はレジスタ/cc常駐化バンドル** ([jit-roadmap3](reference/jit-roadmap3.md)) |
 | 6 | **GUIと音** — DOOMが音付きで遊べる → その先にX・古典デスクトップ | F1dの後 |
 | 7 | **ネイティブ化** — M1 Mac / Windows 10、ヘッドレスランナー | |
 | 8 | **マイクロVM** — snapshot-fork、自作LB + Locustで50〜100台 | |
@@ -72,8 +72,8 @@ Tierとは別に、**「動いた」と叫べる節目**を順に刻む。tetris
                       その後Part 2 (ADR-0020/0021) でcold外し-19% → **105 MIPS温間**
                       (2026-08-16、凍結970M定規で9.2s)。インタプリタの土俵はここで使い切り
 2. 200 MIPS        — 半分到達: F1d完結で**133 MIPS** (2026-08-18、ADR-0025)。
-                      残りの登り道は **F2 fastmem** (2倍級、ADR-0026) —
-                      ホストMMU写像でロード/ストアを1-2命令へ。
+                      F2 fastmemは実装検証の上で寝かせ (ADR-0026追記) —
+                      残りの登り道はレジスタ/cc常駐化 (jit-roadmap3、窓-6〜8%)。
                       6h ReactOS (150〜200 MIPS級) と Tier 8 の前提速度
 3. ANSI端末DOOM     — グラフィックス無しで刻む中間マイルストーン。
                       doomgeneric + ANSIバックエンドをi386静的ビルドして initramfs へ。
