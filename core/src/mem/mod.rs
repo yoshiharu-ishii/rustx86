@@ -11,6 +11,9 @@ struct Walk {
     base: u32,
     writable: bool,
     user_ok: bool,
+    /// PTE/PDEのGビット (PGE、bit8)。グローバルページはmov cr3を生き延びる
+    /// のがx86の正規の意味論 — TLB/fastmemの非グローバルフラッシュが見る
+    global: bool,
     /// PDEの物理番地 (Aビットの宛先)
     pde_addr: u32,
     /// 葉 (PTE、4MBページならPDE) の物理番地 (A/Dビットの宛先)
@@ -31,6 +34,24 @@ impl Machine {
         #[cfg(all(unix, not(target_arch = "wasm32")))]
         if let Some(fm) = &self.fastmem {
             fm.flush_all();
+        }
+    }
+
+    /// mov cr3 用: **グローバルページ (Gビット) 以外**を捨てる。
+    /// PGE (CR4.7) 有効時のx86の正規の意味論 — カーネル空間 (LinuxはGで張る)
+    /// の写しがプロセス切替を生き延びる。G込みで全部捨てるのは tlb_flush
+    /// (CR0のPG変更・CR4のPGEトグル・スナップショット復元)
+    pub fn tlb_flush_nonglobal(&self) {
+        for slot in &self.tlb {
+            let mut e = slot.get();
+            if e.base_flags & 8 == 0 {
+                e.tag = TLB_INVALID;
+                slot.set(e);
+            }
+        }
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        if let Some(fm) = &self.fastmem {
+            fm.flush_nonglobal();
         }
     }
 
@@ -245,7 +266,8 @@ impl Machine {
             base_flags: w.base
                 | w.writable as u32
                 | ((w.user_ok as u32) << 1)
-                | ((write as u32) << 2),
+                | ((write as u32) << 2)
+                | ((w.global as u32) << 3),
             leaf: w.leaf_addr,
         });
         self.queue_ad(w.pde_addr, 0x20);
@@ -272,7 +294,7 @@ impl Machine {
         if fm.is_mapped(head) {
             return;
         }
-        let mut sibs = [(0u32, false); 4];
+        let mut sibs = [(0u32, false, false); 4];
         for (i, s) in sibs.iter_mut().enumerate().take(group) {
             let lp = head + i as u32;
             let slot = (lp as usize) & (TLB_SLOTS - 1);
@@ -280,7 +302,11 @@ impl Machine {
             if e.tag != lp {
                 return; // 兄弟がまだ — その兄弟のミスがまた試す
             }
-            *s = (e.base_flags >> 12, e.base_flags & 2 != 0);
+            *s = (
+                e.base_flags >> 12,
+                e.base_flags & 2 != 0,
+                e.base_flags & 8 != 0,
+            );
         }
         fm.note_fill(head, &sibs[..group]);
     }
@@ -323,6 +349,7 @@ impl Machine {
                 base,
                 writable: pde & 2 != 0,
                 user_ok: pde & 4 != 0,
+                global: pde & 0x100 != 0 && self.cpu.cr4 & 0x80 != 0,
                 pde_addr,
                 leaf_addr: pde_addr,
             });
@@ -338,6 +365,7 @@ impl Machine {
             base: pte & !0xFFF,
             writable: pde & 2 != 0 && pte & 2 != 0,
             user_ok: pde & 4 != 0 && pte & 4 != 0,
+            global: pte & 0x100 != 0 && self.cpu.cr4 & 0x80 != 0,
             pde_addr,
             leaf_addr: pte_addr,
         })
