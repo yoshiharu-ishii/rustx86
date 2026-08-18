@@ -48,7 +48,8 @@ fn main() {
 
     let t0 = std::time::Instant::now();
     let mut n: u64 = 0;
-    while n < 3_000_000_000 {
+    // tick=256 (ADR-0025) でゲスト時間待ちの命令数が伸びる — 予算は余裕を持つ
+    while n < 12_000_000_000 {
         n += m.run(10_000_000);
         if m.trap.is_some() {
             panic!("trap: {:?}", m.trap);
@@ -85,5 +86,15 @@ fn main() {
             break;
         }
     }
+    eprintln!(
+        "--- シリアルの尻 (死因の現場) — n={}M halted={} ---",
+        n / 1_000_000,
+        m.halted
+    );
+    let tx = &m.devices.uart.tx;
+    eprintln!(
+        "{}",
+        String::from_utf8_lossy(&tx[tx.len().saturating_sub(1500)..])
+    );
     panic!("シェルに届かなかった");
 }

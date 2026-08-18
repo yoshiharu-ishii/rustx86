@@ -107,7 +107,12 @@ fn elks_tetris_tempo() {
     // ブラウザのフレームループを模す: 60fps相当の予算をCHUNK刻みで消費。
     // 仮想時間で3秒ぶん。read の入口 (int 0x80, ax=3, bx=0) と戻り番地を
     // 見張り、-EINTR (=-4) の戻り = SIGALRM に切られた回数を数える
-    const INSTR_PER_GUEST_MS: u64 = 1_193_182 * 64 / 1000;
+    // ゲスト1msぶんの命令数 = PITクロック(1.19MHz)/1000 × (命令/PITクロック)。
+    // 後者は tick粒度/PITクロック毎tick の**比** — 粒度を変えても比が契約
+    // (ADR-0025)。どちらかをハードコードすると張り替えで無音のズレになる
+    const INSTR_PER_GUEST_MS: u64 = 1_193_182
+        * (rustx86_core::INSTRUCTIONS_PER_TICK / rustx86_core::PIT_CLOCKS_PER_TICK) as u64
+        / 1000;
     const CHUNK: u64 = 6_000;
     let mut alarms = 0u32;
     let mut ret_watch: Option<(u16, u32)> = None;
