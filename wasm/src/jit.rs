@@ -392,7 +392,7 @@ impl Gen<'_> {
     /// ADC/SBB (cin絡み)・IncDec (CF退避) は従来どおりヘルパ。
     /// 正しさの門番: jboot/jcmd/jit-checkのon/offビット同一 + gcc課程差分
     fn emit_cond_inline(&mut self, kind: u8, cc: u8) -> bool {
-        if cc >= 10 && cc <= 11 {
+        if (10..=11).contains(&cc) {
             return false; // パリティは遅延評価器だけが知っている
         }
         let neg = cc & 1 != 0; // 奇数cc = 偶数の否定
