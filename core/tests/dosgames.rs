@@ -123,12 +123,16 @@ fn zmiy_scrolls_the_window_with_the_snake() {
         "蛇が上端付近にいる間は窓を動かさないはず"
     );
 
-    // 下へ走らせると窓が追いかけてくる
+    // 下へ走らせると窓が追いかけてくる。予算はゲスト時間で決まる —
+    // 蛇の歩みはPIT由来なので「命令/PITクロック」の比で換算する (ADR-0025。
+    // 粒度だけ見て4倍にした初版は、PIT比例修正後に4倍過剰になった)
+    let per_key = 625_000u64
+        * (rustx86_core::INSTRUCTIONS_PER_TICK / rustx86_core::PIT_CLOCKS_PER_TICK) as u64;
     let mut seen = vec![];
     for _ in 0..12 {
         m.devices.keyboard.key("ArrowDown", true);
         m.devices.keyboard.key("ArrowDown", false);
-        for _ in 0..40_000_000 {
+        for _ in 0..per_key {
             m.step();
         }
         seen.push(m.devices.crtc.start_offset());
