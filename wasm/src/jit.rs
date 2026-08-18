@@ -185,6 +185,11 @@ const I32_SHL: u8 = 0x74;
 const I64_SHR_U: u8 = 0x88;
 const I32_WRAP_I64: u8 = 0xa7;
 const I32_EQZ: u8 = 0x45;
+const I32_LT_S: u8 = 0x48;
+const I32_LT_U: u8 = 0x49;
+const I32_LE_S: u8 = 0x4c;
+const I32_LE_U: u8 = 0x4d;
+const I32_SHR_U: u8 = 0x76;
 const LOCAL_GET: u8 = 0x20;
 const LOCAL_SET: u8 = 0x21;
 const CALL: u8 = 0x10;
@@ -212,6 +217,9 @@ struct Gen<'a> {
     cur_k: u32,
     /// ブロック頭から今の命令までのバイトオフセット (脱出時のip合わせ)
     cur_ip_off: u32,
+    /// g1 (ADR-0023の還流): 次opが観測前にccを完全上書きするなら
+    /// このopの材料6ストアを省く (エミット時に決まる — 実行時状態なし)
+    skip_cc: bool,
 }
 
 impl Gen<'_> {
@@ -360,18 +368,174 @@ impl Gen<'_> {
             _ => self.code.push(I32_XOR), // 6 = XOR
         }
         self.local_set(L_R);
-        // cc材料 (インタプリタのset_ccと同じ内容をメモリへ)
-        self.store8_const(self.lay.cc_op, kind);
-        self.store8_const(self.lay.cc_w, 2);
-        self.store_local(self.lay.cc_a, L_A);
-        self.store_local(self.lay.cc_b, L_B);
-        self.store_local(self.lay.cc_cin, L_CIN);
-        self.store_local(self.lay.cc_r, L_R);
+        // cc材料 (インタプリタのset_ccと同じ内容をメモリへ)。
+        // g1: 次opが読む前に完全上書きするなら死んでいる — 書かない
+        if !self.skip_cc {
+            self.store8_const(self.lay.cc_op, kind);
+            self.store8_const(self.lay.cc_w, 2);
+            self.store_local(self.lay.cc_a, L_A);
+            self.store_local(self.lay.cc_b, L_B);
+            self.store_local(self.lay.cc_cin, L_CIN);
+            self.store_local(self.lay.cc_r, L_R);
+        }
         if kind != 7 {
             if let Some(d) = dst {
                 self.store_local(self.reg_addr(d), L_R);
             }
         }
+    }
+
+    /// g2 (ADR-0023の還流): 直前opの材料 (L_A/L_B/L_R、幅32bit) から条件を
+    /// **wasm式で**スタックに積む (0/1)。ホストフラグの代わりに素直な比較で
+    /// 書けるのがwasmの利点 — ARMで諦めたADDのBE/Aもここでは式1つ。
+    /// false = 写像なし (呼び手はcond importへ)。P/NP (パリティ) と
+    /// ADC/SBB (cin絡み)・IncDec (CF退避) は従来どおりヘルパ。
+    /// 正しさの門番: jboot/jcmd/jit-checkのon/offビット同一 + gcc課程差分
+    fn emit_cond_inline(&mut self, kind: u8, cc: u8) -> bool {
+        if cc >= 10 && cc <= 11 {
+            return false; // パリティは遅延評価器だけが知っている
+        }
+        let neg = cc & 1 != 0; // 奇数cc = 偶数の否定
+        match (kind, cc & !1) {
+            // ---- 全kind共通: E/NE は r==0 ----
+            (_, 4) => {
+                self.local_get(L_R);
+                self.code.push(I32_EQZ);
+            }
+            // ---- 全kind共通: S/NS は rの符号ビット ----
+            (_, 8) => {
+                self.local_get(L_R);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+            }
+            // ---- SUB/CMP (5,7): 比較はa,bの素直な大小 ----
+            (5 | 7, 2) => {
+                // B = 借り = a <u b
+                self.local_get(L_A);
+                self.local_get(L_B);
+                self.code.push(I32_LT_U);
+            }
+            (5 | 7, 6) => {
+                // BE = CF|ZF = a <=u b
+                self.local_get(L_A);
+                self.local_get(L_B);
+                self.code.push(I32_LE_U);
+            }
+            (5 | 7, 12) => {
+                // L = SF^OF = a <s b
+                self.local_get(L_A);
+                self.local_get(L_B);
+                self.code.push(I32_LT_S);
+            }
+            (5 | 7, 14) => {
+                // LE = ZF|(SF^OF) = a <=s b
+                self.local_get(L_A);
+                self.local_get(L_B);
+                self.code.push(I32_LE_S);
+            }
+            (5 | 7, 0) => {
+                // O = ((a^b)&(a^r))>>31
+                self.local_get(L_A);
+                self.local_get(L_B);
+                self.code.push(I32_XOR);
+                self.local_get(L_A);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.code.push(I32_AND);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+            }
+            // ---- ADD (0): キャリーは r <u a (cin=0の折り返し判定) ----
+            (0, 2) => {
+                self.local_get(L_R);
+                self.local_get(L_A);
+                self.code.push(I32_LT_U);
+            }
+            (0, 6) => {
+                // BE = CF|ZF = (r <u a) | (r==0)
+                self.local_get(L_R);
+                self.local_get(L_A);
+                self.code.push(I32_LT_U);
+                self.local_get(L_R);
+                self.code.push(I32_EQZ);
+                self.code.push(I32_OR);
+            }
+            (0, 0) => {
+                // O = ((a^r)&(b^r))>>31
+                self.local_get(L_A);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.local_get(L_B);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.code.push(I32_AND);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+            }
+            (0, 12) => {
+                // L = SF^OF = (r>>31) ^ (((a^r)&(b^r))>>31)
+                self.local_get(L_R);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+                self.local_get(L_A);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.local_get(L_B);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.code.push(I32_AND);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+                self.code.push(I32_XOR);
+            }
+            (0, 14) => {
+                // LE = ZF | (SF^OF)
+                self.local_get(L_R);
+                self.code.push(I32_EQZ);
+                self.local_get(L_R);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+                self.local_get(L_A);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.local_get(L_B);
+                self.local_get(L_R);
+                self.code.push(I32_XOR);
+                self.code.push(I32_AND);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+                self.code.push(I32_XOR);
+                self.code.push(I32_OR);
+            }
+            // ---- 論理 (1,4,6): CF=OF=0 ----
+            (1 | 4 | 6, 2) => self.iconst(0), // B = CF = 0 (奇数側は否定で1)
+            (1 | 4 | 6, 0) => self.iconst(0), // O = 0
+            (1 | 4 | 6, 6) => {
+                // BE = ZF
+                self.local_get(L_R);
+                self.code.push(I32_EQZ);
+            }
+            (1 | 4 | 6, 12) => {
+                // L = SF^OF = SF
+                self.local_get(L_R);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+            }
+            (1 | 4 | 6, 14) => {
+                // LE = ZF|SF
+                self.local_get(L_R);
+                self.code.push(I32_EQZ);
+                self.local_get(L_R);
+                self.iconst(31);
+                self.code.push(I32_SHR_U);
+                self.code.push(I32_OR);
+            }
+            _ => return false, // ADC/SBB等はcond importへ
+        }
+        if neg {
+            self.code.push(I32_EQZ); // 0/1の否定
+        }
+        true
     }
 
     fn op(&mut self, op: &JitOp) {
@@ -580,6 +744,32 @@ impl Gen<'_> {
     }
 }
 
+/// 次opが「読む前にccを完全上書きする純レジスタop」か (g1)。
+/// ADC/SBB (CFを読む)・IncDec (CF退避)・メモリ形 (脱出しうる) は含めない
+fn overwrites_cc_pure(op: &JitOp) -> bool {
+    match *op {
+        JitOp::AluRR { kind, .. } | JitOp::AluRI { kind, .. } => kind != 2 && kind != 3,
+        JitOp::TestRR { .. } => true,
+        _ => false,
+    }
+}
+
+/// このopの後、材料 (L_A/L_B/L_R) がローカルに生きているか (g2の前提)。
+/// Some(kind) = alu_core系。メモリ形も完走すればローカルは有効
+/// (脱出したら終端まで来ない)
+fn cc_kind_of(op: &JitOp) -> Option<u8> {
+    match *op {
+        JitOp::AluRR { kind, .. } | JitOp::AluRI { kind, .. } | JitOp::AluRM { kind, .. }
+            if kind != 2 && kind != 3 =>
+        {
+            Some(kind)
+        }
+        JitOp::TestRR { .. } | JitOp::TestMR { .. } => Some(4),
+        JitOp::CmpMR { .. } | JitOp::CmpMI { .. } => Some(7),
+        _ => None,
+    }
+}
+
 /// ブロックをwasmモジュールに焼く。
 /// `machine_addr` は生きているMachineの実アドレス (ヘルパへ焼き込む)
 /// 1ブロックを単独モジュールに包む (テスト用の互換口 — 本番はcompile_batch)
@@ -599,6 +789,7 @@ pub fn compile_body(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec
         maddr: machine_addr,
         cur_k: 0,
         cur_ip_off: 0,
+        skip_cc: false,
     };
 
     // 終端の種類 (出口の形が違う)
@@ -615,6 +806,8 @@ pub fn compile_body(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec
     // そのまま正しい座標で逃げられる
     let mut term = None;
     let mut total_len: u32 = 0;
+    // g2の帳簿: 終端Jcc直前のopが材料をローカルに残したか
+    let mut last_cc: Option<u8> = None;
     for (i, &(len, ref op)) in block.ops.iter().enumerate() {
         g.cur_k = i as u32;
         g.cur_ip_off = total_len;
@@ -624,7 +817,15 @@ pub fn compile_body(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec
             JitOp::Jmp { rel } => term = Some(Term::Jmp { rel }),
             JitOp::CallRel { rel } => term = Some(Term::Call { rel }),
             JitOp::Ret => term = Some(Term::Ret),
-            _ => g.op(op),
+            _ => {
+                // g1: 次opが観測前にccを完全上書きするなら材料ストアは死んでいる
+                g.skip_cc = block
+                    .ops
+                    .get(i + 1)
+                    .is_some_and(|(_, next)| overwrites_cc_pure(next));
+                g.op(op);
+                last_cc = cc_kind_of(op);
+            }
         }
     }
 
@@ -646,15 +847,23 @@ pub fn compile_body(block: &JitBlock, lay: &JitLayout, machine_addr: u32) -> Vec
             g.store_op();
         }
         Some(Term::Jcc { cc, rel }) => {
-            // ip = ip + select(total+rel, total, cond)
+            // ip = ip + select(total+rel, total, cond)。
+            // g2: 直前opの材料がローカルに生きていれば条件をwasm式で —
+            // cond import呼び (Jccは約1/7命令) が消える
             g.iconst(lay.ip as u32);
             g.load(lay.ip);
             g.iconst(total_len.wrapping_add(rel));
             g.iconst(total_len);
-            g.iconst(g.maddr);
-            g.iconst(cc as u32);
-            g.code.push(CALL);
-            uleb(&mut g.code, 1); // import 1 = e.cond
+            let inlined = match last_cc {
+                Some(kind) => g.emit_cond_inline(kind, cc),
+                None => false,
+            };
+            if !inlined {
+                g.iconst(g.maddr);
+                g.iconst(cc as u32);
+                g.code.push(CALL);
+                uleb(&mut g.code, 1); // import 1 = e.cond
+            }
             g.code.push(SELECT);
             g.code.push(I32_ADD);
             g.store_op();
