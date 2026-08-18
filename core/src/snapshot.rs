@@ -439,7 +439,7 @@ impl Machine {
         };
         m.pic_service = m.devices.pic[0].has_pending();
         m.tlb_flush(); // 復元でメモリもcr3も総入れ替え — 古い写しは無効
-        m.mem = mem;
+        m.mem = crate::GuestRam::from_vec(mem);
         // デコード済み命令の写しも同じ理由で総入れ替え (RAMサイズも変わりうる)
         m.dcache = cpu::dcache::DecodeCache::new(m.mem.len());
         m.disk = if r.bool()? {
