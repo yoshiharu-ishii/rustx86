@@ -11,3 +11,7 @@ opstats = []
 
 [dev-dependencies]
 rustx86-disasm = { path = "../disasm" }
+
+# fastmem (ADR-0026) の写像はunixネイティブのみ — wasmビルドには入らない
+[target.'cfg(all(unix, not(target_arch = "wasm32")))'.dependencies]
+libc = "0.2"

@@ -1,4 +1,6 @@
 pub mod bios;
+mod guest_ram;
+pub use guest_ram::GuestRam;
 pub mod boot;
 pub mod bus;
 pub mod cp437;
@@ -126,7 +128,7 @@ pub const PIT_CLOCKS_PER_TICK: u32 = INSTRUCTIONS_PER_TICK / 64;
 /// 本物のBIOSは実装せず、INT命令をフックして最小限のサービスだけ提供する。
 pub struct Machine {
     pub cpu: Cpu,
-    pub mem: Vec<u8>,
+    pub mem: GuestRam,
     /// 保留中のハードウェア割り込みベクタ。IFが立っている命令境界で受け付ける。
     /// Tier 2a で 8259 PIC がここへ挙手する
     pub pending_irq: Option<u8>,
@@ -351,7 +353,7 @@ impl Machine {
     pub fn with_profile(profile: MachineProfile) -> Self {
         Self {
             cpu: Cpu::new(),
-            mem: vec![0; profile.ram_bytes],
+            mem: GuestRam::new(profile.ram_bytes),
             pending_irq: None,
             pic_service: false,
             pending_fault: std::cell::Cell::new(None),
