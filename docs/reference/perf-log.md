@@ -1059,3 +1059,25 @@ i chaining (不採用の学び) → tick=256。最終形: **ブート133 MIPS・
 JIT優位・決定性ビット同一・門番4種 (jboot/jcmd/jit-check/cond_inline)**。
 残り玉は台帳 (jit-roadmap2.md): レジスタ固定写像・間接分岐キャッシュ・
 ストアTLBインライン・wasmへのg1/g2還流
+
+## 2026-08-18: wasm還流 (g1/g2) — 正しさ緑・性能同着、wasmの敵は別に居る
+
+ユーザーのブラウザ実測「起動はJIT OFFが速い・gccは変わらない」を受けて、
+ネイティブのg1 (cc死储省略)・g2 (条件インライン) をwasm生成器へ還流した。
+coreは無傷 — wasm/src/jit.rsだけ。
+
+- wasmにはホストフラグが無いので、g2は材料 (L_A/L_B/L_Rローカル) からの
+  **wasm式** (i32.lt_u / le_s / eqz / xor-and-shr…) で条件を直接計算し、
+  cond importの呼びを消す。ARMで諦めたADDのBE/A (CF|ZF) も式1つで書けた。
+  P/NPとADC/SBBは従来どおりimport
+- 新しい定規 **tools/webtest/gcc-check.mjs** (wasm版jcmd): gcc課程の
+  窓命令数+シリアルFNVをon/offで差分。**526,000,000命令・FNV完全一致** —
+  条件式の正しさはjit-check (ブート1.3G) と合わせて2コースで証明
+
+判定 (node、on対onの新旧A/B): **gcc窓もブートも同着** (窓 50.9/50.9 vs
+50.1/51.3 MIPS、ブート15.8-17.5 vs 16.1-16.4s)。F1d-hと同型の結末 —
+条件import (~1/7命令) は小さい税で、wasmの支配税は
+**bake (compile_bodyがメインスレッド) + 据え付け (WebAssembly.Module)**。
+gcc窓のwasm JITが-13%赤いのは窓内10万回級の焼き直しが原因で、次に
+効かせるならbakeのworker退避か焼き記録の持ち越し (ブラウザ側の玉)。
+還流自体は構造的に仕事を減らすだけ (退行なし・門番2コース緑) なので採用
