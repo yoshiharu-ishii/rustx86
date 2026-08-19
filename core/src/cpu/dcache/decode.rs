@@ -105,6 +105,7 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
     let mut i = 0usize;
     let mut seg_override: Option<u8> = None;
     let mut o16 = false;
+    let mut rep: Option<u8> = None;
 
     // プレフィクス。0x67/REPが来たら対象外 (従来経路が観測ごと面倒を見る)。
     // 0x66 (16bitオペランド) は受ける — 従来経路落ちの74%が0x66だった
@@ -123,7 +124,10 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             // LOCK: 実行の意味は持たない (シングルコア) が、付けてよい命令かの
             // #UD検査があるので従来経路に任せる (稀なので速さの損は無い)
             0xF0 => return None,
-            0x67 | 0xF2 | 0xF3 => return None,
+            0x67 => return None,
+            // REP/REPNE: ストリング命令ならStrRepで受ける (それ以外は従来経路
+            // — SSE系の0xF2/F3プレフィクス用途は語彙外)
+            0xF2 | 0xF3 => rep = Some(x),
             _ => break x,
         }
         if i >= 15 {
@@ -133,6 +137,14 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
     // 0x66つきで語彙に居るのは mov r16 (89/8B) だけ。他は従来経路へ
     if o16 && op != 0x89 && op != 0x8B {
         return None;
+    }
+    // REPつきで語彙に居るのはストリング命令 (A4-A7/AA-AF) だけ。
+    // INS/OUTS (6C-6F) はio_permittedがtrap_ipを使うので従来経路のまま
+    if rep.is_some() && !matches!(op, 0xA4..=0xA7 | 0xAA..=0xAF) {
+        return None;
+    }
+    if rep.is_some() && o16 {
+        return None; // 0x66+REPは稀 — 幅の帳尻は従来経路に任せる
     }
 
     let uop = match op {
@@ -253,10 +265,15 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
         }
         // REPなしの単発ストリング命令。意味論は従来の string::exec に丸ごと
         // 委譲する (二重実装しない)。REP付きはプレフィクスで弾かれ従来経路へ
-        0xA4..=0xA7 | 0xAA..=0xAF => Uop::StrOne {
-            op,
-            seg: seg_override.map(|s| s as i8).unwrap_or(-1),
-        },
+        0xA4..=0xA7 | 0xAA..=0xAF => {
+            let seg = seg_override.map(|s| s as i8).unwrap_or(-1);
+            match rep {
+                // REP付き: 意味論は従来のstring::execに丸ごと委譲 (ADR-0027)。
+                // 勘定は従来どおり「REP全体=1命令」— 基線不変
+                Some(r) => Uop::StrRep { op, seg, rep: r },
+                None => Uop::StrOne { op, seg },
+            }
+        }
         0x8D => {
             let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
             match rm {

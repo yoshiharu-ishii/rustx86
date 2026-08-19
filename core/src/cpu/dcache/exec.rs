@@ -77,9 +77,11 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::ShiftRmImm { rm, .. }
         | Uop::ShiftRmCl { rm, .. } => mem(rm),
         // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
-        Uop::MovAMoffs { .. } | Uop::Mov8AMoffs { .. } | Uop::Grp5 { .. } | Uop::StrOne { .. } => {
-            true
-        }
+        Uop::MovAMoffs { .. }
+        | Uop::Mov8AMoffs { .. }
+        | Uop::Grp5 { .. }
+        | Uop::StrOne { .. }
+        | Uop::StrRep { .. } => true,
     }
 }
 
@@ -294,6 +296,22 @@ fn cold_imul(m: &mut Machine, reg: u8, rm: Rm) {
     let ext = (r as i32 as i64) != r;
     m.cpu.set_flag(CF, ext);
     m.cpu.set_flag(OF, ext);
+}
+
+#[cold]
+#[inline(never)]
+fn cold_strrep(m: &mut Machine, op: u8, seg: i8, rep: u8) {
+    // REP付きストリング。cold_stroneと同形でrepだけ足す — bulk一括化
+    // (string.rs) も割り込み受付粒度 (REP完走後) も従来経路と同一
+    let d = Decoder {
+        seg_override: if seg >= 0 { Some(seg as usize) } else { None },
+        rep: Some(rep),
+        opsize32: true,
+        addrsize32: true,
+        p66: false,
+        lock: false,
+    };
+    string::exec(m, &d, op);
 }
 
 #[cold]
@@ -754,6 +772,7 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
         }
         Uop::ImulRRm { reg, rm } => cold_imul(m, reg, rm),
         Uop::StrOne { op, seg } => cold_strone(m, op, seg),
+        Uop::StrRep { op, seg, rep } => cold_strrep(m, op, seg, rep),
     }
 }
 
