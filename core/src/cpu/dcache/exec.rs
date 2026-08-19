@@ -300,15 +300,16 @@ fn cold_imul(m: &mut Machine, reg: u8, rm: Rm) {
 
 #[cold]
 #[inline(never)]
-fn cold_strrep(m: &mut Machine, op: u8, seg: i8, rep: u8) {
+fn cold_strrep(m: &mut Machine, op: u8, seg: i8, rep: u8, o16: bool) {
     // REP付きストリング。cold_stroneと同形でrepだけ足す — bulk一括化
-    // (string.rs) も割り込み受付粒度 (REP完走後) も従来経路と同一
+    // (string.rs) も割り込み受付粒度 (REP完走後) も従来経路と同一。
+    // o16 (movsw等) は幅をひっくり返すだけ — 32bitコード既定32→16
     let d = Decoder {
         seg_override: if seg >= 0 { Some(seg as usize) } else { None },
         rep: Some(rep),
-        opsize32: true,
+        opsize32: !o16,
         addrsize32: true,
-        p66: false,
+        p66: o16,
         lock: false,
     };
     string::exec(m, &d, op);
@@ -316,14 +317,14 @@ fn cold_strrep(m: &mut Machine, op: u8, seg: i8, rep: u8) {
 
 #[cold]
 #[inline(never)]
-fn cold_strone(m: &mut Machine, op: u8, seg: i8) {
+fn cold_strone(m: &mut Machine, op: u8, seg: i8, o16: bool) {
     // 単発ストリング命令。従来の string::exec に丸ごと委譲 (二重実装しない)
     let d = Decoder {
         seg_override: if seg >= 0 { Some(seg as usize) } else { None },
         rep: None,
-        opsize32: true,
+        opsize32: !o16,
         addrsize32: true,
-        p66: false,
+        p66: o16,
         lock: false,
     };
     string::exec(m, &d, op);
@@ -771,8 +772,8 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             m.cpu.regs[reg as usize] = v as u32;
         }
         Uop::ImulRRm { reg, rm } => cold_imul(m, reg, rm),
-        Uop::StrOne { op, seg } => cold_strone(m, op, seg),
-        Uop::StrRep { op, seg, rep } => cold_strrep(m, op, seg, rep),
+        Uop::StrOne { op, seg, o16 } => cold_strone(m, op, seg, o16),
+        Uop::StrRep { op, seg, rep, o16 } => cold_strrep(m, op, seg, rep, o16),
     }
 }
 
