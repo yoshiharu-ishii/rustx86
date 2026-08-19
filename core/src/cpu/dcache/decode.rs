@@ -134,17 +134,16 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             return None;
         }
     };
-    // 0x66つきで語彙に居るのは mov r16 (89/8B) だけ。他は従来経路へ
-    if o16 && op != 0x89 && op != 0x8B {
+    // 0x66つきで語彙に居るのは mov r16 (89/8B) とストリング命令だけ。
+    // 他は従来経路へ (ストリングはブート従来経路落ちの53%が66 A5=movswだった
+    //  — census 2026-08-18、ADR-0027 PR3)
+    if o16 && op != 0x89 && op != 0x8B && !matches!(op, 0xA4..=0xA7 | 0xAA..=0xAF) {
         return None;
     }
     // REPつきで語彙に居るのはストリング命令 (A4-A7/AA-AF) だけ。
     // INS/OUTS (6C-6F) はio_permittedがtrap_ipを使うので従来経路のまま
     if rep.is_some() && !matches!(op, 0xA4..=0xA7 | 0xAA..=0xAF) {
         return None;
-    }
-    if rep.is_some() && o16 {
-        return None; // 0x66+REPは稀 — 幅の帳尻は従来経路に任せる
     }
 
     let uop = match op {
@@ -270,8 +269,13 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             match rep {
                 // REP付き: 意味論は従来のstring::execに丸ごと委譲 (ADR-0027)。
                 // 勘定は従来どおり「REP全体=1命令」— 基線不変
-                Some(r) => Uop::StrRep { op, seg, rep: r },
-                None => Uop::StrOne { op, seg },
+                Some(r) => Uop::StrRep {
+                    op,
+                    seg,
+                    rep: r,
+                    o16,
+                },
+                None => Uop::StrOne { op, seg, o16 },
             }
         }
         0x8D => {
