@@ -1,7 +1,7 @@
 //! シフトと回転 (GRP2)。8bit/16bit/32bit共通の実装。
 
 use super::alu::{set_szp16, set_szp32, set_szp8};
-use super::{Cpu, CF, OF};
+use super::{Cpu, CF, OF, PF, SF, ZF};
 
 // --- シフト/回転 (GRP2) ---
 // 8086はカウントをマスクしないが、186以降 (およびUnicorn) は5bitでマスクする。
@@ -19,6 +19,17 @@ pub fn shift_rot(c: &mut Cpu, kind: u8, val: u32, count_raw: u8, w: u32) -> u32 
     }
     let val = val & mask;
     let mut cf = c.flag(CF) as u32;
+    // これから上書きするフラグを宣言して部分materialize (ADR-0027) —
+    // 古いPF (popcount) やZF/SFを計算してから捨てる税を消す。集合は下の
+    // set_flag/set_szpの書き込みと1対1 (書く条件式もそのまま写す)
+    let mut overwritten = CF;
+    if count == 1 || kind == 0 || kind == 2 {
+        overwritten |= OF;
+    }
+    if kind >= 4 {
+        overwritten |= ZF | SF | PF;
+    }
+    c.materialize_keeping(overwritten);
     let r: u32;
     match kind {
         0 => {
