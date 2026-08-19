@@ -510,6 +510,40 @@ impl Cpu {
         self.cc_op = CC_NONE;
     }
 
+    /// 部分materialize (ADR-0027): `overwritten` のビットは**直後に呼び手が
+    /// 上書きする**ので具現化しない — 中間値は誰にも見えない (観測点は
+    /// 命令境界で、部分フラグ書きは命令の中で完結する)。シフトが古いPF
+    /// (popcount) やZF/SFまで計算してから全部上書きしていた税を消す。
+    /// 呼び手の契約: この後、overwrittenの全ビットをset_flagで必ず書くこと
+    /// (書き漏らすと古い値でなく0/1が残る — cosim/指紋が即検出する)
+    pub(crate) fn materialize_keeping(&mut self, overwritten: u32) {
+        if self.cc_op == CC_NONE {
+            return;
+        }
+        let keep = CC_MASK & !overwritten;
+        let mut f = self.flags & !CC_MASK;
+        if keep & CF != 0 && self.cc_cf() {
+            f |= CF;
+        }
+        if keep & OF != 0 && self.cc_of() {
+            f |= OF;
+        }
+        if keep & AF != 0 && self.cc_af() {
+            f |= AF;
+        }
+        if keep & ZF != 0 && self.cc_r == 0 {
+            f |= ZF;
+        }
+        if keep & SF != 0 && self.cc_r & self.cc_sign() != 0 {
+            f |= SF;
+        }
+        if keep & PF != 0 && (self.cc_r as u8).count_ones().is_multiple_of(2) {
+            f |= PF;
+        }
+        self.flags = f;
+        self.cc_op = CC_NONE;
+    }
+
     /// #PF巻き戻し用の**薄い控え** ([`crate::Machine::guard_save`] の速い相棒)。
     ///
     /// キャッシュ済みuop (dcache) が書き得るのは 汎用レジスタ・IP・フラグ
