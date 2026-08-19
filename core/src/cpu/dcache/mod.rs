@@ -274,10 +274,13 @@ pub(crate) enum Uop {
         op: u8,
         seg: i8,
         rep: u8,
+        /// 0x66つき (movsw等)。幅の帳尻はstring::execがopsize32で見る
+        o16: bool,
     },
     StrOne {
         op: u8,
         seg: i8,
+        o16: bool,
     },
 }
 
