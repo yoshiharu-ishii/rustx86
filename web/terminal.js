@@ -45,8 +45,15 @@ const SCROLLBAR_W = 10;
 /** カーソルの点滅周期 (ミリ秒) */
 const BLINK_MS = 530;
 
-/** Cmd を修飾キーに使う環境か */
-export const IS_MAC = /Mac|iPhone|iPad/.test(
+/**
+ * Cmd を修飾キーに使う環境か。
+ *
+ * **大文字小文字を見ない。** Chrome系の userAgentData.platform は "macOS"
+ * (小文字のm) を返し、大文字前提の /Mac/ に嵌まらなかった。Safariは
+ * userAgentData 自体が無く navigator.platform ("MacIntel") へ落ちるので効く —
+ * 「Chromeだけ Cmd+C が効かない」はこの取りこぼしだった
+ */
+export const IS_MAC = /mac|iphone|ipad/i.test(
   globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || '',
 );
 
