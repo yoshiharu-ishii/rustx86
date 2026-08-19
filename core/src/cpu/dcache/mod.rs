@@ -268,6 +268,13 @@ pub(crate) enum Uop {
         rm: Rm,
     },
     /// A4-AF (REPなしの単発ストリング命令)。意味論は従来の string::exec に委譲
+    /// REP付きストリング (A4-A7/AA-AF)。実行はstring::execへ丸投げ —
+    /// bulk一括化もそちらの持ち物 (ADR-0027)。勘定はREP全体=1命令
+    StrRep {
+        op: u8,
+        seg: i8,
+        rep: u8,
+    },
     StrOne {
         op: u8,
         seg: i8,
@@ -309,6 +316,11 @@ pub struct DecodeCache {
     /// L1に収まりきらない。1bit詰め (4KB) ならL1に居座る — note_writeを
     /// 全ストア経路に配線した (ADR-0020 P0) ときの税をここで消す
     page_has_code: Vec<u64>,
+    /// 語彙外の負キャッシュ (ADR-0027): decode_atがNoneを返した頭を
+    /// (pa, gen) で控え、次回はデコードの徒労 (~30命令) を飛ばして直接
+    /// 従来経路へ。世代照合つきなので自己書き換えで語彙内に化けても安全。
+    /// 触るのは fill_or_fallback (cold) の中だけ — ホット路には足さない
+    neg: Vec<u64>,
     /// 観測: ヒット / 新規デコード / 対象外 (従来経路行き)
     pub hits: u64,
     pub fills: u64,
@@ -326,6 +338,7 @@ impl DecodeCache {
             entries: Vec::new(),
             page_gen: vec![0; pages],
             page_has_code: vec![0; pages.div_ceil(64)],
+            neg: vec![u64::MAX; 64 * 1024],
             hits: 0,
             fills: 0,
             fallbacks: 0,
@@ -445,6 +458,7 @@ fn uop_name(u: &Uop) -> &'static str {
         Uop::SetCC { .. } => "setcc",
         Uop::ImulRRm { .. } => "imul",
         Uop::StrOne { .. } => "string単発",
+        Uop::StrRep { .. } => "string REP",
         Uop::CallRel { .. } => "call rel (対象内のはず)",
         Uop::Ret => "ret (対象内のはず)",
         Uop::Leave => "leave (対象内のはず)",
@@ -503,6 +517,15 @@ fn classify_fallback(m: &mut Machine, pa: u32) {
 #[cold]
 #[inline(never)]
 fn fill_or_fallback(m: &mut Machine, pa: u32, page: usize, slot: usize) -> Option<(u8, Uop)> {
+    // 負キャッシュ: この頭が現世代で「語彙外」と分かっているなら
+    // デコードを繰り返さない (ADR-0027)
+    let gen_now = m.dcache.page_gen.get(page).copied().unwrap_or(0);
+    let neg_slot = (pa as usize) & (m.dcache.neg.len() - 1);
+    let neg_key = ((pa as u64) << 32) | gen_now as u64;
+    if m.dcache.neg[neg_slot] == neg_key {
+        m.dcache.fallbacks += 1;
+        return None;
+    }
     match decode::decode_at(m, pa) {
         Some((len, uop)) => {
             if m.dcache.entries.is_empty() {
@@ -539,6 +562,7 @@ fn fill_or_fallback(m: &mut Machine, pa: u32, page: usize, slot: usize) -> Optio
             Some((lf, uop))
         }
         None => {
+            m.dcache.neg[neg_slot] = neg_key;
             m.dcache.fallbacks += 1;
             if cfg!(feature = "opstats") {
                 classify_fallback(m, pa);
