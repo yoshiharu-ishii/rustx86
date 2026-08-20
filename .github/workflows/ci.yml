@@ -1,7 +1,7 @@
 # CI パイプライン (合否掲示板、2026-08-12):
-#   PR:        コードチェック → CPU照合 ∥ CPU互換 (core/cosimを触ったときだけ) → OK
+#   PR:        コードチェック ∥ jit-a64 (arm64) → CPU照合 ∥ CPU互換 (core/cosimを触ったときだけ) → OK
 #              (docsのみの変更はワークフローごとスキップ)
-#   main push: コードチェック → CPU照合 ∥ CPU互換 ∥ OS起動回帰 → OK (常に全部)
+#   main push: コードチェック ∥ jit-a64 → CPU照合 ∥ CPU互換 ∥ OS起動回帰 → OK (常に全部)
 #
 # 設計の理由・全体図・展望は docs/reference/ci.md にまとめてある。ここは実装だけ。
 #
@@ -73,15 +73,20 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add clippy rustfmt
 
+      # **素の `cargo test` は core しか回らない** (default-members = ["core"])。
+      # それに気づかず wasm の単体テストが割れたまま複数PRが緑で通った
+      # (220ebe2 のindexずれ、2026-08-20発覚)。--workspace で全クレートを回す。
+      # 除外の理由: cosim は専用ジョブ (2 CPU層、Unicornビルドが重い)、
+      # jit-a64 は生成したarm64コードを実行するので下の arm64 ジョブが受け持つ
       - name: テスト
         id: test
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            echo '## テスト — `cargo test`'
+            echo '## テスト — `cargo test --workspace` (cosim・jit-a64は別枠)'
             echo '```'
-            cargo test > raw.log 2>&1 || RC=$?
+            cargo test --workspace --exclude rustx86-cosim --exclude rustx86-jit-a64 > raw.log 2>&1 || RC=$?
             grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' raw.log | tee /dev/stderr || true
             echo '```'
             exit ${RC:-0}
@@ -230,6 +235,62 @@ jobs:
             && test "${{ steps.wasm.outcome }}" = "success" \
             && test "${{ steps.fmt.outcome }}" = "success" \
             && test "${{ steps.lint.outcome }}" = "success"
+
+  jita64:
+    # jit-a64 の単体テストは**生成した arm64 機械語を実際に実行する**
+    # (smc_jit / cond_inline のJIT on/off照合) ので x86_64 ランナーでは走れない。
+    # GitHub の arm64 ランナー (公開リポジトリは無料) で受け持つ。
+    # 土台と同格の安い検査なので needs は付けず並行に走らせる — 段構えの
+    # 「壊れたコードに重い検査を払わない」は、このジョブ自体が安いので崩れない
+    name: 1 土台 — 単体テスト (jit-a64)
+    runs-on: ubuntu-24.04-arm
+    env:
+      HAVE_APP: ${{ secrets.CI_APP_ID != '' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+
+      - name: テスト (arm64)
+        id: jtest
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## テスト — `cargo test -p rustx86-jit-a64` (arm64で生成コードを実行)'
+            echo '```'
+            cargo test -p rustx86-jit-a64 > raw.log 2>&1 || RC=$?
+            grep -vE '^(   Compiling|    Finished|     Running|   Doc-tests)' raw.log | tee /dev/stderr || true
+            echo '```'
+            exit ${RC:-0}
+          } > report-jita64.md
+
+      - name: Summaryへ掲示
+        if: always()
+        run: cat report-jita64.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: 掲示板トークン
+        id: app
+        if: ${{ always() && env.HAVE_APP == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          # **client-id は「発行者 (iss)」としてそのまま JWT に載る入力**で、
+          # GitHubは App ID / Client ID のどちらも受ける。だから既存の
+          # CI_APP_ID (App ID) をそのまま渡せる。将来Client IDに寄せたく
+          # なったらSecretの値を差し替えるだけでよい (ここは触らない)
+          client-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 1 土台 — 単体テスト (jit-a64)
+          title: ${{ steps.jtest.outcome == 'success' && 'jit-a64 合格 (arm64実行)' || 'jit-a64 のテスト失敗' }}
+          outcome: ${{ steps.jtest.outcome }}
+          report-file: report-jita64.md
+          token: ${{ steps.app.outputs.token || github.token }}
+
+      - name: 合否判定
+        run: test "${{ steps.jtest.outcome }}" = "success"
 
   # ---- 段2: 重い検査。コードチェックが通ったときだけ、並行して走る ----
 
@@ -757,14 +818,16 @@ jobs:
   ok:
     name: OK (全層)
     if: always()
-    needs: [check, cosim, compat386, regress, wasmboot, snapshot, network]
+    needs: [check, jita64, cosim, compat386, regress, wasmboot, snapshot, network]
     runs-on: ubuntu-latest
     steps:
       - name: 全段の合否
         # regress はPRではskippedになる (mainへのpush時のみ必須)。
-        # cosim/compat386 もCPUに触れないPRではskipped
+        # cosim/compat386 もCPUに触れないPRではskipped。
+        # jita64 は土台と同格 — 常に走るので success のみ合格
         run: |
           test "${{ needs.check.result }}" = "success" \
+            && test "${{ needs.jita64.result }}" = "success" \
             && { test "${{ needs.cosim.result }}" = "success" \
                  || test "${{ needs.cosim.result }}" = "skipped"; } \
             && { test "${{ needs.compat386.result }}" = "success" \
