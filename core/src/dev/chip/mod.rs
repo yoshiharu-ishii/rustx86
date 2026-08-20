@@ -7,6 +7,7 @@
 //!
 //! - [`pic`] 8259 — 割り込みの交通整理
 //! - [`crtc`] MC6845 — カーソル位置と表示開始アドレス
+//! - [`dac`] RAMDAC (IMS G171系) — 256色パレット。色番号を実際の色に変える
 //! - [`cmos`] MC146818 — 時計とマシンの構成情報
 //! - [`kbd`] 8042 — キーボード。**ついでにA20ゲートも握っている**
 //! - [`pit`] 8254 — 時を刻む
@@ -22,6 +23,7 @@
 
 pub mod cmos;
 pub mod crtc;
+pub mod dac;
 pub mod dp8390;
 pub mod kbd;
 pub mod pic;
@@ -31,6 +33,7 @@ pub mod virtio;
 
 pub use cmos::Cmos;
 pub use crtc::Crtc;
+pub use dac::Dac;
 pub use dp8390::Dp8390;
 pub use kbd::Kbd8042;
 pub use pic::Pic8259;
