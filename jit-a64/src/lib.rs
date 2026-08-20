@@ -17,10 +17,16 @@
 //!
 //! ## レジスタの割り当て (生成コード内)
 //!
-//! ホストレジスタは呼び出し側保存 (x0-x15) だけを使い、**opをまたいで値を
-//! 生かさない** (毎opロード/ストア — 骨格の単純さ優先。M1のストアバッファと
-//! フォワーディングが充分隠すことはインタプリタの実測で既知)。
+//! ホストレジスタは呼び出し側保存 (x0-x15) だけを使い、**ゲストの値は
+//! opをまたいで生かさない** (毎opロード/ストア — 骨格の単純さ優先。M1の
+//! ストアバッファとフォワーディングが充分隠すことはインタプリタの実測で既知)。
 //! x9 = 定数番地の器、x10-x12 = 演算の器、x0-x1 = ヘルパ引数。
+//!
+//! 例外は**ブロック不変量**の掴み置き (⓪巻き上げ、jit-roadmap3):
+//! x19=Machine / x20=TLB / x21=RAM / x22=ヘルパ表 (prologue)、
+//! x23=自ページ世代番地 / w24=期待世代 / w25=RAM上限 / w26=CPL==3
+//! (遅延 — 最初に使うopの地点で1回焼く)。全部callee-savedなので
+//! ヘルパ呼び (blr) を越えて生きる。
 
 #![allow(clippy::fn_to_numeric_cast, clippy::fn_to_numeric_cast_any)]
 #![allow(unknown_lints, function_casts_as_integer)]
@@ -768,10 +774,12 @@ fn emit_block(
     // 掴み置き (callee-saved — ヘルパ呼びでも生きる)。フィールドは [x19,#差分]、
     // TLBインライン路は x20/x21 相対で走る。スピル1枠は [sp,40]
     dynasm!(a; .arch aarch64
-        ; sub sp, sp, 64
+        ; sub sp, sp, 96
         ; stp x29, x30, [sp]
         ; stp x19, x20, [sp, 16]
         ; stp x21, x22, [sp, 32]
+        ; stp x23, x24, [sp, 64]
+        ; stp x25, x26, [sp, 80]
         ; mov x29, sp
         ; mov x19, x0   // Machine (呼び手が渡す — 焼き込みより9命令軽い)
         ; mov x20, x1   // TLB先頭
@@ -784,6 +792,11 @@ fn emit_block(
     // g2の状態: 直前opのcc材料 (kind, 幅) がw10/w11/w13に生きているか。
     // Jcc/SetccRはインラインで通れば材料を壊さない (last_inlined)
     let mut cc_known: Option<(u8, u8)> = None;
+    // ⓪無料の巻き上げ (jit-roadmap3): ブロック不変量をcallee-savedへ掴み置き。
+    // 遅延初期化 — 最初に使うop地点で1回だけ焼く (ブロックは直線なので、
+    // 後続の使用地点には必ず初期化済みで到達する)。数えないから漏れない
+    let mut hz_gen = false; // x23=gen_addr / w24=期待世代
+    let mut hz_load = false; // w25=RAM上限 / w26=CPL==3
     let mut last_inlined = false;
     for (i, &(len, op)) in ops.iter().enumerate() {
         // g1 (ADR-0023): 次opが観測されうる前にccを完全上書きするなら、
@@ -902,19 +915,19 @@ fn emit_block(
             }
             // ---- ロード形 (F1d-b)。w0 = 値、脱出はexitへ ----
             JitOp::MovRM { dst, mem } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 store_reg(&mut a, l, machine, 0, dst);
             }
             JitOp::MovzxBM { dst, mem } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 store_reg(&mut a, l, machine, 0, dst); // h_ld8はゼロ拡張済みの32bitを返す
             }
             JitOp::MovzxWM { dst, mem } => {
-                emit_load(&mut a, l, machine, &mem, 2, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 2, i as u32, off, &mut hz_load);
                 store_reg(&mut a, l, machine, 0, dst);
             }
             JitOp::AluRM { kind, dst, mem } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 if kind == 2 || kind == 3 {
                     // b (=ロード値) をスピルしてcinを取り、復元
                     dynasm!(a; .arch aarch64; str w0, [sp, 48]);
@@ -935,7 +948,7 @@ fn emit_block(
             JitOp::CmpMR { mem, reg } => {
                 // cmp [mem], r — a=mem値, b=reg (向きが逆でないことに注意:
                 // rm=dst形なので a がメモリ側)
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
@@ -944,7 +957,7 @@ fn emit_block(
                 }
             }
             JitOp::CmpMI { mem, imm } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11);
@@ -953,7 +966,7 @@ fn emit_block(
                 }
             }
             JitOp::TestMR { mem, reg } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg(&mut a, l, machine, 11, reg);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
@@ -980,6 +993,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::StoreMI { mem, imm } => {
@@ -999,6 +1013,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::AluMR { kind, mem, reg } => {
@@ -1019,6 +1034,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::AluMI { kind, mem, imm } => {
@@ -1039,6 +1055,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             // ---- スタック形。pushは書き込み=世代照合あり、popは読みだけ ----
@@ -1055,6 +1072,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::PushI { imm } => {
@@ -1070,6 +1088,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::PopR { dst } => {
@@ -1171,7 +1190,7 @@ fn emit_block(
                 store_reg8(&mut a, l, machine, 10, dst8);
             }
             JitOp::Mov8RM { dst8, mem } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 store_reg8(&mut a, l, machine, 0, dst8);
             }
             JitOp::MovzxBR { dst, src8 } => {
@@ -1214,7 +1233,7 @@ fn emit_block(
                 }
             }
             JitOp::Alu8RM { kind, dst8, mem } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 if kind == 2 || kind == 3 {
                     dynasm!(a; .arch aarch64; str w0, [sp, 48]);
                     call_cf(&mut a, machine, 12);
@@ -1233,7 +1252,7 @@ fn emit_block(
                 }
             }
             JitOp::Cmp8MR { mem, reg8 } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg8(&mut a, l, machine, 11, reg8);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
@@ -1242,7 +1261,7 @@ fn emit_block(
                 }
             }
             JitOp::Cmp8MI { mem, imm } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm as u32);
                 dynasm!(a; .arch aarch64; movz w12, 0; sub w13, w10, w11; and w13, w13, 0xff);
@@ -1259,7 +1278,7 @@ fn emit_block(
                 }
             }
             JitOp::Test8MR { mem, reg8 } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 load_reg8(&mut a, l, machine, 11, reg8);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
@@ -1293,6 +1312,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::Store8MI { mem, imm } => {
@@ -1312,6 +1332,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::Rmw8MR { kind, mem, reg8 } => {
@@ -1332,6 +1353,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::Rmw8MI { kind, mem, imm } => {
@@ -1352,6 +1374,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             // ---- F1d-f2 (センサス上位): setcc・test imm・grp5 ----
@@ -1396,6 +1419,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::TestRI { reg, imm } => {
@@ -1407,7 +1431,7 @@ fn emit_block(
                 }
             }
             JitOp::TestMI { mem, imm } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
@@ -1416,7 +1440,7 @@ fn emit_block(
                 }
             }
             JitOp::Test8MI { mem, imm } => {
-                emit_load(&mut a, l, machine, &mem, 1, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 1, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 11, imm as u32);
                 dynasm!(a; .arch aarch64; movz w12, 0; and w13, w10, w11);
@@ -1441,10 +1465,11 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             JitOp::PushM { mem } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w1, w0; mov x0, x19);
                 load_helper(&mut a, H_PUSH32);
                 dynasm!(a; .arch aarch64; blr x16);
@@ -1456,6 +1481,7 @@ fn emit_block(
                     i,
                     off.wrapping_add(len as u32),
                     ops.len(),
+                    &mut hz_gen,
                 );
             }
             // ---- 終端: 間接分岐 (着地は絶対番地 — exit_abs) ----
@@ -1466,7 +1492,7 @@ fn emit_block(
                 terminal = true;
             }
             JitOp::JmpIndM { mem } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; mov w10, w0);
                 mov_imm32(&mut a, 15, n as u32);
                 dynasm!(a; .arch aarch64; b ->exit_abs);
@@ -1488,7 +1514,7 @@ fn emit_block(
                 terminal = true;
             }
             JitOp::CallIndM { mem } => {
-                emit_load(&mut a, l, machine, &mem, 4, i as u32, off);
+                emit_load(&mut a, l, machine, &mem, 4, i as u32, off, &mut hz_load);
                 dynasm!(a; .arch aarch64; str w0, [sp, 48]);
                 ip_addr_to_x9(&mut a, l, machine);
                 mov_imm32(&mut a, 2, off.wrapping_add(len as u32));
@@ -1551,8 +1577,10 @@ fn emit_block(
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 64]
+        ; ldp x25, x26, [sp, 80]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 96
         ; ret
         ; ->exit_abs:
     );
@@ -1562,8 +1590,10 @@ fn emit_block(
         ; mov w0, w15
         ; ldp x19, x20, [sp, 16]
         ; ldp x21, x22, [sp, 32]
+        ; ldp x23, x24, [sp, 64]
+        ; ldp x25, x26, [sp, 80]
         ; ldp x29, x30, [sp]
-        ; add sp, sp, 64
+        ; add sp, sp, 96
         ; ret
     );
     let start = dynasmrt::AssemblyOffset(0);
@@ -1611,6 +1641,7 @@ fn emit_ea(
 /// メモリロードを emit する: EA → h_ld{8,16,32} → 脱出検査。
 /// 成功時 w0 = 値 (8/16bitはゼロ拡張済み)。脱出時は「op iの手前」で
 /// exitへ (w10 = ip差分 = opのオフセット、w15 = i)
+#[allow(clippy::too_many_arguments)] // emit_ea同様、ロードの材料そのもの
 fn emit_load(
     a: &mut dynasmrt::aarch64::Assembler,
     l: &JitLayout,
@@ -1619,6 +1650,7 @@ fn emit_load(
     width: u8,
     i: u32,
     off: u32,
+    ready: &mut bool,
 ) {
     emit_ea(a, l, machine, 2, mem.base, mem.index, mem.scale, mem.disp); // w2 = off
                                                                          // ---- TLBヒットのインライン高速路 (F1d-d、32bitのみ) ----
@@ -1631,6 +1663,23 @@ fn emit_load(
                                                                          // 注意: opstatsのtlb_probes計上はこの近道を通ると増えない (計測ビルドの
                                                                          // JITは近道ぶんだけ過小になる — 定規はJIT offで取る約束)
     if width == 4 {
+        if !*ready {
+            // ⓪掴み置き: CPLとRAM上限はブロック不変 — 最初のロード地点で
+            // 1回だけ w26 (CPL==3か)・w25 (上限) へ。以後のロードは
+            // cbnz+cmp の2命令に痩せる (従来は毎ロード6命令)
+            let cs_addr = l.sregs + 2; // sregs[CS=1] (u16)
+            let d = cs_addr.wrapping_sub(machine);
+            if d < 4096 {
+                let d = d as u32;
+                dynasm!(a; .arch aarch64; ldrb w4, [x19, d]);
+            } else {
+                mov_abs(a, 9, cs_addr as u64);
+                dynasm!(a; .arch aarch64; ldrb w4, [x9]);
+            }
+            dynasm!(a; .arch aarch64; and w4, w4, 3; cmp w4, 3; cset w26, eq);
+            mov_imm32(a, 25, (l.mem_len.saturating_sub(4)) as u32);
+            *ready = true;
+        }
         // la = hidden[seg].base + off
         let base_addr = l.hidden + mem.seg as usize * 12;
         if let Some(o) = field_off4(machine, base_addr) {
@@ -1639,21 +1688,10 @@ fn emit_load(
             mov_abs(a, 9, base_addr as u64);
             dynasm!(a; .arch aarch64; ldr w3, [x9]);
         }
-        dynasm!(a; .arch aarch64; add w3, w3, w2);
-        // CPL==3 なら遅い道 (U/S検査はヘルパにしか無い)
-        let cs_addr = l.sregs + 2; // sregs[CS=1] (u16)
-        let d = cs_addr.wrapping_sub(machine);
-        if d < 4096 {
-            let d = d as u32;
-            dynasm!(a; .arch aarch64; ldrb w4, [x19, d]);
-        } else {
-            mov_abs(a, 9, cs_addr as u64);
-            dynasm!(a; .arch aarch64; ldrb w4, [x9]);
-        }
         dynasm!(a; .arch aarch64
-            ; and w4, w4, 3
-            ; cmp w4, 3
-            ; b.eq >slow
+            ; add w3, w3, w2
+            // CPL==3 なら遅い道 (U/S検査はヘルパにしか無い)
+            ; cbnz w26, >slow
             // ページ跨ぎは遅い道
             ; and w4, w3, 0xFFF
             ; cmp w4, 0xFFC
@@ -1670,10 +1708,9 @@ fn emit_load(
             ; and w10, w9, 0xFFFFF000
             ; orr w10, w10, w4
         );
-        // RAM範囲 (pa+4 <= len)。128MB級なのでw即値2発で作る
-        mov_imm32(a, 11, (l.mem_len.saturating_sub(4)) as u32);
+        // RAM範囲 (pa+4 <= len)。上限は掴み置き済みのw25
         dynasm!(a; .arch aarch64
-            ; cmp w10, w11
+            ; cmp w10, w25
             ; b.hi >slow
             ; add x12, x21, w10, uxtw
             ; ldr w0, [x12]
@@ -1716,14 +1753,19 @@ fn emit_genck(
     i: usize,
     off_after: u32,
     n_ops: usize,
+    ready: &mut bool,
 ) {
     if i + 1 == n_ops || gen_addr == 0 {
         return; // 最後のopはどのみちブロックが終わる — 次の頭照合が裁く
     }
-    mov_abs(a, 9, gen_addr as u64);
-    dynasm!(a; .arch aarch64; ldr w1, [x9]);
-    mov_imm32(a, 2, gen);
-    dynasm!(a; .arch aarch64; cmp w1, w2; b.eq >gok);
+    if !*ready {
+        // ⓪掴み置き: 世代番地と期待値はブロック不変 — 最初の照合地点で
+        // callee-saved (x23/w24) へ。以後の照合は ldr+cmp+b の3命令
+        mov_abs(a, 23, gen_addr as u64);
+        mov_imm32(a, 24, gen);
+        *ready = true;
+    }
+    dynasm!(a; .arch aarch64; ldr w1, [x23]; cmp w1, w24; b.eq >gok);
     mov_imm32(a, 10, off_after);
     mov_imm32(a, 15, (i + 1) as u32);
     dynasm!(a; .arch aarch64; b ->exit; gok:);
