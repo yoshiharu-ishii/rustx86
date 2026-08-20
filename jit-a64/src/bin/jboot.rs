@@ -19,6 +19,9 @@ fn fnv(data: &[u8]) -> u64 {
     h
 }
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let kernel_path = std::env::args().nth(1).unwrap_or_else(|| {
         if std::path::Path::new("images/bzImage-bench").exists() {

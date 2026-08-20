@@ -14,3 +14,8 @@ js-sys = "0.3.104"
 
 [dev-dependencies]
 wasmparser = "0.256.0"
+
+# wasm-packのreleaseは既定でwasm-opt -O (=O2相当) を通す。-O3へ引き上げ
+# (S1即日枠、A/Bで裁く。-O4はIR flattenで巨大関数が爆発し得るため見送り)
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3"]
