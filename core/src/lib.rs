@@ -168,10 +168,13 @@ pub struct Machine {
     pub ud_user: std::collections::BTreeSet<String>,
     /// ゲストが設定しようとしたビデオモード。
     ///
-    /// **テキスト以外は黙って無視している**ので、グラフィックスを要求された
-    /// ことに気づけない。画面が真っ白なのが「何も描いていない」のか
-    /// 「描いた先が無い」のかを区別するために控えておく
+    /// mode 13h とテキストは実現するが、それ以外 (planar等) は黙って無視する
+    /// ので、画面が真っ白なのが「何も描いていない」のか「描いた先が無い」の
+    /// かを区別するために全部控えておく
     pub video_modes: std::collections::BTreeSet<u8>,
+    /// 今のビデオモード。0x03 = 80x25テキスト / 0x13 = 320x200x8bppグラフィック。
+    /// 描画側 (ブラウザ) はこれを見てテキストVRAMとフレームバッファを切り替える
+    pub video_mode: u8,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -373,6 +376,7 @@ impl Machine {
             prefixed_ops: std::collections::BTreeSet::new(),
             prefixed_seen: [false; 256],
             video_modes: std::collections::BTreeSet::new(),
+            video_mode: 0x03,
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),

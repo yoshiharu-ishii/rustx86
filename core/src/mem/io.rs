@@ -65,6 +65,13 @@ impl Machine {
                     0xFF
                 }
             }
+            IoTarget::Dac => match port {
+                0x3C6 => self.devices.dac.read_pel_mask(),
+                0x3C8 => self.devices.dac.read_write_index(),
+                0x3C9 => self.devices.dac.read_data(),
+                _ => 0xFF, // 0x3C7の読みは状態レジスタ (未実装。書き専用として扱う)
+            },
+            IoTarget::VideoStatus => self.video_status(),
             IoTarget::SystemControl => {
                 // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
                 // 時間を測る古い手口に付き合うため
@@ -91,6 +98,31 @@ impl Machine {
             },
             IoTarget::Unmapped => self.pci_io_read(port),
         }
+    }
+
+    /// 0x3DA 入力状態レジスタ1 — 垂直帰線 (bit3) と表示ブランク (bit0)。
+    ///
+    /// レジスタの実体は無く、**機械の時計 (tsc) から合成する**。ゲームは
+    /// 「帰線を待ってから描き換える」ループでテンポを取るので、ここが常に
+    /// 同じ値だと永久に待ち続ける。tscだけの関数なので命令数決定性は無傷。
+    ///
+    /// 校正の原点は PIT_CLOCKS_PER_TICK と同じ「64命令 ≒ 1 PITクロック」。
+    /// mode 13h の垂直同期は70Hz = 1193182/70 ≒ 17045 PITクロック/フレーム
+    fn video_status(&mut self) -> u8 {
+        const FRAME: u64 = 17045 * 64; // ≒ 1/70秒ぶんの命令数
+        const VRETRACE: u64 = FRAME * 4 / 100; // 帰線はフレーム末尾の約4%
+        const LINE: u64 = FRAME / 449; // 400走査線 + 帰線期間 = 449本
+        const HBLANK: u64 = LINE / 5;
+        let t = self.cpu.tsc % FRAME;
+        let mut st = 0u8;
+        // bit0 は「表示していない」— 垂直・水平どちらのブランクでも立つ
+        if t >= FRAME - VRETRACE {
+            st |= 0x08 | 0x01;
+        }
+        if (t % LINE) >= LINE - HBLANK {
+            st |= 0x01;
+        }
+        st
     }
 
     /// PCIの窓に落ちるか。**ISAの定数`match`で名乗り手が居なかったときだけ**
@@ -192,6 +224,17 @@ impl Machine {
                     }
                     self.devices.crtc.write_data(val)
                 }
+            }
+            IoTarget::Dac => match port {
+                0x3C6 => self.devices.dac.write_pel_mask(val),
+                0x3C7 => self.devices.dac.write_read_index(val),
+                0x3C8 => self.devices.dac.write_write_index(val),
+                _ => self.devices.dac.write_data(val),
+            },
+            // 0x3DA への書きはVGAの機能制御レジスタ。読む者が居ないので受けて捨てる
+            // (書いた事実は unhandled_io に残し、使うソフトが現れたら台帳から取り出す)
+            IoTarget::VideoStatus => {
+                self.unhandled_io.insert(port);
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
             IoTarget::Net => match &mut self.devices.net {

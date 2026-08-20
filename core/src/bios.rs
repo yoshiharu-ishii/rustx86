@@ -188,13 +188,18 @@ impl Machine {
                     );
                 }
                 match ah {
-                    // AH=00: ビデオモード設定。**テキスト以外は実現できない**。
+                    // AH=00: ビデオモード設定。
                     //
-                    // 落とさずに受けるのは、モードを試して戻すプログラムがあるためだが、
-                    // 黙って無視すると「描いた先が存在しない」ことに誰も気づけない。
-                    // 要求されたモードを控えて、後から言えるようにしておく
+                    // 実現できるのは**テキスト (mode 0-3) と mode 13h** だけ。
+                    // それ以外 (planar/CGA/EGAグラフィック) は受けて控えるのみ —
+                    // 黙って無視すると「描いた先が存在しない」ことに誰も
+                    // 気づけないので、要求は全部 video_modes に残して後から言える
+                    // ようにしておく (planarをやらない線引きは ADR-0004)
                     0x00 => {
-                        self.video_modes.insert(self.cpu.regs[cpu::AX] as u8 & 0x7F);
+                        let al = self.cpu.regs[cpu::AX] as u8;
+                        self.video_modes.insert(al & 0x7F);
+                        // AL bit7 = 「画面を消さずに切り替えろ」(実BIOSの仕様)
+                        self.set_video_mode(al & 0x7F, al & 0x80 == 0);
                     }
                     0x01 => {} // カーソルの形 (描画側が決めているので覚えない)
                     // AH=02: カーソルを動かす (DH=行 DL=桁)。
@@ -219,6 +224,14 @@ impl Machine {
                     0x0E => self.teletype(self.cpu.regs[cpu::AX] as u8),
                     // AH=05: 表示ページの切り替え (1ページしか無いので何もしない)
                     0x05 => {}
+                    // AH=0F: 今のビデオモードを返す。モードを控えて戻す
+                    // プログラム (終了時に元のモードへ帰る作法) が使う。
+                    // AL=モード AH=桁数 BH=表示ページ
+                    0x0F => {
+                        let cols = if self.video_mode == 0x13 { 40 } else { 80 };
+                        self.cpu.regs[cpu::AX] = (cols as u32) << 8 | self.video_mode as u32;
+                        self.cpu.regs[cpu::BX] &= !0xFF00;
+                    }
                     // AH=10: パレットレジスタの操作 (EGA/VGA)。
                     //
                     // **受けるが何も起きない。** 色は描画側 (ブラウザ) が固定の
@@ -329,11 +342,6 @@ impl Machine {
                                 self.write8(a + 1, attr);
                             }
                         }
-                    }
-                    0x0F => {
-                        // 現在のビデオモードを返す: AL=モード AH=桁数 BH=ページ
-                        self.cpu.regs[cpu::AX] = 80 << 8 | 0x03;
-                        self.cpu.regs[cpu::BX] &= 0x00FF;
                     }
                     // AH=13: 文字列をまとめて書く
                     0x13 => {
@@ -654,6 +662,48 @@ impl Machine {
 
     /// テキスト画面の一部を上 (`up=true`) または下へずらす。
     /// `lines` が0なら範囲を空白で埋める (画面クリアはこの形で来る)
+    /// ビデオモードを切り替える (INT 10h AH=00 の本体)。
+    ///
+    /// 実現するのはテキスト (0-3) と mode 13h。実BIOSと同じく、切り替え時に
+    /// そのモードのVRAMを消す (`clear` は AL bit7 の「消すな」指定で落ちる)。
+    /// BDAの現在モード (0x449) も実BIOSに合わせて更新する — DOSのソフトは
+    /// INT 10h を呼ばずにここを読んでモードを判断することがある
+    fn set_video_mode(&mut self, mode: u8, clear: bool) {
+        match mode {
+            0x13 => {
+                self.video_mode = 0x13;
+                if clear {
+                    let b = bus::VRAM_GFX_BASE as usize;
+                    self.mem[b..b + 0x1_0000].fill(0);
+                    // 直接fillは自己書き換え検出の横を通るので、写しの無効化を申告
+                    self.dcache.note_write_range(bus::VRAM_GFX_BASE, 0x1_0000);
+                }
+                self.write8(0x449, 0x13);
+                self.write16(0x44A, 40);
+            }
+            0x00..=0x03 => {
+                self.video_mode = mode;
+                if clear {
+                    // 空白 (0x20) + 白灰の既定属性 (0x07) で埋める
+                    let b = bus::VRAM_TEXT_BASE as usize;
+                    for i in 0..bus::TEXT_LEN / 2 {
+                        self.mem[b + i * 2] = 0x20;
+                        self.mem[b + i * 2 + 1] = 0x07;
+                    }
+                    self.dcache
+                        .note_write_range(bus::VRAM_TEXT_BASE, bus::TEXT_LEN);
+                    self.set_cursor_pos(0, 0);
+                }
+                self.write8(0x449, mode);
+                self.write16(0x44A, if mode <= 1 { 40 } else { 80 });
+                self.vram_dirty = true;
+            }
+            // それ以外 (planar/CGA/EGA) は作らない (ADR-0004)。
+            // 要求の記録は呼び手 (video_modes) が済ませている
+            _ => {}
+        }
+    }
+
     /// テレタイプ出力1文字ぶん。カーソルを進め、右端で折り返し、
     /// 最下行を越えたら画面全体を1行上げる。**これがBIOSコンソールの本体**である
     fn teletype(&mut self, c: u8) {
