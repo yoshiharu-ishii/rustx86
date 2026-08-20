@@ -21,9 +21,6 @@ fn fnv(data: &[u8]) -> u64 {
     h
 }
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 fn main() {
     let kernel = std::env::var("KERNEL").unwrap_or_else(|_| "images/vmlinuz-lts".into());
     let data = std::fs::read(&kernel).unwrap_or_else(|e| panic!("{kernel}: {e}"));
