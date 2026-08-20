@@ -18,7 +18,7 @@ flowchart LR
     PR[PR / mainへマージ] --> L1
 
     subgraph L1["1 土台 (~30秒)"]
-        T[単体テスト Rust] & U[単体テスト 画面の判断 JS] & W[wasmビルド] & F[整形] & L[lint]
+        T[単体テスト Rust] & J[単体テスト jit-a64<br>arm64ランナー] & U[単体テスト 画面の判断 JS] & W[wasmビルド] & F[整形] & L[lint]
     end
 
     L1 --> L2
@@ -119,7 +119,7 @@ Checksタブとグラフに出る名前は `層番号 + 層の名前 — 関門`
 
 | 層 | 何を証明するか | 関門 |
 |---|---|---|
-| **1 土台** | コードとして成立している | 単体テスト (Rust)、単体テスト (画面の判断・JS)、wasmビルド、整形、lint |
+| **1 土台** | コードとして成立している | 単体テスト (Rust)、単体テスト (jit-a64・arm64ランナー)、単体テスト (画面の判断・JS)、wasmビルド、整形、lint |
 | **2 CPU層** | 命令の意味が正しい | CPU照合 (Unicornと毎命令比較)、CPU互換 (test386) |
 | **3 機械層** | 機械としてOSが起動する | OS起動回帰 (3OS)、wasm起動 (ブラウザ版) |
 | **4 機能層** | 動く機械の上の機能が働く | スナップショット (往復ビット不変)、貼り付け (欠けずに届く)、ネットワーク (16bit/32bitが線に出る) |
@@ -185,6 +185,11 @@ wasmビルドのレポートには **`.wasm` のサイズ**も出る (初回 196
 - **CPU照合はPRでは core/cosim を触ったときだけ** — web/toolsだけのPRに
   重いUnicornビルドを払わない (触っていなければCPUは壊しようがない)。
   mainへのpushでは常に回す
+- ~~素の `cargo test` は core しか回らない~~ — かつての既知の穴。
+  `default-members = ["core"]` のため、wasm の単体テストが割れたまま
+  (220ebe2 のindexずれ) 複数PRのCIが緑で通っていた (2026-08-20 発覚)。
+  今は `--workspace` で全クレートを回し、arm64実行が要る jit-a64 だけ
+  専用ジョブ (ubuntu-24.04-arm、公開リポジトリは無料) に分けた
 - ~~OS起動テストはCIでは空撃ち~~ — かつての既知の穴。`cargo test` のOS起動系は
   イメージが無いと今もスキップして緑になるが、**段2bのOS起動回帰が
   実物のイメージ (Actionsキャッシュ) で3OSをプロンプトまで起動する**ので、
@@ -236,7 +241,8 @@ CPU照合と並行に」回せるようになり、PRの回転を鈍らせずに
 CIと同じ検査は全部1行で打てる。
 
 ```bash
-cargo test                                  # テスト
+cargo test --workspace --exclude rustx86-cosim --exclude rustx86-jit-a64  # テスト
+cargo test -p rustx86-jit-a64               # jit-a64 (arm64ホストでのみ実行可)
 cargo build -p rustx86-wasm --target wasm32-unknown-unknown --release
 cargo fmt --all --check                     # 整形 (直すのは cargo fmt --all)
 cargo clippy --workspace --exclude rustx86-cosim --all-targets -- -D warnings
