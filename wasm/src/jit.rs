@@ -1321,11 +1321,12 @@ mod tests {
             &wasm[..8],
             &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
         );
-        // export "b" が居る
-        let needle = [1, 1, b'b', 0x00, 8];
+        // export "b0" が居る (f838391の据え付けバッチ化で "b" → "b0".."bN-1"。
+        // 関数indexはimport数=インライン率で動くので固定しない)
+        let needle = [1, 2, b'b', b'0', 0x00];
         assert!(
             wasm.windows(needle.len()).any(|w| w == needle),
-            "export b が無い"
+            "export b0 が無い"
         );
         // セクションIDが昇順 (1,2,3,7,10)
         let mut pos = 8;
