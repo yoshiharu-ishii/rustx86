@@ -62,11 +62,10 @@ core (インタプリタ) とJITの中身以外に取れる最適化の台帳。
 
 ## 装置/I/O層のレバー (エンジン側、決定性無傷)
 
-- **シリアル/コンソール経路のバッチ**: ゲスト可視 (UARTレジスタ挙動) は
-  そのまま、ホスト側だけ束ねる — worker→UIのpostMessageをバイト毎でなく
-  チャンク毎に、xterm側はフロー制御 (xterm.jsは main thread bound で
-  ~5-35MB/sが上限、postMessage毎バイトは定番のアンチパターン)。安い。
-  [xterm.js #3368](https://github.com/xtermjs/xterm.js/issues/3368)
+- **シリアル/コンソール経路のバッチ**: ✅**設計上すでに済み** (2026-08-20確認) —
+  workerはスライス毎に serial_out() 差分を1回のpostMessage (transfer付き) で
+  送っている (linux-worker.js)。xterm.jsのフロー制御だけ将来の枠
+  ([xterm.js #3368](https://github.com/xtermjs/xterm.js/issues/3368))
 - **決定的な仮想完了時刻つき非同期I/O**: ゲストがキューを蹴った瞬間に
   ホスト側の実I/O (fetch/WSS送信/ファイル読み) を非同期発行し、完了割り込みは
   **仮想時刻の純関数**として予定 — 間に合わなければホストが待つ (壁時計だけ
@@ -85,13 +84,12 @@ core (インタプリタ) とJITの中身以外に取れる最適化の台帳。
 
 ## ホスト/ツールチェーン (エンジン側、安い順)
 
-- **wasm-opt `-O`→`-O3`**: wasm-packのreleaseは**既に `-O` で走っている**
-  (manifest既定)。Cargo.tomlのmetadata 1行で-O3へ。期待0-10%、-O4は
-  巨大関数 (ディスパッチ) でビルド爆発/退行リスクあり要A/B。
-  wasm側の計測は配置ノイズに注意 (native-ruler-onlyの教訓 — 5周以上)
-- **mimalloc (`#[global_allocator]`)**: macOSのsystem mallocは遅い部類。
-  効くのはdcache構築/起動フェーズのみ (定常はアロケーションフリー、
-  dynasmrtのmmapには乗らない)。2行で試せる。期待ブート0-5%
+- **wasm-opt `-O`→`-O3`**: 💤**ワッシュで寝かせ** (2026-08-20実測、タグ
+  exp/s1-quickwins) — gcc課程off交互5周で窓9.5-9.8 vs 9.6-9.7s、完全同着。
+  LLVM -O3済み出力への追い炊きは乗らなかった。-O4は未測 (ビルド爆発リスク)
+- **mimalloc (`#[global_allocator]`)**: 💤**ワッシュで寝かせ** (同上タグ) —
+  jboot offで3周微勝ち (~1%) だがjcmd全体では微負け、向き不定=ノイズ床未満。
+  定常がアロケーションフリーな設計の裏取りになった
 - **`#[cold]`/cold_path/手書き分岐ヒント**: 無税0-3%。cold_pathは
   stabilization目前、それまでは#[cold]関数属性で
 - **Wasm Branch Hinting (中期の玉)**: W3C標準・全エンジン実装済み・

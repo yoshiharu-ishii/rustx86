@@ -6,8 +6,6 @@ edition = "2021"
 # F1d: 税なしテンプレートJIT (ADR-0022)。Craneliftの代わりに dynasmrt —
 # ランタイム ~4.5k SLoC・依存3つ・数十kB。リンク税はjbootの交互A/Bで見張る
 [dependencies]
-# S1即日枠: macOSのsystem mallocは遅い部類。効くのはdcache構築/起動フェーズのみの想定
-mimalloc = { version = "0.1", default-features = false }
 rustx86-core = { path = "../core" }
 dynasm = "5"
 dynasmrt = "5"
