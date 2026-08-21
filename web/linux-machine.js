@@ -65,7 +65,7 @@ export function mountLinux(canvas, opts = {}) {
   term.onMouse = (dx, dy, buttons) => worker?.postMessage({ type: 'mouse', dx, dy, buttons });
   term.onCapture = (on) => {
     canvas.classList.toggle('captured', on);
-    status(on ? 'マウスを捕獲中 — Ctrl+Alt+G か Esc で解放' : 'マウスを解放した (画面をクリックで再捕獲)');
+    status(on ? 'マウスを捕獲中 — Ctrl+Alt+Shift+G で解放' : 'マウスを解放した (画面をクリックで再捕獲)');
   };
   term.onPaste = (text) => opts.onPaste?.(text);
   term.onPasteRequest = () => opts.onPasteRequest?.();
@@ -333,7 +333,8 @@ export function mountLinux(canvas, opts = {}) {
                 // 居る — 「FBだと触れない」の正体 (2026-08-21)
                 cmdline: opts.fb?.() ? 'console=ttyS0 console=tty0' : 'console=ttyS0',
                 ramMb,
-                lfb: !!opts.fb?.(),
+                // 解像度はルートFSの項が言える (X入りは 1024×768)。既定は 640×480
+                lfb: opts.fb?.() ? (entry.lfb ?? { width: 640, height: 480 }) : null,
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),

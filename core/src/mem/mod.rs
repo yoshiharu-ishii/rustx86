@@ -31,6 +31,15 @@ impl Machine {
         self.lfb = Some(crate::boot::bzimage::Lfb::at_top_of(self.mem.len() as u64));
     }
 
+    /// 解像度を指定して申告する (X機の 1024×768 など)
+    pub fn lfb_enable_sized(&mut self, width: u16, height: u16) {
+        self.lfb = Some(crate::boot::bzimage::Lfb::sized_at_top_of(
+            self.mem.len() as u64,
+            width,
+            height,
+        ));
+    }
+
     /// LFBの中身 (申告していなければ空)。FB同様**ただのRAMの窓**で、
     /// 表示側が毎フレーム読む
     pub fn lfb_frame(&self) -> &[u8] {

@@ -178,17 +178,31 @@ pub struct Lfb {
 }
 
 impl Lfb {
-    /// 予約する大きさ (2MB。640×480×4 = 1,228,800 バイトが収まる)
-    pub const RESERVE: u32 = 0x20_0000;
+    /// 既定の解像度 (コンソール機・回帰の定規)。X機は 1024×768 を申告する
+    pub const DEFAULT_WIDTH: u16 = 640;
+    pub const DEFAULT_HEIGHT: u16 = 480;
 
-    /// RAMの末尾2MBに 640×480×32bpp を置く
+    /// RAMの末尾に 640×480×32bpp を置く (既定)
     pub fn at_top_of(ram_bytes: u64) -> Self {
+        Self::sized_at_top_of(ram_bytes, Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT)
+    }
+
+    /// RAMの末尾に width×height×32bpp を置く。予約は画素数から MB 単位に切り上げる
+    /// (640×480×4 = 1.2MB → 2MB、1024×768×4 = 3MB → 3MB)
+    pub fn sized_at_top_of(ram_bytes: u64, width: u16, height: u16) -> Self {
+        let bytes = width as u64 * height as u64 * 4;
+        let reserve = bytes.div_ceil(0x10_0000) * 0x10_0000;
         Self {
-            base: (ram_bytes as u32) - Self::RESERVE,
-            width: 640,
-            height: 480,
+            base: (ram_bytes - reserve) as u32,
+            width,
+            height,
             bpp: 32,
         }
+    }
+
+    /// この窓が占める大きさ (e820 で予約する量)
+    pub fn reserve_bytes(&self, ram_bytes: u64) -> u64 {
+        ram_bytes - self.base as u64
     }
 
     pub fn line_bytes(&self) -> u32 {
