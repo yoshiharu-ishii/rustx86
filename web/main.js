@@ -141,7 +141,7 @@ function syncControls() {
   $('layout').hidden = !!linux;
   $('layout').previousElementSibling.hidden = !!linux;
   // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
-  for (const id of ['rootLbl', 'rootSel', 'ramLbl', 'ramSel', 'jitLbl', 'jitSel']) $(id).hidden = !linux;
+  for (const id of ['rootLbl', 'rootSel', 'ramLbl', 'ramSel', 'jitLbl', 'jitSel', 'fbLbl', 'fbSel']) $(id).hidden = !linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
@@ -301,6 +301,10 @@ if (!rootSel.value) rootSel.value = ROOTFS[0].name; // URLに知らない名前�
 ramSel.value = q0.get('ram') || localStorage.getItem(RAM_KEY) || 'auto';
 // JIT (F1d wasm)。q0の宣言より前に置くとTDZでmain.jsごと死ぬ (2026-08-17に実際に死んだ)
 jitSel.value = q0.get('jit') || localStorage.getItem('rx86.jit') || 'off';
+// 画面 (シリアル / フレームバッファ)。効くのは電源を入れる瞬間 (LFBの申告は起動時)
+const fbSel = $('fbSel');
+fbSel.value = q0.get('fb') || localStorage.getItem('rx86.fb') || 'off';
+fbSel.addEventListener('change', () => localStorage.setItem('rx86.fb', fbSel.value));
 jitSel.addEventListener('change', () => {
   localStorage.setItem('rx86.jit', jitSel.value);
   // 実行中でも切り替わる (比較実験の外部フラグ)
@@ -1293,6 +1297,8 @@ async function select(m, { autoBoot = true } = {}) {
       // どのルートFSを何MBで載せるかも電源の瞬間に決まる (上のNICと同じ)
       rootfs: () => ({ name: rootSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
       jit: () => jitSel.value === 'on',
+      // 画面: フレームバッファを申告するか (電源の瞬間に決まる。efifb が掴む)
+      fb: () => fbSel.value === 'on',
       // ゲストが送ったフレームは線へ (無ければ捨てる — 抜けたケーブル)
       onNetTx: f => link?.send(f),
     });

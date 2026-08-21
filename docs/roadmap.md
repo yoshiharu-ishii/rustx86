@@ -355,7 +355,7 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
       | 入口 | 誰が使うか | 中身 |
       |---|---|---|
       | **VGA mode 13h** | 16bit (FreeDOS・DOOM) | `INT 10h AH=00` でモード13hを受け、0xA0000 の 320×200×8bpp + DACパレット (0x3C8/0x3C9) |
-      | **リニアFBの申告** | 32bit (Linux) | zero page の `screen_info` に LFB を申告 → `vesafb` が bind |
+      | **リニアFBの申告** | 32bit (Linux) | zero page の `screen_info` に **EFI型** の LFB を申告 → sysfb → **`efifb`** が bind (2026-08-21 実走確認。Alpine linux-lts に vesafb は無く efifb+fbcon が焼き込み) |
 
       共有するのは dirty検出・wasmの窓・canvas描画で、**16bitと32bitの両方に効く
       唯一の項目**である。

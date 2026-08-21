@@ -175,6 +175,11 @@ pub struct Machine {
     /// 今のビデオモード。0x03 = 80x25テキスト / 0x13 = 320x200x8bppグラフィック。
     /// 描画側 (ブラウザ) はこれを見てテキストVRAMとフレームバッファを切り替える
     pub video_mode: u8,
+    /// Linuxへ申告するリニアフレームバッファ (32bit機)。**無いのが既定** —
+    /// 申告すると fbcon が描く分だけ起動の命令数が変わるので、NICやディスクと
+    /// 同じく「挿さっていなければビット同一」の不変条件で守る。
+    /// 起動前に [`lfb_enable`](Self::lfb_enable) で挿す
+    pub lfb: Option<boot::bzimage::Lfb>,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -377,6 +382,7 @@ impl Machine {
             prefixed_seen: [false; 256],
             video_modes: std::collections::BTreeSet::new(),
             video_mode: 0x03,
+            lfb: None,
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),

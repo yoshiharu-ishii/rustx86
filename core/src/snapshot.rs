@@ -32,7 +32,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 //      crの生値からは走行状態を再現できない
 /// v11: x87に80bit原本サイドバンド (raw) が加わった — MMXがここに住む
 /// v13: RAMDAC (256色パレット) と現在ビデオモードが加わった (mode 13h)
-pub const VERSION: u16 = 13;
+/// v14: Linuxへ申告するLFB (base/width/height/bpp、無ければ無し) が加わった
+pub const VERSION: u16 = 14;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -289,6 +290,16 @@ impl Machine {
         self.devices.crtc.save(&mut w);
         self.devices.dac.save(&mut w);
         w.u8(self.video_mode);
+        match self.lfb {
+            Some(l) => {
+                w.bool(true);
+                w.u32(l.base);
+                w.u16(l.width);
+                w.u16(l.height);
+                w.u16(l.bpp);
+            }
+            None => w.bool(false),
+        }
         match &self.devices.net {
             Some(net) => {
                 w.bool(true);
@@ -408,6 +419,16 @@ impl Machine {
         m.devices.crtc.load(&mut r)?;
         m.devices.dac.load(&mut r)?;
         m.video_mode = r.u8()?;
+        m.lfb = if r.bool()? {
+            Some(crate::boot::bzimage::Lfb {
+                base: r.u32()?,
+                width: r.u16()?,
+                height: r.u16()?,
+                bpp: r.u16()?,
+            })
+        } else {
+            None
+        };
         m.devices.net = if r.bool()? {
             Some(crate::dev::Dp8390::load(&mut r)?)
         } else {
