@@ -192,6 +192,9 @@ done
 if [ "$last_console" = tty0 ]; then
   SHELL_TTY=/dev/tty1
   export TERM=linux
+  # バナーはシリアルにも1行流す — ブラウザ/headless/回帰は「busybox shell」を
+  # シリアルで見て起動完了を知るので、画面にシェルを出すときも定規を残す
+  echo "  rustx86 mini initramfs — busybox shell (shell on $SHELL_TTY)" > /dev/ttyS0
 fi
 # シェルが死んだら起こし直す (getty代わり)。孤児の回収はPID1のashが
 # 子待ちのついでにやる
