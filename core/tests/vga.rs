@@ -253,12 +253,19 @@ fn freedos_bounce_ball_moves_and_exits_on_key() {
     for _ in 0..5_000_000 {
         m.step();
     }
-    assert_eq!(m.framebuffer()[0], 33, "左上の壁");
+    assert_eq!(m.framebuffer()[0], 40, "左上の壁");
     assert_eq!(
         m.devices.dac.color(32),
         [63, 30, 0],
         "ボールの橙をDACに流し込んでいる"
     );
+    // 8色のボールが全部画面に居る (パレット 32..39)
+    for c in 32..40u8 {
+        assert!(
+            centroid(m.framebuffer(), c).is_some(),
+            "色{c}のボールが居ない"
+        );
+    }
     let p1 = centroid(m.framebuffer(), 32).expect("ボールが居ない");
 
     // 約10フレーム (1フレーム ≒ 109万命令) 進めると、ボールは別の場所に居る
