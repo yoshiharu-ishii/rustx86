@@ -389,7 +389,7 @@ DOOM合格後のGUIは、この順に登る (ユーザー方針「ReactOS・軽�
 
 - [ ] **6e: Xなしの軽量GUI** — fbdev直描画の世界。`links2 -g`・Nano-X
       (microwindows)・SDL1/fbdev。X要らず = 6a+6bだけで届く最初のGUI
-- [ ] **6f: Xfbdev (TinyX/KDrive) + 軽量WM** — twm / fluxbox / IceWM + xterm。
+- [x] **6f: X + 軽量WM** — 2026-08-21: Tiny Core ではなく **Alpine の Xorg (fbdevドライバ + evdev) + twm + xterm を自前の squashfs ディスク** (`make-x-disk.sh`、90MB/gz 34MB) に。「Linux (フレームバッファ)」機で `startx`。GLX/mesa/LLVM は捨てる (195MB・SIGSEGVの出所)。X の fb 層は 24bpp を扱えないので LFB は 32bpp に。元の案 ~~Xfbdev (TinyX/KDrive)~~ — twm / fluxbox / IceWM + xterm。
       イメージ候補は **Tiny Core Linux** (FLWM込み~50MB RAM、この用途の定番)
 - [ ] **6g: 古典デスクトップ** — LXDE/XFCE級は要実測。**KDE/GNOMEは古典版
       (KDE3・GNOME1〜2世代) のみ視野** — 現代のPlasma/GNOME3+はGLコンポジット
