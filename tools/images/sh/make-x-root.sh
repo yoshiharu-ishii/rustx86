@@ -29,15 +29,28 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 #    xf86-input-evdev    /dev/input/event* を読む入力ドライバ
 #    xinit               xinit (startx は自前で書き直す — xauth/mcookie を要らなくする)
 #    xkbcomp + xkeyboard-config  キーボードの対応表 (無いと X がキー入力を捨てる)
-#    twm + xterm         最小のウィンドウマネージャと端末
-#    font-misc-misc + font-cursor-misc  xterm/twm が要る bitmap フォントとカーソル
+#    xterm               端末
+#    font-misc-misc + font-cursor-misc  xterm が要る bitmap フォントとカーソル
+#    icewm               ウィンドウマネージャ (タスクバー+メニュー。古典デスクトップの絵)
+#    dillo / w3m / links + ca-certificates  ブラウザ3種 (GUI / 端末 / 両用) と TLS の信頼束。
+#                        ネットワーク編の wsslirp 経由で https が通る
+#    feh / mupdf-x11 / xfe  画像・PDF・ファイラ
+#    xclock / xeyes / xcalc / xmessage / xsetroot  X の定番の小物
+#    xboard + gnuchess   ゲーム
+#    font-dejavu + fontconfig  Xft を使うアプリ (dillo/icewm) の文字
 mkdir -p "$work/pkg"
 apk --arch x86 --root "$work/pkg" --initdb -U --no-scripts \
   --keys-dir /etc/apk/keys \
   -X https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
   -X https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
   add xorg-server xf86-video-fbdev xf86-input-evdev xinit xkbcomp xkeyboard-config \
-      twm xterm font-misc-misc font-cursor-misc
+      xterm font-misc-misc font-cursor-misc \
+      icewm \
+      dillo w3m links ca-certificates \
+      feh mupdf-x11 xfe \
+      xclock xeyes xcalc xmessage xsetroot \
+      xboard gnuchess \
+      font-dejavu fontconfig
 rm -rf "$work/pkg/lib/apk" "$work/pkg/var/cache" "$work/pkg/etc/apk" "$work/pkg/dev"
 
 # 2. ミニの木の上に重ねる
@@ -126,8 +139,8 @@ chmod 755 usr/bin/startx
 cat > root/.xinitrc <<'XINITRC'
 #!/bin/sh
 xsetroot -solid '#204060' 2>/dev/null
-twm &
-exec xterm -geometry 78x24+8+8 -fn fixed -e /bin/sh
+xterm -geometry 100x30+8+8 -fn fixed -e /bin/sh &
+exec icewm-session
 XINITRC
 chmod 755 root/.xinitrc
 # root の行 — xterm は SHELL の他に /etc/passwd も引き、無いと
