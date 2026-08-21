@@ -49,8 +49,15 @@ fn main() {
     }
     // LFB=1 でリニアフレームバッファを申告する (efifb の実走確認用)。
     // LFB_DUMP=path なら、降りるときに画面を PPM (P6) で書き出す
-    if std::env::var("LFB").is_ok() {
-        m.lfb_enable();
+    if let Ok(v) = std::env::var("LFB") {
+        // LFB=1 で既定 (640×480)、LFB=1024x768 のように解像度も言える
+        match v
+            .split_once('x')
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        {
+            Some((w, h)) => m.lfb_enable_sized(w, h),
+            None => m.lfb_enable(),
+        }
     }
     if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, Some(&initrd)) {
         eprintln!("起動できない: {e}");
