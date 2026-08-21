@@ -157,6 +157,16 @@ impl Machine {
     /// 描くソフト (zmiy など) は**画面の下が永久に出てこなかった**。
     /// CRTCは実装してあり、説明にも「ここを動かすとスクロールできる」と
     /// 書いてあったのに、**描く側が見ていなかった**。
+    /// mode 13h のフレームバッファ (320×200、1バイト=色番号)。
+    ///
+    /// **ただのRAMの窓**である。書き込みフックもdirtyも無く、表示側が
+    /// 毎フレーム全読みして描く (64KB。設計原則は docs/roadmap.md の 6a —
+    /// フック式にするとゲストの画素ストアが全部JITの高速路から弾かれる)
+    pub fn framebuffer(&self) -> &[u8] {
+        let b = bus::VRAM_GFX_BASE as usize;
+        &self.mem[b..b + bus::GFX_LEN]
+    }
+
     pub fn text_vram(&self) -> &[u8] {
         let win = (bus::VRAM_TEXT_END - bus::VRAM_TEXT_BASE + 1) as usize;
         // 開始位置は文字単位。1文字2バイトなので倍にする

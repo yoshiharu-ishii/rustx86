@@ -357,6 +357,37 @@ impl Emulator {
         wasm_bindgen::function_table()
     }
 
+    /// 今のビデオモード (0x03=テキスト / 0x13=320x200グラフィック)。
+    /// 描画側は毎フレームこれを見て、テキストとFBのどちらを描くか決める
+    pub fn video_mode(&self) -> u8 {
+        self.m.video_mode
+    }
+
+    /// mode 13h フレームバッファ (320×200、1バイト=色番号) の先頭ポインタ。
+    /// text_vram_ptr と同じゼロコピーの窓。**ビューは毎フレーム作り直すこと**
+    /// (wasmメモリがgrowで移動すると古いビューは死ぬ)
+    pub fn fb_ptr(&self) -> *const u8 {
+        self.m.framebuffer().as_ptr()
+    }
+
+    pub fn fb_len(&self) -> usize {
+        rustx86_core::bus::GFX_LEN
+    }
+
+    pub fn fb_cols(&self) -> usize {
+        rustx86_core::bus::GFX_COLS
+    }
+
+    pub fn fb_rows(&self) -> usize {
+        rustx86_core::bus::GFX_ROWS
+    }
+
+    /// パレット256色×(R,G,B)。**6bit値 (0〜63) のまま**返す — 8bitへの伸長は
+    /// 描画側の仕事 (チップが持つ値をそのまま見せる。speaker_toneと同じ境界)
+    pub fn palette(&self) -> Vec<u8> {
+        self.m.devices.dac.palette().to_vec()
+    }
+
     /// テキストVRAM (80×25、文字と属性が交互) の先頭ポインタ。
     /// JS側はwasmのメモリを直接読む — コピーを作らないため
     pub fn text_vram_ptr(&self) -> *const u8 {
