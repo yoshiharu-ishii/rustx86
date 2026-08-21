@@ -25,7 +25,8 @@ pub mod memmap;
 pub mod pci;
 
 pub use memmap::{
-    decode_mem, MemRegion, TEXT_CELL, TEXT_COLS, TEXT_LEN, TEXT_ROWS, VRAM_TEXT_BASE, VRAM_TEXT_END,
+    decode_mem, MemRegion, GFX_COLS, GFX_LEN, GFX_ROWS, TEXT_CELL, TEXT_COLS, TEXT_LEN, TEXT_ROWS,
+    VRAM_GFX_BASE, VRAM_TEXT_BASE, VRAM_TEXT_END,
 };
 
 /// I/Oポート空間の宛先。
@@ -47,6 +48,12 @@ pub enum IoTarget {
     SystemControl,
     /// 0x3D4 / 0x3D5: CRTC (カーソル位置、表示開始アドレス)
     Crtc,
+    /// 0x3C6-0x3C9: RAMDAC (256色パレット)
+    Dac,
+    /// 0x3DA: 入力状態レジスタ1 (垂直帰線・表示ブランク)。
+    /// レジスタの実体は無く、機械の時計から合成する — ゲームはここを
+    /// ポーリングしてテンポを取る (ティアリング無しの描き換えの合図)
+    VideoStatus,
     /// 0x3F8-0x3FF: UART 16550 (COM1)。Linuxのシリアルコンソールもここ
     Uart,
     /// 0x300-0x31F: NE2000 (Ethernet)。ISAカードの定番アドレス。
@@ -93,6 +100,8 @@ pub struct Devices {
     pub cmos: crate::dev::Cmos,
     /// MC6845 CRTC (0x3D4, 0x3D5)
     pub crtc: crate::dev::Crtc,
+    /// RAMDAC (0x3C6-0x3C9)。mode 13h の256色パレット
+    pub dac: crate::dev::Dac,
     /// システム制御ポート (0x61)。bit4がDRAMリフレッシュの矩形波で、
     /// OSはこれを数えて時間を測ることがある
     pub sysctl: u8,
@@ -122,6 +131,7 @@ impl Devices {
             keyboard: crate::dev::Kbd8042::new(),
             cmos: crate::dev::Cmos::new(),
             crtc: crate::dev::Crtc::new(),
+            dac: crate::dev::Dac::new(),
             sysctl: 0,
             net: None,
             pci: None,

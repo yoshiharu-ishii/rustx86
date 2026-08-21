@@ -22,6 +22,16 @@ pub enum MemRegion {
     Rom,
 }
 
+/// グラフィックス画面 (mode 13h) の先頭。**ただのRAM**であり書き込みフックは
+/// 無い — 表示側が毎フレーム全読みして描く (64KBなのでdirty追跡は要らない。
+/// テキストVRAMのようにフック式にすると、ゲストの画素ストアが全部JITの
+/// 高速路から弾かれる)
+pub const VRAM_GFX_BASE: u32 = 0xA_0000;
+/// mode 13h の画面幅・高さ・画素数 (1画素1バイト = 色番号)
+pub const GFX_COLS: usize = 320;
+pub const GFX_ROWS: usize = 200;
+pub const GFX_LEN: usize = GFX_COLS * GFX_ROWS;
+
 /// カラーテキスト画面の先頭
 pub const VRAM_TEXT_BASE: u32 = 0xB_8000;
 /// 同 末尾 (0xBFFFF まで)
