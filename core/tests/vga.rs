@@ -109,6 +109,55 @@ fn snapshot_preserves_palette_and_mode() {
     assert_eq!(n.framebuffer()[0..4], [0, 1, 2, 3]);
 }
 
+// ---------- FreeDOS を使う実物ソフトの検証 ----------
+
+/// fd14games.img = DEBUG (lDebug) と BOUNCE.COM 入りの盤 (webのfd14boot.imgと同一物)
+const FREEDOS_IMAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/fd14games.img");
+
+fn run_until(m: &mut Machine, needle: &str, budget: u64) -> bool {
+    for _ in 0..budget {
+        if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
+            return false;
+        }
+        m.step();
+        if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 1文字ずつ間を空けて打つ (BIOSの待ち行列16枠を溢れさせないため)
+fn type_slowly(m: &mut Machine, s: &str) {
+    for ch in s.chars() {
+        m.devices.keyboard.type_ascii(&ch.to_string());
+        for _ in 0..1_000_000 {
+            m.step();
+        }
+    }
+}
+
+/// F5でCONFIG/AUTOEXECを飛ばし、シェルを答えて A:\> まで
+fn boot_freedos_to_prompt(image: Vec<u8>) -> Machine {
+    let mut m = Machine::new();
+    m.boot_from_disk(image).expect("boot");
+    assert!(
+        run_until(&mut m, "FreeDOS kernel", 200_000_000),
+        "カーネル起動せず"
+    );
+    m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5
+    assert!(
+        run_until(&mut m, "full shell command line", 400_000_000),
+        "シェルの場所を聞かれない"
+    );
+    type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+    assert!(
+        run_until(&mut m, "A:\\>", 400_000_000),
+        "DOSプロンプト到達せず"
+    );
+    m
+}
+
 /// **実物のDOSソフトが mode 13h を使う** — 1回目の起動でFreeDOSのDEBUG
 /// (lDebug) が .COM をその場で組んでフロッピーに書き出し、**その盤面で
 /// もう一度起動した**素のDOSがFATから読んで実行する。
@@ -116,55 +165,13 @@ fn snapshot_preserves_palette_and_mode() {
 /// 「本物のDOSが読み込んだプログラム」として通ることの証明
 #[test]
 fn freedos_debug_builds_and_runs_a_mode13_program() {
-    // fd14games.img = DEBUG (lDebug) 入りの盤 (webのfd14boot.imgと同一物)
-    let image_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/fd14games.img");
-    let Ok(image) = std::fs::read(image_path) else {
+    let Ok(image) = std::fs::read(FREEDOS_IMAGE) else {
         eprintln!("images/fd14games.img が無いのでスキップ");
         return;
     };
 
-    let run_until = |m: &mut Machine, needle: &str, budget: u64| -> bool {
-        for _ in 0..budget {
-            if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
-                return false;
-            }
-            m.step();
-            if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
-                return true;
-            }
-        }
-        false
-    };
-    let type_slowly = |m: &mut Machine, s: &str| {
-        for ch in s.chars() {
-            m.devices.keyboard.type_ascii(&ch.to_string());
-            for _ in 0..1_000_000 {
-                m.step();
-            }
-        }
-    };
-    let boot_to_prompt = |image: Vec<u8>| -> Machine {
-        let mut m = Machine::new();
-        m.boot_from_disk(image).expect("boot");
-        assert!(
-            run_until(&mut m, "FreeDOS kernel", 200_000_000),
-            "カーネル起動せず"
-        );
-        m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5 (CONFIG/AUTOEXECを飛ばす)
-        assert!(
-            run_until(&mut m, "full shell command line", 400_000_000),
-            "シェルの場所を聞かれない"
-        );
-        type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
-        assert!(
-            run_until(&mut m, "A:\\>", 400_000_000),
-            "DOSプロンプト到達せず"
-        );
-        m
-    };
-
     // --- 1回目の起動: DEBUGで組んでフロッピーへ書く ---
-    let mut m = boot_to_prompt(image);
+    let mut m = boot_freedos_to_prompt(image);
     type_slowly(&mut m, "debug\n");
     // mode 13h → 画面全部を色2で塗る → INT 20hで終了 (21バイト = 0x15)
     type_slowly(
@@ -184,7 +191,7 @@ fn freedos_debug_builds_and_runs_a_mode13_program() {
     let written = m.disk.as_ref().expect("disk").data.clone();
 
     // --- 2回目の起動: 素のDOSがFATから読んで実行する ---
-    let mut m = boot_to_prompt(written);
+    let mut m = boot_freedos_to_prompt(written);
     type_slowly(&mut m, "vga\n");
     for _ in 0..100_000_000 {
         m.step();
@@ -207,5 +214,85 @@ fn freedos_debug_builds_and_runs_a_mode13_program() {
         fb.iter().all(|&b| b == 2),
         "画面が色2で塗り切れていない (先頭16画素: {:?})",
         &fb[..16]
+    );
+}
+
+/// 色 `c` の画素の重心 (無ければ None)
+fn centroid(fb: &[u8], c: u8) -> Option<(usize, usize)> {
+    let (mut n, mut sx, mut sy) = (0usize, 0usize, 0usize);
+    for (i, &p) in fb.iter().enumerate() {
+        if p == c {
+            n += 1;
+            sx += i % GFX_COLS;
+            sy += i / GFX_COLS;
+        }
+    }
+    (n > 0).then(|| (sx / n, sy / n))
+}
+
+/// **BOUNCE.COM — 跳ねるボールが動き、キーでテキストへ帰る。**
+/// 垂直帰線待ち (0x3DA) で進むプログラムなので、合成した帰線が
+/// 「止まらず・暴走せず」一定のテンポで回ることの実地試験になっている
+#[test]
+fn freedos_bounce_ball_moves_and_exits_on_key() {
+    let Ok(image) = std::fs::read(FREEDOS_IMAGE) else {
+        eprintln!("images/fd14games.img が無いのでスキップ");
+        return;
+    };
+    let mut m = boot_freedos_to_prompt(image);
+    type_slowly(&mut m, "bounce\n");
+    for _ in 0..100_000_000 {
+        m.step();
+        if m.video_mode == 0x13 {
+            break;
+        }
+    }
+    assert_eq!(m.video_mode, 0x13, "mode 13h に入っていない");
+
+    // 壁 (色33) とボール (色32) が描かれるまで数フレームぶん回す
+    for _ in 0..5_000_000 {
+        m.step();
+    }
+    assert_eq!(m.framebuffer()[0], 40, "左上の壁");
+    assert_eq!(
+        m.devices.dac.color(32),
+        [63, 30, 0],
+        "ボールの橙をDACに流し込んでいる"
+    );
+    // 8色のボールが全部画面に居る (パレット 32..39)
+    for c in 32..40u8 {
+        assert!(
+            centroid(m.framebuffer(), c).is_some(),
+            "色{c}のボールが居ない"
+        );
+    }
+    let p1 = centroid(m.framebuffer(), 32).expect("ボールが居ない");
+
+    // 約10フレーム (1フレーム ≒ 109万命令) 進めると、ボールは別の場所に居る
+    for _ in 0..11_000_000 {
+        m.step();
+    }
+    let p2 = centroid(m.framebuffer(), 32).expect("ボールが消えた");
+    assert_ne!(p1, p2, "ボールが動いていない (帰線待ちで止まっている?)");
+    let moved = p1.0.abs_diff(p2.0) + p1.1.abs_diff(p2.1);
+    assert!(
+        (3..=60).contains(&moved),
+        "動き方がおかしい: {p1:?} → {p2:?} (帰線が速すぎ/遅すぎ)"
+    );
+
+    // キーを押すとテキストモードへ戻り、DOSのプロンプトが使える
+    m.devices.keyboard.type_ascii(" ");
+    for _ in 0..20_000_000 {
+        m.step();
+        if m.video_mode == 0x03 {
+            break;
+        }
+    }
+    assert_eq!(m.video_mode, 0x03, "キーでテキストへ戻らない");
+    type_slowly(&mut m, "ver\n");
+    assert!(
+        run_until(&mut m, "FreeCom", 50_000_000),
+        "終了後にDOSが生きていない:\n{}",
+        m.text_screen_string()
     );
 }
