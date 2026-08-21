@@ -196,12 +196,15 @@ fn freedos() -> Outcome {
 /// 決定的な命令数も見張る (大きく増えたら意味の後退を疑う)
 fn linux() -> Outcome {
     let name = "32bit回帰: Linux 6.18 (Alpine)";
-    // vmlinux優先 (解凍ステブ無し)。上限は現測定+30%: vmlinux 770M → 1000M。
+    // vmlinux優先 (解凍ステブ無し)。上限は現測定+30%: vmlinux 1100M → 1400M。
+    // 2026-08-21 に PS/2マウスの鎖 (i2c-core/psmouse/mousedev/evdev の insmod と
+    // psmouse のリセット握手) を積んで 980M → 1100M。**荷物の重さであって
+    // 意味の後退ではない** (その前は TLS一式で 580M → 770M、バナー短縮で 970→980M)。
     // 2026-08-14にinitramfsへTLS一式 (ssl_client + libssl/libcrypto + CA束) を
     // 積んで 1.4→4.1MB になり、cpio展開のぶん 580M → 770M へ増えた。
     // **積んだ荷物の重さであって意味の後退ではない** — 荷物を変えたら測り直す
     let (kernel, budget) = match std::fs::read(img("vmlinux-lts")) {
-        Ok(k) => (k, 1_000_000_000u64),
+        Ok(k) => (k, 1_400_000_000u64),
         Err(_) => match std::fs::read(img("vmlinuz-lts")) {
             Ok(k) => (k, 1_500_000_000u64), // bzImage 1160M → +30%
             Err(_) => {
@@ -314,7 +317,7 @@ fn linux_lfb() -> Outcome {
     // 最後の console= が /dev/console なのでシェルは ttyS0 のまま
     m.boot_linux_with_initrd(&kernel, "console=tty0 console=ttyS0", Some(&initrd))
         .expect("boot");
-    let budget = 1_500_000_000u64; // fbcon が描く分だけ素の起動 (970M) より増える
+    let budget = 1_850_000_000u64; // fbcon が描く分だけ素の起動 (1100M) より増える: 実測 1420M
     let reached = run_until_serial(&mut m, "busybox shell", budget);
     let mut checks: Vec<(&str, bool)> = vec![];
     if reached.is_some() {
@@ -382,6 +385,27 @@ fn linux_lfb() -> Outcome {
         ];
         let n = balls.iter().filter(|c| has(**c)).count();
         checks.push(("bounce の8色がLFBに居る (R,G,Bの並びどおり)", n == 8));
+
+        // PS/2マウス (6b): 8042 の第2ポートに psmouse が bind し、mousedev が
+        // /dev/input/mice を作る。ホストから動きを1回入れ、その口から
+        // PS/2形式の3バイト (ボタン/符号, dx, dy[上が正]) が出てくることを見る
+        let serial = String::from_utf8_lossy(&m.devices.uart.tx).into_owned();
+        checks.push(("psmouse が掴んだ", serial.contains("PS/2 Generic Mouse")));
+        m.devices
+            .uart
+            .feed(b"head -c 3 /dev/input/mice | hexdump -C; printf 'MOU%s\n' DONE\n");
+        for _ in 0..20_000_000 {
+            m.step(); // head が開いて read で待つまで回す
+        }
+        m.devices.keyboard.mouse_motion(5, 3, 0b001); // 右5・下3・左ボタン
+        let ok = run_until_serial(&mut m, "MOUDONE", 200_000_000).is_some();
+        let serial = String::from_utf8_lossy(&m.devices.uart.tx).into_owned();
+        // mousedev は PS/2 と同じ並びで出す: byte0 = 同期0x08 | Y負0x20 | 左0x01 = 0x29、
+        // dx=05、dy=-3=fd (画面の下向き3 = PS/2 では上が正なので -3)
+        checks.push((
+            "/dev/input/mice に 29 05 fd",
+            ok && serial.contains("29 05 fd"),
+        ));
     }
     let logs = vec![(
         "linux-lfb-boot.log",

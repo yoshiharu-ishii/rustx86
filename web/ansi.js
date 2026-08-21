@@ -78,6 +78,12 @@ export class AnsiTerminal {
      *  (code, down) => void。シェルが tty0 (fbcon) に居るときは、入力も
      *  PS/2 キーボード (8042) からカーネルのVTへ入るのが実機の道 */
     this.onKey = null;
+    /** マウスの動き (画素の顔で捕獲中)。(dx, dy, buttons) => void。
+     *  dx/dy は相対移動 (pointer lock の movementX/Y)、buttons は bit0=左 bit1=右 bit2=中 */
+    this.onMouse = null;
+    /** 捕獲の出入りの合図 (true=捕獲した / false=解放した)。表示側が枠や案内を出す */
+    this.onCapture = null;
+    this.captured = false;
     // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
     // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
     /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
@@ -120,6 +126,78 @@ export class AnsiTerminal {
         this.onKey(e.code, false);
       }
     });
+
+    // ---- ポインタの捕獲 (画素の顔のとき) ----
+    //
+    // 抜け道は4系統 (設計は rustx86-gfx-plan): ①ホストキー Ctrl+Alt+G
+    // ②Esc (窓モードではブラウザが強制解除する — 戦わず利用する)
+    // ③全画面ではEsc長押し (ブラウザの既定) ④自動解放 (blur・機械の停止)。
+    // **捕獲中は必ず見た目が変わり、抜け方がその場に書いてある** (onCapture)
+    // 捕獲は2段: pointer lock が取れればそれ (相対移動が生で来る)。取れない
+    // 環境 (pointer-lock を許さない iframe、埋め込みの閲覧面) では**ソフト捕獲**
+    // — canvas 上の移動を前回の座標との差で相対化して渡す。ポインタは
+    // 画面の外へ出られるが、入力の経路は同じなので動作の確認はできる
+    let soft = false;
+    let last = null;
+    const setCaptured = (on) => {
+      if (on === this.captured) return;
+      this.captured = on;
+      last = null;
+      this.onCapture?.(on);
+    };
+    const release = () => {
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+      if (soft) { soft = false; setCaptured(false); }
+    };
+    canvas.addEventListener('click', () => {
+      if (!this.gfxOn || !this.onMouse || this.captured) return;
+      const fallback = () => { soft = true; setCaptured(true); };
+      if (!canvas.requestPointerLock) return fallback();
+      // 断られたらソフト捕獲へ (Promise を返す実装と返さない実装がある)
+      const p = canvas.requestPointerLock();
+      if (p && typeof p.catch === 'function') p.catch(fallback);
+    });
+    document.addEventListener('pointerlockchange', () => {
+      const on = document.pointerLockElement === canvas;
+      if (on) { soft = false; setCaptured(true); }
+      else if (!soft) setCaptured(false);
+    });
+    document.addEventListener('pointerlockerror', () => { soft = true; setCaptured(true); });
+    canvas.addEventListener('mousemove', (e) => {
+      if (!this.captured) return;
+      if (document.pointerLockElement === canvas) {
+        this.onMouse?.(e.movementX, e.movementY, e.buttons & 7);
+        return;
+      }
+      // ソフト捕獲: CSS の座標差を canvas の画素に直す
+      const r = canvas.getBoundingClientRect();
+      const k = canvas.width / r.width;
+      const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
+      if (last) this.onMouse?.(Math.round(x - last.x), Math.round(y - last.y), e.buttons & 7);
+      last = { x, y };
+    });
+    canvas.addEventListener('mousedown', (e) => {
+      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+    });
+    canvas.addEventListener('contextmenu', (e) => { if (this.captured) e.preventDefault(); });
+    // ①ホストキー。物理位置 (code) で見るので配列と無縁
+    canvas.addEventListener('keydown', (e) => {
+      if (!this.captured) return;
+      const hostKey = e.ctrlKey && e.altKey && e.code === 'KeyG';
+      // ソフト捕獲では Esc もこちらで受ける (ロック中はブラウザが先に解く)
+      if (hostKey || (soft && e.code === 'Escape')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        release();
+      }
+    }, true);
+    // ④自動解放: タブが裏へ回った
+    window.addEventListener('blur', release);
+    /** 機械が止まった/死んだときに表示側が呼ぶ (死んだゲストが入力を人質に取らない) */
+    this.releaseCapture = release;
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
       if (t) this.onPaste?.(t);

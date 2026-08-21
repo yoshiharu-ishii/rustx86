@@ -24,6 +24,10 @@ use super::IoTarget;
 pub const IRQ_TIMER: u8 = 0;
 /// IRQ1 (キーボード) の割り込み線
 pub const IRQ_KEYBOARD: u8 = 1;
+/// IRQ2: スレーブPICの連結線。ここに装置は居ない — IRQ8〜15の挙手がここに現れる
+pub const IRQ_CASCADE: u8 = 2;
+/// IRQ12 (PS/2マウス = 8042の第2ポート)。スレーブの線4
+pub const IRQ_MOUSE: u8 = 12;
 /// IRQ4 (COM1) の割り込み線
 pub const IRQ_COM1: u8 = 4;
 /// NE2000の定番IRQ。DOSのパケットドライバの既定値に合わせる

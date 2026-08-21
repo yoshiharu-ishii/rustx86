@@ -10,6 +10,7 @@
 //! - [`dac`] RAMDAC (IMS G171系) — 256色パレット。色番号を実際の色に変える
 //! - [`cmos`] MC146818 — 時計とマシンの構成情報
 //! - [`kbd`] 8042 — キーボード。**ついでにA20ゲートも握っている**
+//! - [`mouse`] PS/2マウス — 8042の第2ポート (AUX) の向こう側
 //! - [`pit`] 8254 — 時を刻む
 //! - [`uart`] 16550 — シリアルコンソール
 //! - [`dp8390`] DP8390 — Ethernet。**ISAのNE2000もPCIのRTL8029も中身はこれ1つ**
@@ -26,6 +27,7 @@ pub mod crtc;
 pub mod dac;
 pub mod dp8390;
 pub mod kbd;
+pub mod mouse;
 pub mod pic;
 pub mod pit;
 pub mod uart;
@@ -36,6 +38,7 @@ pub use crtc::Crtc;
 pub use dac::Dac;
 pub use dp8390::Dp8390;
 pub use kbd::Kbd8042;
+pub use mouse::Mouse;
 pub use pic::Pic8259;
 pub use pit::Pit8254;
 pub use uart::Uart16550;

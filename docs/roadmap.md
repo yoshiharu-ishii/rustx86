@@ -365,7 +365,7 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
       埋めており (今は「80x25のテキスト」と申告している)、**同じ構造体にLFBの欄がある**。
       我々がfirmware側なのだから、自分で用意したフレームバッファを申告すればよい。
       **要実走確認** (ここは推測なので、6a着手時に必ず実物で確かめる)
-- [ ] **6b: PS/2 マウス** — 8042 の第2ポート
+- [x] **6b: PS/2 マウス** — 8042 の第2ポート (AUX)。2026-08-21: コマンドバイトの実体化・0xA7/A8/A9/D3/D4・IRQ12 (スレーブPICの連結もここで初めて配線)・素の3ボタンPS/2マウス素子。Linuxは psmouse (proto=bare) + mousedev + evdev を modloop-lts から借りて `/dev/input/mice` / `event*`。ブラウザは pointer lock で捕獲 (Ctrl+Alt+G / Esc / blur で解放)
 - [ ] **6c: ISO起動** — ATA/ATAPI (PIOで読むだけ) + El Torito。
       **ISOの中に埋めたフロッピーイメージをドライブAに見せる**のが El Torito の
       floppy emulation モードで、これなら既存の `INT 13h` 経路がそのまま使える。

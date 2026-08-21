@@ -388,6 +388,12 @@ impl Emulator {
         rustx86_core::bus::GFX_ROWS
     }
 
+    /// マウスの動き (PS/2、8042の第2ポート)。dx: 右が正 / dy: 下が正 (画面座標) /
+    /// buttons: bit0=左 bit1=右 bit2=中。ゲストが報告を有効にしていなければ捨てる
+    pub fn mouse(&mut self, dx: i32, dy: i32, buttons: u8) {
+        self.m.devices.keyboard.mouse_motion(dx, dy, buttons);
+    }
+
     /// Linuxへ申告したリニアFBがあるか (32bit機)。描画側はこれで顔を選ぶ
     pub fn lfb_on(&self) -> bool {
         self.m.lfb.is_some()
