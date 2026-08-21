@@ -53,7 +53,10 @@ static void disc(int cx, int cy, uint32_t v) {
 
 struct ball { int x, y, vx, vy; uint32_t col; };
 
-int main(void) {
+int main(int argc, char **argv) {
+    /* 引数にフレーム数があれば、その数だけ回して**絵を残したまま**終わる
+     * (回帰テスト用: kill だと「消してから描き直す」の途中に当たり得る) */
+    long frames_left = argc > 1 ? atol(argv[1]) : -1;
     int fd = open("/dev/fb0", O_RDWR);
     if (fd < 0) { perror("/dev/fb0"); return 1; }
     if (ioctl(fd, FBIOGET_VSCREENINFO, &var) || ioctl(fd, FBIOGET_FSCREENINFO, &fix)) {
@@ -97,6 +100,10 @@ int main(void) {
         /* キーが来たら終わる。stdin が /dev/null (EOF) のときは終わらない —
          * 回帰テストは `bounce </dev/null &` で回して外から止める */
         if (poll(&pf, 1, 0) > 0) { char c; if (read(0, &c, 1) == 1) break; }
+        if (frames_left > 0 && --frames_left == 0) {
+            if (tty) tcsetattr(0, TCSANOW, &old);
+            return 0; /* 絵は残す */
+        }
         nanosleep(&frame, NULL);
     }
     if (tty) tcsetattr(0, TCSANOW, &old);

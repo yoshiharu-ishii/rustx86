@@ -168,21 +168,26 @@ pub struct Lfb {
     pub base: u32,
     pub width: u16,
     pub height: u16,
-    /// 1画素のビット数。24 = R,G,B が1バイトずつ
+    /// 1画素のビット数。32 = [詰め物, R, G, B] の4バイト。
+    ///
+    /// **24bpp ではなく 32bpp なのは X のため。** X の fb 層は 8/16/32bpp しか
+    /// 扱えず、24bpp のパックド画素には「Depth 24 / framebuffer bpp 32」を
+    /// 要求して efifb と食い違う (FBIOPUT_VSCREENINFO succeeded but modified
+    /// mode)。fbcon・fbsplash・bounce は 24 でも 32 でも動く
     pub bpp: u16,
 }
 
 impl Lfb {
-    /// 予約する大きさ (1MB。640×480×3 = 921,600 バイトが収まる)
-    pub const RESERVE: u32 = 0x10_0000;
+    /// 予約する大きさ (2MB。640×480×4 = 1,228,800 バイトが収まる)
+    pub const RESERVE: u32 = 0x20_0000;
 
-    /// RAMの末尾1MBに 640×480×24bpp を置く
+    /// RAMの末尾2MBに 640×480×32bpp を置く
     pub fn at_top_of(ram_bytes: u64) -> Self {
         Self {
             base: (ram_bytes as u32) - Self::RESERVE,
             width: 640,
             height: 480,
-            bpp: 24,
+            bpp: 32,
         }
     }
 
@@ -221,10 +226,11 @@ pub fn build_zero_page(
     zp[zp::ORIG_VIDEO_POINTS] = 16;
 
     // 1.55. リニアフレームバッファ。**EFI型で申告する** (efifb が掴む)。
-    //       画素形式は 24bpp で赤を下位に置く (b8g8r8)。sysfb の simplefb 経路
-    //       (表にある形式だと simple-framebuffer 装置を作る) には simplefb/
-    //       simpledrm のドライバが入っていないので、表に無い形式で素通りさせ、
-    //       efi-framebuffer → efifb へ落とす
+    //       画素形式は 32bpp で**赤を第2バイト**に置く (詰め物,R,G,B = r@8 g@16 b@24)。
+    //       sysfb の simplefb 経路 (表にある形式だと simple-framebuffer 装置を作る)
+    //       には simplefb/simpledrm のドライバが入っていないので、表に無い形式で
+    //       素通りさせ、efi-framebuffer → efifb へ落とす。x8r8g8b8 / a8b8g8r8 /
+    //       x8b8g8r8 は表にあるので使えない — 赤がオフセット8の並びは表に無い
     if let Some(l) = lfb {
         zp[zp::ORIG_VIDEO_ISVGA] = zp::VIDEO_TYPE_EFI;
         zp[zp::LFB_WIDTH..zp::LFB_WIDTH + 2].copy_from_slice(&l.width.to_le_bytes());
@@ -236,12 +242,12 @@ pub fn build_zero_page(
         zp[zp::LFB_LINELENGTH..zp::LFB_LINELENGTH + 2]
             .copy_from_slice(&(l.line_bytes() as u16).to_le_bytes());
         zp[zp::RED_SIZE] = 8;
-        zp[zp::RED_POS] = 0;
+        zp[zp::RED_POS] = 8;
         zp[zp::GREEN_SIZE] = 8;
-        zp[zp::GREEN_POS] = 8;
+        zp[zp::GREEN_POS] = 16;
         zp[zp::BLUE_SIZE] = 8;
-        zp[zp::BLUE_POS] = 16;
-        zp[zp::RSVD_SIZE] = 0;
+        zp[zp::BLUE_POS] = 24;
+        zp[zp::RSVD_SIZE] = 8;
         zp[zp::RSVD_POS] = 0;
     }
 

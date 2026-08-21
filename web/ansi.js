@@ -603,11 +603,11 @@ export class AnsiTerminal {
 
   // ---- 描画 ----
 
-  /** efifb が描いた一枚 (24bpp・R,G,Bの順) をそのまま置く。
+  /** efifb が描いた一枚 (32bpp=[詰め物,R,G,B] / 24bpp=[R,G,B]) をそのまま置く。
    * 解像度はゲストの申告 (640×480) で、canvasは 80×24 の升目の大きさ
    * (730×384) なので縮めて収める — 補間は切る (文字の縁が滲む)。
    * 出ている間、文字の描き手 (render) は黙る。戻すのは reset() */
-  drawRgb(rgb, width, height) {
+  drawRgb(rgb, width, height, bpp = 24) {
     this.gfxOn = true;
     if (!this.gfx || this.gfx.w !== width || this.gfx.h !== height) {
       const cvs = document.createElement('canvas');
@@ -622,11 +622,21 @@ export class AnsiTerminal {
       this.canvas.classList.add('fb');
     }
     const d = this.gfx.img.data;
-    for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
-      d[o] = rgb[i * 3];
-      d[o + 1] = rgb[i * 3 + 1];
-      d[o + 2] = rgb[i * 3 + 2];
-      d[o + 3] = 255;
+    if (bpp === 32) {
+      // [詰め物, R, G, B] の4バイト (X が扱える形。赤は第2バイト)
+      for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+        d[o] = rgb[i * 4 + 1];
+        d[o + 1] = rgb[i * 4 + 2];
+        d[o + 2] = rgb[i * 4 + 3];
+        d[o + 3] = 255;
+      }
+    } else {
+      for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+        d[o] = rgb[i * 3];
+        d[o + 1] = rgb[i * 3 + 1];
+        d[o + 2] = rgb[i * 3 + 2];
+        d[o + 3] = 255;
+      }
     }
     this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
     this.ctx.putImageData(this.gfx.img, 0, 0);
