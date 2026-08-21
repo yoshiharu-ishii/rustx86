@@ -180,11 +180,24 @@ if [ -d /usr/libexec/gcc ]; then
   done
 fi
 #
+# **シェルの端末はカーネルの console= の最後の1つで決める。** /dev/console は
+# 制御端末になれないので実体のttyを開く必要があり、その実体を決め打ち
+# (ttyS0) にしていたら、フレームバッファで起動したとき**ログだけ画面に映って
+# シェルは見えないシリアルに居た** (2026-08-21)。最後の console= が tty0
+# (画面) なら /dev/tty1 (fbconのVT) で、それ以外は従来どおり /dev/ttyS0
+SHELL_TTY=/dev/ttyS0
+for w in $(/bin/busybox cat /proc/cmdline); do
+  case "$w" in console=*) last_console=${w#console=};; esac
+done
+if [ "$last_console" = tty0 ]; then
+  SHELL_TTY=/dev/tty1
+  export TERM=linux
+fi
 # シェルが死んだら起こし直す (getty代わり)。孤児の回収はPID1のashが
 # 子待ちのついでにやる
 while :; do
   /bin/busybox setsid /bin/busybox sh -c \
-    'exec /bin/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'
+    "exec /bin/busybox sh <$SHELL_TTY >$SHELL_TTY 2>&1"
 done
 INIT
 chmod 755 "$work/root/init"
