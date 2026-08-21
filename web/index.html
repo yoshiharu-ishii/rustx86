@@ -218,8 +218,11 @@
      縮めるとカーネルの 8×16 フォントが潰れて読めない。大きくするときは
      ぼかさない (pixelated) — 画素の絵は画素のまま */
   #linuxScreen.fb {
-    aspect-ratio: 4 / 3; max-width: min(960px, calc((100vh - 17rem) * 4 / 3));
-    image-rendering: pixelated;
+    /* 解像度 (--fbw×--fbh) の等倍〜1.5倍で、枠に収まる範囲。640×480 は 960px、
+       1024×768 は等倍 (枠が 1024 より狭ければ縮む — そのときは JS がぼかしに切替) */
+    aspect-ratio: var(--fbw) / var(--fbh);
+    width: 100%;
+    max-width: min(calc(var(--fbw) * 1.5px), 1024px);
   }
   /* マウス捕獲中: 枠を光らせて「いま入力は全部ゲストへ行く」と言う */
   #linuxScreen.captured { box-shadow: 0 0 0 3px var(--green); }

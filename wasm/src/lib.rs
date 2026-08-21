@@ -136,18 +136,19 @@ impl Emulator {
     /// bzImage / vmlinux (ELF) は中身で自動判別 — vmlinux なら自己解凍ステブが
     /// 無いぶん起動が4割速い。`ram_mb` はRAMサイズ (MB)。
     /// コンソールはシリアル (ttyS0) — `serial_out` / `serial_in` で読み書きする
-    /// `lfb` が真なら、Linuxへリニアフレームバッファ (640×480×24bpp、RAM末尾
-    /// 1MB) を申告する。**省略/偽なら従来どおりビット同一の起動**
+    /// `lfb_width`/`lfb_height` を渡すと、Linuxへリニアフレームバッファ
+    /// (32bpp、RAM末尾) をその解像度で申告する。**省略なら従来どおりビット同一の起動**
     pub fn from_bzimage(
         kernel: &[u8],
         initrd: Option<Vec<u8>>,
         cmdline: &str,
         ram_mb: usize,
-        lfb: Option<bool>,
+        lfb_width: Option<u16>,
+        lfb_height: Option<u16>,
     ) -> Result<Emulator, JsError> {
         let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
-        if lfb == Some(true) {
-            m.lfb_enable();
+        if let (Some(w), Some(h)) = (lfb_width, lfb_height) {
+            m.lfb_enable_sized(w, h);
         }
         m.boot_linux_with_initrd(kernel, cmdline, initrd.as_deref())
             .map_err(|e| JsError::new(&e))?;

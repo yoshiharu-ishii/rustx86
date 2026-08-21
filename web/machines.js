@@ -186,6 +186,20 @@ export const ROOTFS = [
       'tools/images/sh/make-gcc-disk.sh で作る',
   },
   {
+    name: 'disk-x',
+    label: 'X入り (ディスク)',
+    sub: 'Xorg fbdev + twm/xterm、1024×768',
+    initrd: 'initramfs-mini',
+    disk: 'disk-x.img.gz',
+    // X は広い方が使える。xorg.conf はモード無指定なので fb の解像度にそのまま乗る
+    lfb: { width: 1024, height: 768 },
+    note:
+      'virtio-blkの/dev/vdaに Xorg (fbdevドライバ) + evdev + twm + xterm。' +
+      '「Linux (フレームバッファ)」機で起動して `startx` と打つと、' +
+      'efifb の **1024×768** に X が上がる (GPUは無いので全部ソフトウェア描画)。' +
+      'マウスは画面クリックで捕獲。tools/images/sh/make-x-disk.sh で作る',
+  },
+  {
     name: 'initramfs-gcc',
     label: 'gcc入り (RAM)',
     sub: 'initramfsに全部載せ',
