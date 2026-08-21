@@ -130,6 +130,11 @@ twm &
 exec xterm -geometry 78x24+8+8 -fn fixed -e /bin/sh
 XINITRC
 chmod 755 root/.xinitrc
+# root の行 — xterm は SHELL の他に /etc/passwd も引き、無いと
+# "No absolute path found for shell" と警告する (動きはする)。whoami 等にも効く
+mkdir -p etc
+grep -q '^root:' etc/passwd 2>/dev/null || echo 'root:x:0:0:root:/root:/bin/sh' >> etc/passwd
+grep -q '^root:' etc/group 2>/dev/null || echo 'root:x:0:' >> etc/group
 export HOME=/root
 echo 'export HOME=/root' >> etc/profile 2>/dev/null || true
 cd - >/dev/null

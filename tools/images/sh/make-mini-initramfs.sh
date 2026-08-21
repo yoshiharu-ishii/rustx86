@@ -113,7 +113,9 @@ cat > "$work/root/init" <<'INIT'
 # シリアルコンソールにはTERMが無い。viやlessがフルスクリーン描画の
 # 作法を選べるように、素直なxtermを名乗っておく
 export TERM=xterm
-/bin/busybox stty rows 24 cols 80
+# **シリアルにだけ** 80×24 を教える (/dev/console に向けると、そのときの VT = tty1
+# にも効いて、fbcon が 128×48 あるのに 80桁で折り返す画面になる — 実際になった)
+/bin/busybox stty rows 24 cols 80 < /dev/ttyS0 2>/dev/null
 # ループバックを上げる。**通常のLinuxではinitスクリプトの仕事**で、
 # うちのミニinitramfsは誰もやっていなかった — `ping 127.0.0.1` が
 # 100% packet loss になる (自分自身にすら届かない、妙な機械だった)。
