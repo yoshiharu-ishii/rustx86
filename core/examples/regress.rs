@@ -289,9 +289,109 @@ fn linux() -> Outcome {
     }
 }
 
+/// 32bit回帰 (画面つき): リニアFBを申告して Linux を起動し、efifb が掴んで
+/// fbcon が描き、ユーザー空間 (busybox fbsplash) が置いた画素がそのまま
+/// LFB に現れることを見る。**申告は起動の命令数を変える**ので、素の起動
+/// (上の linux()) とは別の回帰として持つ — 決定性の定規は素の方
+fn linux_lfb() -> Outcome {
+    let name = "32bit回帰: Linux + リニアFB (efifb)";
+    let skip = || Outcome {
+        name,
+        passed: None,
+        detail: String::new(),
+        shot: String::new(),
+        logs: vec![],
+    };
+    let Ok(kernel) = std::fs::read(img("vmlinux-lts")) else {
+        return skip();
+    };
+    let Ok(initrd) = std::fs::read(img("initramfs-mini")) else {
+        return skip();
+    };
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
+    m.lfb_enable();
+    // tty0 も console にする: 起動ログが fbcon に描かれる (実機のPCと同じ絵)。
+    // 最後の console= が /dev/console なのでシェルは ttyS0 のまま
+    m.boot_linux_with_initrd(&kernel, "console=tty0 console=ttyS0", Some(&initrd))
+        .expect("boot");
+    let budget = 1_500_000_000u64; // fbcon が描く分だけ素の起動 (970M) より増える
+    let reached = run_until_serial(&mut m, "busybox shell", budget);
+    let mut checks: Vec<(&str, bool)> = vec![];
+    if reached.is_some() {
+        let _ = run_until_serial(&mut m, "~ #", 100_000_000);
+        let serial = String::from_utf8_lossy(&m.devices.uart.tx).into_owned();
+        checks.push((
+            "efifb が掴んだ",
+            serial.contains("efifb: framebuffer at 0x7f00000"),
+        ));
+        checks.push(("640x480x24", serial.contains("efifb: mode is 640x480x24")));
+        checks.push((
+            "fbcon が取った",
+            serial.contains("Console: switching to colour frame buffer device 80x30"),
+        ));
+        // fbcon が起動ログを描いた = 真っ黒ではない
+        let lit = m.lfb_frame().iter().filter(|&&b| b != 0).count();
+        checks.push(("fbcon が文字を描いた", lit > 10_000));
+
+        // ユーザー空間から画素を置く: 4×2 のPPMを printf で作り、busybox の
+        // fbsplash で /dev/fb0 に描く。LFBにそのバイト列 (R,G,B) が現れれば、
+        // /dev/fb0 → efifb → LFB の道が通っている
+        let cmd = concat!(
+            "printf 'P6\\n4 2\\n255\\n' > /tmp/p.ppm; ",
+            "printf '\\377\\0\\0\\0\\377\\0\\0\\0\\377\\377\\377\\377",
+            "\\0\\0\\0\\377\\377\\0\\377\\0\\377\\0\\377\\377' >> /tmp/p.ppm; ",
+            "fbsplash -s /tmp/p.ppm; printf 'LFB%s\\n' DONE\n"
+        );
+        m.devices.uart.feed(cmd.as_bytes());
+        let ok = run_until_serial(&mut m, "LFBDONE", 300_000_000).is_some();
+        checks.push(("fbsplash が終わった", ok));
+        // **busybox の fbsplash は 24bpp を B,G,R 決め打ちで書く** (var の
+        // red/blue offset を見ない)。我々の申告は赤が先頭 (b8g8r8) で、fbcon と
+        // efifb はそれを守るが、fbsplash だけは逆順に置く。見たいのは
+        // 「ユーザー空間の書き込みが LFB に届くか」なので、fbsplash が実際に
+        // 書く並び (B,G,R) で照合する (2026-08-21 に /dev/fb0 を hexdump して確認)
+        let row0: [u8; 12] = [0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255];
+        let row1: [u8; 12] = [0, 0, 0, 0, 255, 255, 255, 0, 255, 255, 255, 0];
+        let fb = m.lfb_frame();
+        let line = 640 * 3;
+        let pattern_found = (0..fb.len().saturating_sub(line + 12))
+            .step_by(3)
+            .any(|o| fb[o..o + 12] == row0 && fb[o + line..o + line + 12] == row1);
+        checks.push(("fbsplash の画素がLFBに現れた", pattern_found));
+    }
+    let logs = vec![(
+        "linux-lfb-boot.log",
+        String::from_utf8_lossy(&m.devices.uart.tx).into_owned(),
+    )];
+    let all_ok = reached.is_some() && checks.iter().all(|(_, ok)| *ok);
+    let detail = match reached {
+        Some(n) => format!(
+            "シェル到達 {}M命令。{}",
+            n / 1_000_000,
+            checks
+                .iter()
+                .map(|(what, ok)| format!("{} {what}", if *ok { "✅" } else { "❌" }))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        ),
+        None => format!(
+            "シェルに到達せず (上限{}M命令)。trap={:?}",
+            budget / 1_000_000,
+            m.trap
+        ),
+    };
+    Outcome {
+        name,
+        passed: Some(all_ok),
+        detail,
+        shot: screenshot_serial(&m, 25),
+        logs,
+    }
+}
+
 fn main() {
     println!("# OS起動回帰 — プロンプト到達とスクショ\n");
-    let outcomes = [elks(), freedos(), linux()];
+    let outcomes = [elks(), freedos(), linux(), linux_lfb()];
     // ブートログを証跡として regress-out/ に残す (CIがアーティファクトに上げる)
     let outdir = format!("{ROOT}/regress-out");
     let _ = std::fs::create_dir_all(&outdir);

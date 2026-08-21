@@ -14,7 +14,7 @@
 //!   エコーバックが目印に見えて早降りする — printfの連結で回避)
 //! - 押しても目印が来なければ命令予算で降りる (無限に待たない)
 //!
-//! 環境変数: KERNEL / INITRD / DISK / RAM_MB / CMDLINE / GUEST_CMD / BUDGET_G (10^9命令)
+//! 環境変数: KERNEL / INITRD / DISK / RAM_MB / CMDLINE / GUEST_CMD / BUDGET_G (10^9命令) / LFB=1 (フレームバッファを申告)
 
 use rustx86_core::{initrd_ram_needed, Machine, MachineProfile};
 
@@ -46,6 +46,10 @@ fn main() {
     let mut m = Machine::with_profile(MachineProfile::pc_32bit(mb));
     if let Some(img) = disk {
         m.blk_attach(img);
+    }
+    // LFB=1 でリニアフレームバッファを申告する (efifb の実走確認用)
+    if std::env::var("LFB").is_ok() {
+        m.lfb_enable();
     }
     if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, Some(&initrd)) {
         eprintln!("起動できない: {e}");

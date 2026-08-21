@@ -25,6 +25,24 @@ impl Machine {
         self.mem.len()
     }
 
+    /// Linuxへ申告するリニアフレームバッファを挿す (起動前に呼ぶ)。
+    /// RAMの末尾1MBを切り出し、e820で予約して efifb に掴ませる
+    pub fn lfb_enable(&mut self) {
+        self.lfb = Some(crate::boot::bzimage::Lfb::at_top_of(self.mem.len() as u64));
+    }
+
+    /// LFBの中身 (申告していなければ空)。FB同様**ただのRAMの窓**で、
+    /// 表示側が毎フレーム読む
+    pub fn lfb_frame(&self) -> &[u8] {
+        match self.lfb {
+            Some(l) => {
+                let b = l.base as usize;
+                &self.mem[b..b + l.frame_bytes() as usize]
+            }
+            None => &[],
+        }
+    }
+
     /// 物理アドレスへ書く (変換しない)。テストや装置初期化用
     pub fn write_phys8(&mut self, pa: u32, val: u8) {
         if let Some(b) = self.mem.get_mut(pa as usize) {

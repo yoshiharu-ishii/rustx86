@@ -1293,6 +1293,8 @@ async function select(m, { autoBoot = true } = {}) {
       // どのルートFSを何MBで載せるかも電源の瞬間に決まる (上のNICと同じ)
       rootfs: () => ({ name: rootSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
       jit: () => jitSel.value === 'on',
+      // 画面: フレームバッファか (機械の定義で決まる — 「Linux (フレームバッファ)」)
+      fb: () => m.fb === true,
       // ゲストが送ったフレームは線へ (無ければ捨てる — 抜けたケーブル)
       onNetTx: f => link?.send(f),
     });
