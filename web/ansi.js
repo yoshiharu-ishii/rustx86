@@ -133,22 +133,48 @@ export class AnsiTerminal {
     // ②Esc (窓モードではブラウザが強制解除する — 戦わず利用する)
     // ③全画面ではEsc長押し (ブラウザの既定) ④自動解放 (blur・機械の停止)。
     // **捕獲中は必ず見た目が変わり、抜け方がその場に書いてある** (onCapture)
+    // 捕獲は2段: pointer lock が取れればそれ (相対移動が生で来る)。取れない
+    // 環境 (pointer-lock を許さない iframe、埋め込みの閲覧面) では**ソフト捕獲**
+    // — canvas 上の移動を前回の座標との差で相対化して渡す。ポインタは
+    // 画面の外へ出られるが、入力の経路は同じなので動作の確認はできる
+    let soft = false;
+    let last = null;
+    const setCaptured = (on) => {
+      if (on === this.captured) return;
+      this.captured = on;
+      last = null;
+      this.onCapture?.(on);
+    };
     const release = () => {
       if (document.pointerLockElement === canvas) document.exitPointerLock();
+      if (soft) { soft = false; setCaptured(false); }
     };
     canvas.addEventListener('click', () => {
-      if (this.gfxOn && this.onMouse && document.pointerLockElement !== canvas) {
-        canvas.requestPointerLock?.();
-      }
+      if (!this.gfxOn || !this.onMouse || this.captured) return;
+      const fallback = () => { soft = true; setCaptured(true); };
+      if (!canvas.requestPointerLock) return fallback();
+      // 断られたらソフト捕獲へ (Promise を返す実装と返さない実装がある)
+      const p = canvas.requestPointerLock();
+      if (p && typeof p.catch === 'function') p.catch(fallback);
     });
     document.addEventListener('pointerlockchange', () => {
       const on = document.pointerLockElement === canvas;
-      if (on === this.captured) return;
-      this.captured = on;
-      this.onCapture?.(on);
+      if (on) { soft = false; setCaptured(true); }
+      else if (!soft) setCaptured(false);
     });
+    document.addEventListener('pointerlockerror', () => { soft = true; setCaptured(true); });
     canvas.addEventListener('mousemove', (e) => {
-      if (this.captured) this.onMouse?.(e.movementX, e.movementY, e.buttons & 7);
+      if (!this.captured) return;
+      if (document.pointerLockElement === canvas) {
+        this.onMouse?.(e.movementX, e.movementY, e.buttons & 7);
+        return;
+      }
+      // ソフト捕獲: CSS の座標差を canvas の画素に直す
+      const r = canvas.getBoundingClientRect();
+      const k = canvas.width / r.width;
+      const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
+      if (last) this.onMouse?.(Math.round(x - last.x), Math.round(y - last.y), e.buttons & 7);
+      last = { x, y };
     });
     canvas.addEventListener('mousedown', (e) => {
       if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
@@ -159,8 +185,12 @@ export class AnsiTerminal {
     canvas.addEventListener('contextmenu', (e) => { if (this.captured) e.preventDefault(); });
     // ①ホストキー。物理位置 (code) で見るので配列と無縁
     canvas.addEventListener('keydown', (e) => {
-      if (this.captured && e.ctrlKey && e.altKey && e.code === 'KeyG') {
+      if (!this.captured) return;
+      const hostKey = e.ctrlKey && e.altKey && e.code === 'KeyG';
+      // ソフト捕獲では Esc もこちらで受ける (ロック中はブラウザが先に解く)
+      if (hostKey || (soft && e.code === 'Escape')) {
         e.preventDefault();
+        e.stopImmediatePropagation();
         release();
       }
     }, true);
