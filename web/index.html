@@ -214,6 +214,13 @@
   #screen { aspect-ratio: 730 / 400; max-width: min(730px, calc((100vh - 17rem) * 730 / 400)); }
   /* Linuxのシリアル端末は24行 */
   #linuxScreen { aspect-ratio: 730 / 384; max-width: min(730px, calc((100vh - 17rem) * 730 / 384)); }
+  /* フレームバッファの顔 (Linux FB機): 640×480 を**等倍以上**で見せる。
+     縮めるとカーネルの 8×16 フォントが潰れて読めない。大きくするときは
+     ぼかさない (pixelated) — 画素の絵は画素のまま */
+  #linuxScreen.fb {
+    aspect-ratio: 4 / 3; max-width: min(960px, calc((100vh - 17rem) * 4 / 3));
+    image-rendering: pixelated;
+  }
   #screen:focus, #linuxScreen:focus { outline: none; }
   /* ドラッグ中の合図。**受け皿がどれかを言う** —
      機械が動いていれば端末の面、まだなら投入口そのものが光る */
@@ -461,17 +468,17 @@
       <span class="lbl" id="rootLbl" hidden>ルートFS</span>
       <select id="rootSel" hidden></select>
       <span class="lbl" id="ramLbl" hidden>RAM</span>
-      <label id="jitLbl" for="jitSel" hidden>JIT</label>
-      <select id="jitSel" hidden title="JIT (F1d wasm) — on/offで実行結果は1bitも変わらない">
-        <option value="off">JIT off</option>
-        <option value="on">JIT on</option>
-      </select>
       <select id="ramSel" hidden>
         <option value="auto">自動</option>
         <option value="128">128 MB</option>
         <option value="256">256 MB</option>
         <option value="512">512 MB</option>
         <option value="1024">1024 MB</option>
+      </select>
+      <label id="jitLbl" for="jitSel" hidden>JIT</label>
+      <select id="jitSel" hidden title="JIT (F1d wasm) — on/offで実行結果は1bitも変わらない">
+        <option value="off">JIT off</option>
+        <option value="on">JIT on</option>
       </select>
       <span class="spacer"></span>
       <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>

@@ -239,7 +239,13 @@ impl Machine {
 
         // zero page を組んで低位に置く (慣習の 0x1_0000)
         const ZERO_PAGE_ADDR: u32 = 0x0001_0000;
-        let zp = bzimage::build_zero_page(hdr_src, self.mem.len() as u64, CMDLINE_ADDR, initrd_loc);
+        let zp = bzimage::build_zero_page(
+            hdr_src,
+            self.mem.len() as u64,
+            CMDLINE_ADDR,
+            initrd_loc,
+            self.lfb,
+        );
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);
         }

@@ -88,8 +88,8 @@ export const MACHINES = [
   {
     group: 'OSライブラリ',
     id: 'linux',
-    label: 'Linux',
-    sub: 'bzImage + initramfs',
+    label: 'Linux (コンソール)',
+    sub: '画面はシリアル端末 (ttyS0) — カーネルの文字出力をブラウザの端末が描く',
     // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
     // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
     // linux-machine.js (ワーカー)。**選び方と見た目はELKSと同じ**にする。
@@ -99,11 +99,35 @@ export const MACHINES = [
     probe: ['./vmlinuz-lts', './vmlinux-lts.gz'],
     note:
       'BIOSは通さず、カーネルを直接ロードして32bitエントリへ飛ぶ。' +
-      'コンソールはシリアル (ttyS0)。選ぶと電源ONからカーネルログの流れる' +
-      '本物のフル起動 (〜20秒)。途中の状態は「スナップショット書出/復元」で残せる。' +
-      'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
+      '**画面はシリアル端末 (ttyS0)**: カーネルは文字を送るだけで、それを描くのは' +
+      'ブラウザ側の端末 (ansi.js)。ゲストから見て画面装置は存在しない。' +
+      '選ぶと電源ONからカーネルログの流れる本物のフル起動 (〜20秒)。' +
+      '途中の状態は「スナップショット書出/復元」で残せる。' +
+      'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。' +
+      '下の「Linux (フレームバッファ)」とはカーネルもルートFSも同じで、違うのは画面だけ。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す
+  },
+  {
+    group: 'OSライブラリ',
+    id: 'linux-fb',
+    label: 'Linux (フレームバッファ)',
+    sub: '画面は 640×480 の画素 — カーネル自身 (efifb/fbcon) が描く',
+    kind: 'linux',
+    // **同じカーネル・同じルートFS、違うのは画面だけ。** 起動時に
+    // zero page でリニアFBを申告し (efifb)、console= の最後を tty0 にする。
+    // initはそれを見てシェルを /dev/tty1 (fbcon) に出す。キーはPS/2経由
+    fb: true,
+    status: 'ok',
+    probe: ['./vmlinuz-lts', './vmlinux-lts.gz'],
+    note:
+      '**画面は画素**: 起動時にLinuxへ 640×480×24bpp のリニアフレームバッファを申告し、' +
+      'カーネルの efifb が掴んで fbcon がカーネル自身のフォントで描く。ブラウザはその' +
+      '画素をそのまま映すだけで、文字を解釈しない。シェルも画面側 (tty1) に出て、' +
+      'キーはPS/2キーボードとしてカーネルへ入る (シリアル側にはバナーが1行流れるだけ)。' +
+      '上の「Linux (コンソール)」とはカーネルもルートFSも同じで、**違うのは画面装置の有無だけ**。' +
+      'fbcon が描く分だけ起動の命令数が変わる (970M → 1160M) ので、別の機械として並べている。' +
+      'この先の fbdev アプリ (links2 -g / Nano-X / SDL) はこちらで動かす。',
   },
   {
     group: 'メディア',

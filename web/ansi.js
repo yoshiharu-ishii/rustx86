@@ -74,6 +74,10 @@ export class AnsiTerminal {
 
     // 入力: キーが来たら onData(str) を呼ぶ (端末→ゲスト)
     this.onData = null;
+    /** 画素の顔 (drawRgb) が出ている間は、文字ではなく**物理キー**を渡す。
+     *  (code, down) => void。シェルが tty0 (fbcon) に居るときは、入力も
+     *  PS/2 キーボード (8042) からカーネルのVTへ入るのが実機の道 */
+    this.onKey = null;
     // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
     // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
     /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
@@ -102,7 +106,19 @@ export class AnsiTerminal {
         }
         return;
       }
+      // 画素の顔が出ている = シェルは tty0。文字にせず位置 (code) を渡す
+      if (this.gfxOn && this.onKey) {
+        e.preventDefault();
+        this.onKey(e.code, true);
+        return;
+      }
       this._key(e);
+    });
+    canvas.addEventListener('keyup', (e) => {
+      if (this.gfxOn && this.onKey) {
+        e.preventDefault();
+        this.onKey(e.code, false);
+      }
     });
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
@@ -158,6 +174,14 @@ export class AnsiTerminal {
   }
 
   reset() {
+    this.gfxOn = false;
+    if (this.textSize) {
+      // 文字の顔へ戻す: canvas の寸法も升目に戻す
+      this.canvas.width = this.textSize.w;
+      this.canvas.height = this.textSize.h;
+      this.canvas.classList.remove('fb');
+      this.gfx = null;
+    }
     this.grid = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => this._blank()),
     );
@@ -501,7 +525,37 @@ export class AnsiTerminal {
 
   // ---- 描画 ----
 
+  /** efifb が描いた一枚 (24bpp・R,G,Bの順) をそのまま置く。
+   * 解像度はゲストの申告 (640×480) で、canvasは 80×24 の升目の大きさ
+   * (730×384) なので縮めて収める — 補間は切る (文字の縁が滲む)。
+   * 出ている間、文字の描き手 (render) は黙る。戻すのは reset() */
+  drawRgb(rgb, width, height) {
+    this.gfxOn = true;
+    if (!this.gfx || this.gfx.w !== width || this.gfx.h !== height) {
+      const cvs = document.createElement('canvas');
+      cvs.width = width;
+      cvs.height = height;
+      this.gfx = { w: width, h: height, cvs, ctx: cvs.getContext('2d'), img: new ImageData(width, height) };
+      // **canvas をゲストの解像度に張り替える** (等倍)。文字の升目 (730×384) に
+      // 縮めて収めると 8×16 のフォントが潰れる。見た目の大きさは CSS (.fb) が決める
+      this.textSize ??= { w: this.canvas.width, h: this.canvas.height };
+      this.canvas.width = width;
+      this.canvas.height = height;
+      this.canvas.classList.add('fb');
+    }
+    const d = this.gfx.img.data;
+    for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+      d[o] = rgb[i * 3];
+      d[o + 1] = rgb[i * 3 + 1];
+      d[o + 2] = rgb[i * 3 + 2];
+      d[o + 3] = 255;
+    }
+    this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
+    this.ctx.putImageData(this.gfx.img, 0, 0);
+  }
+
   render() {
+    if (this.gfxOn) return; // 画素の一枚の上に文字の黒地を被せない
     if (!this.dirty) return;
     this.dirty = false;
     const ctx = this.ctx;

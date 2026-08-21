@@ -59,6 +59,8 @@ export function mountLinux(canvas, opts = {}) {
   term.reset();
   // クリップボードの行き先は**呼び手 (main.js) の一本道**。
   // ここで onData へ直に流していたので、VGA機とは別の作法になっていた
+  // 画素の顔のときの物理キー。ワーカー越しに 8042 へ (VGA機の key() と同じ経路)
+  term.onKey = (code, down) => worker?.postMessage({ type: 'key', code, down });
   term.onPaste = (text) => opts.onPaste?.(text);
   term.onPasteRequest = () => opts.onPasteRequest?.();
   term.onCopyRequest = () => opts.onCopyRequest?.();
@@ -318,8 +320,14 @@ export function mountLinux(canvas, opts = {}) {
                 kernel: kernel.buffer,
                 initrd: initrd?.buffer,
                 disk: disk?.buffer,
-                cmdline: 'console=ttyS0',
+                // フレームバッファを申告するときは tty0 を**最後の** console= にする。
+                // カーネルのログは両方に出るが、/dev/console (= initのシェル) は
+                // 最後に書いた方なので、プロンプトが画面 (fbcon) に出る。
+                // 逆順 (ttyS0が最後) だとログだけ映ってシェルは見えないシリアルに
+                // 居る — 「FBだと触れない」の正体 (2026-08-21)
+                cmdline: opts.fb?.() ? 'console=ttyS0 console=tty0' : 'console=ttyS0',
                 ramMb,
+                lfb: !!opts.fb?.(),
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
@@ -353,6 +361,11 @@ export function mountLinux(canvas, opts = {}) {
               bannerTail = '';
             }
           }
+          break;
+        }
+        case 'lfb': {
+          // efifb が描いた一枚 (24bpp、赤が先頭)。描き手は端末と同じcanvas
+          term.drawRgb(new Uint8Array(msg.bytes), msg.width, msg.height);
           break;
         }
         case 'state': {
