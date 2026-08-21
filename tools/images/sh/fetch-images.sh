@@ -199,6 +199,9 @@ build_freedos() {
   # - DEBUG.COM: FreeDOS公式の lDebug。起動フロッピーにはデバッガが
   #   入っていないので、DOSの中から AIR.COM を逆アセンブルできるように载せる
   [ -f tools/guest/air/AIR.COM ] && files+=(tools/guest/air/AIR.COM)
+  # - BOUNCE.COM: mode 13h でボールが跳ねる自作デモ (tools/guest/bounce/)。
+  #   垂直帰線待ち・DAC・0xA0000直書きと、Tier 6a の部品が全部通る
+  [ -f tools/guest/bounce/BOUNCE.COM ] && files+=(tools/guest/bounce/BOUNCE.COM)
   if fetch "$DEVEL_BASE/ldebug.zip" "$WORK/ldebug.zip"; then
     unzip_one "$WORK/ldebug.zip" "BIN/ldebug.com" "$WORK"
     cp "$WORK/ldebug.com" "$WORK/DEBUG.COM"
@@ -226,7 +229,7 @@ build_freedos() {
 
   cp "$IMAGES/fd14boot.img" "$IMAGES/fd14games.img"
   copy_into_image "$IMAGES/fd14games.img" "${files[@]}"
-  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman + AIR / DEBUG + mTCP)"
+  say "FreeDOS 完了 (eliza / zmiy / row4t / hangman + AIR / BOUNCE / DEBUG + mTCP)"
 }
 
 publish_to_web() {
