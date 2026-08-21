@@ -175,6 +175,13 @@ export class AnsiTerminal {
 
   reset() {
     this.gfxOn = false;
+    if (this.textSize) {
+      // 文字の顔へ戻す: canvas の寸法も升目に戻す
+      this.canvas.width = this.textSize.w;
+      this.canvas.height = this.textSize.h;
+      this.canvas.classList.remove('fb');
+      this.gfx = null;
+    }
     this.grid = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => this._blank()),
     );
@@ -529,6 +536,12 @@ export class AnsiTerminal {
       cvs.width = width;
       cvs.height = height;
       this.gfx = { w: width, h: height, cvs, ctx: cvs.getContext('2d'), img: new ImageData(width, height) };
+      // **canvas をゲストの解像度に張り替える** (等倍)。文字の升目 (730×384) に
+      // 縮めて収めると 8×16 のフォントが潰れる。見た目の大きさは CSS (.fb) が決める
+      this.textSize ??= { w: this.canvas.width, h: this.canvas.height };
+      this.canvas.width = width;
+      this.canvas.height = height;
+      this.canvas.classList.add('fb');
     }
     const d = this.gfx.img.data;
     for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
@@ -538,16 +551,7 @@ export class AnsiTerminal {
       d[o + 3] = 255;
     }
     this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
-    const { ctx } = this;
-    const W = this.canvas.width - SCROLLBAR_W;
-    const H = this.canvas.height;
-    const scale = Math.min(W / width, H / height);
-    const dw = Math.floor(width * scale);
-    const dh = Math.floor(height * scale);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.gfx.cvs, (W - dw) >> 1, (H - dh) >> 1, dw, dh);
+    this.ctx.putImageData(this.gfx.img, 0, 0);
   }
 
   render() {

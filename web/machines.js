@@ -89,7 +89,7 @@ export const MACHINES = [
     group: 'OSライブラリ',
     id: 'linux',
     label: 'Linux',
-    sub: 'bzImage + initramfs',
+    sub: 'bzImage + initramfs、シリアルコンソール',
     // コンソールはシリアル (ttyS0) で、VGAテキストとは描画の作法が丸ごと違う。
     // 端末は terminal.js ではなく ansi.js、回すのは machine.js ではなく
     // linux-machine.js (ワーカー)。**選び方と見た目はELKSと同じ**にする。
@@ -104,6 +104,25 @@ export const MACHINES = [
       'シェルが出たら ls / cat /proc/cpuinfo / snake / vi が叩ける。',
     // イメージ (vmlinuz-lts / initramfs-mini) は同梱しない (配布物のため)。
     // 無いときの案内は linux-machine.js が fetch 失敗時に出す
+  },
+  {
+    group: 'OSライブラリ',
+    id: 'linux-fb',
+    label: 'Linux (フレームバッファ)',
+    sub: 'bzImage + initramfs、画面は 640×480',
+    kind: 'linux',
+    // **同じカーネル・同じルートFS、違うのは画面だけ。** 起動時に
+    // zero page でリニアFBを申告し (efifb)、console= の最後を tty0 にする。
+    // initはそれを見てシェルを /dev/tty1 (fbcon) に出す。キーはPS/2経由
+    fb: true,
+    status: 'ok',
+    probe: ['./vmlinuz-lts', './vmlinux-lts.gz'],
+    note:
+      'シリアルではなく**フレームバッファ**に映す。起動時にLinuxへ 640×480×24bpp の' +
+      'リニアFBを申告し、カーネルの efifb が掴んで fbcon がカーネル自身のフォントで描く。' +
+      'シェルも画面側 (tty1) に出て、キーはPS/2キーボードとしてカーネルへ入る。' +
+      '上の「Linux」と同じカーネル・同じルートFSで、**違うのは画面だけ**。' +
+      '申告すると起動の命令数が変わる (970M → 1160M) ので、素のLinuxとは別の機械として並べる。',
   },
   {
     group: 'メディア',
