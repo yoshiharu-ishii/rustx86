@@ -151,11 +151,18 @@ export class AnsiTerminal {
     };
     canvas.addEventListener('click', () => {
       if (!this.gfxOn || !this.onMouse || this.captured) return;
-      const fallback = () => { soft = true; setCaptured(true); };
-      if (!canvas.requestPointerLock) return fallback();
-      // 断られたらソフト捕獲へ (Promise を返す実装と返さない実装がある)
-      const p = canvas.requestPointerLock();
-      if (p && typeof p.catch === 'function') p.catch(fallback);
+      // **既定はソフト捕獲。** 窓モードの pointer lock は Esc でブラウザが
+      // 強制解除し、そのとき Esc はゲストに届かない — vi の Esc が潰れる。
+      // ソフト捕獲なら Esc もそのままゲストへ行く (解放はホストキーだけ)。
+      // pointer lock は全画面のとき (keyboard lock で Esc を守れる) に限る
+      if (document.fullscreenElement && canvas.requestPointerLock) {
+        const fallback = () => { soft = true; setCaptured(true); };
+        const p = canvas.requestPointerLock();
+        if (p && typeof p.catch === 'function') p.catch(fallback);
+        return;
+      }
+      soft = true;
+      setCaptured(true);
     });
     document.addEventListener('pointerlockchange', () => {
       const on = document.pointerLockElement === canvas;
@@ -184,11 +191,11 @@ export class AnsiTerminal {
     });
     canvas.addEventListener('contextmenu', (e) => { if (this.captured) e.preventDefault(); });
     // ①ホストキー。物理位置 (code) で見るので配列と無縁
+    // ①ホストキーは Ctrl+Alt+Shift+G — Esc は使わない (vi のもの)。
+    // 物理位置 (code) で見るので配列と無縁
     canvas.addEventListener('keydown', (e) => {
       if (!this.captured) return;
-      const hostKey = e.ctrlKey && e.altKey && e.code === 'KeyG';
-      // ソフト捕獲では Esc もこちらで受ける (ロック中はブラウザが先に解く)
-      if (hostKey || (soft && e.code === 'Escape')) {
+      if (e.ctrlKey && e.altKey && e.shiftKey && e.code === 'KeyG') {
         e.preventDefault();
         e.stopImmediatePropagation();
         release();
@@ -258,6 +265,10 @@ export class AnsiTerminal {
       this.canvas.width = this.textSize.w;
       this.canvas.height = this.textSize.h;
       this.canvas.classList.remove('fb');
+      this.canvas.style.removeProperty('--fbw');
+      this.canvas.style.removeProperty('--fbh');
+      this.canvas.style.imageRendering = '';
+      this.fitObserver?.disconnect();
       this.gfx = null;
     }
     this.grid = Array.from({ length: this.rows }, () =>
@@ -603,11 +614,11 @@ export class AnsiTerminal {
 
   // ---- 描画 ----
 
-  /** efifb が描いた一枚 (24bpp・R,G,Bの順) をそのまま置く。
+  /** efifb が描いた一枚 (32bpp=[詰め物,R,G,B] / 24bpp=[R,G,B]) をそのまま置く。
    * 解像度はゲストの申告 (640×480) で、canvasは 80×24 の升目の大きさ
    * (730×384) なので縮めて収める — 補間は切る (文字の縁が滲む)。
    * 出ている間、文字の描き手 (render) は黙る。戻すのは reset() */
-  drawRgb(rgb, width, height) {
+  drawRgb(rgb, width, height, bpp = 24) {
     this.gfxOn = true;
     if (!this.gfx || this.gfx.w !== width || this.gfx.h !== height) {
       const cvs = document.createElement('canvas');
@@ -620,13 +631,33 @@ export class AnsiTerminal {
       this.canvas.width = width;
       this.canvas.height = height;
       this.canvas.classList.add('fb');
+      // 見た目の大きさは CSS が決める (--fbw で解像度を伝える)。縮小されるときは
+      // pixelated を切る — 非整数の最近傍縮小は文字が欠けて読めない
+      this.canvas.style.setProperty('--fbw', String(width));
+      this.canvas.style.setProperty('--fbh', String(height));
+      const fit = () => {
+        const shown = this.canvas.getBoundingClientRect().width;
+        this.canvas.style.imageRendering = shown + 0.5 < width ? 'auto' : 'pixelated';
+      };
+      fit();
+      (this.fitObserver ??= new ResizeObserver(fit)).observe(this.canvas);
     }
     const d = this.gfx.img.data;
-    for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
-      d[o] = rgb[i * 3];
-      d[o + 1] = rgb[i * 3 + 1];
-      d[o + 2] = rgb[i * 3 + 2];
-      d[o + 3] = 255;
+    if (bpp === 32) {
+      // [詰め物, R, G, B] の4バイト (X が扱える形。赤は第2バイト)
+      for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+        d[o] = rgb[i * 4 + 1];
+        d[o + 1] = rgb[i * 4 + 2];
+        d[o + 2] = rgb[i * 4 + 3];
+        d[o + 3] = 255;
+      }
+    } else {
+      for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+        d[o] = rgb[i * 3];
+        d[o + 1] = rgb[i * 3 + 1];
+        d[o + 2] = rgb[i * 3 + 2];
+        d[o + 3] = 255;
+      }
     }
     this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
     this.ctx.putImageData(this.gfx.img, 0, 0);

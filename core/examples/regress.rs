@@ -325,9 +325,9 @@ fn linux_lfb() -> Outcome {
         let serial = String::from_utf8_lossy(&m.devices.uart.tx).into_owned();
         checks.push((
             "efifb が掴んだ",
-            serial.contains("efifb: framebuffer at 0x7f00000"),
+            serial.contains("efifb: framebuffer at 0x7e00000"),
         ));
-        checks.push(("640x480x24", serial.contains("efifb: mode is 640x480x24")));
+        checks.push(("640x480x32", serial.contains("efifb: mode is 640x480x32")));
         checks.push((
             "fbcon が取った",
             serial.contains("Console: switching to colour frame buffer device 80x30"),
@@ -348,18 +348,19 @@ fn linux_lfb() -> Outcome {
         m.devices.uart.feed(cmd.as_bytes());
         let ok = run_until_serial(&mut m, "LFBDONE", 300_000_000).is_some();
         checks.push(("fbsplash が終わった", ok));
-        // **busybox の fbsplash は 24bpp を B,G,R 決め打ちで書く** (var の
-        // red/blue offset を見ない)。我々の申告は赤が先頭 (b8g8r8) で、fbcon と
-        // efifb はそれを守るが、fbsplash だけは逆順に置く。見たいのは
-        // 「ユーザー空間の書き込みが LFB に届くか」なので、fbsplash が実際に
-        // 書く並び (B,G,R) で照合する (2026-08-21 に /dev/fb0 を hexdump して確認)
-        let row0: [u8; 12] = [0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255];
-        let row1: [u8; 12] = [0, 0, 0, 0, 255, 255, 255, 0, 255, 255, 255, 0];
+        // **busybox の fbsplash は var の red/blue offset を見ず、B,G,R(,0) 決め打ちで
+        // 書く**。我々の申告は [詰め物,R,G,B] で、fbcon と efifb はそれを守るが、
+        // fbsplash だけは逆順に置く。見たいのは「ユーザー空間の書き込みが LFB に
+        // 届くか」なので、fbsplash が実際に書く並びで照合する (/dev/fb0 を hexdump
+        // して確認: 赤 = 00 00 ff 00)
+        // 32bpp では fbsplash は [B, G, R, 0] で置く (こちらも offset を見ない)
+        let row0: [u8; 16] = [0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let row1: [u8; 16] = [0, 0, 0, 0, 0, 255, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0];
         let fb = m.lfb_frame();
-        let line = 640 * 3;
-        let pattern_found = (0..fb.len().saturating_sub(line + 12))
-            .step_by(3)
-            .any(|o| fb[o..o + 12] == row0 && fb[o + line..o + line + 12] == row1);
+        let line = 640 * 4;
+        let pattern_found = (0..fb.len().saturating_sub(line + 16))
+            .step_by(4)
+            .any(|o| fb[o..o + 16] == row0 && fb[o + line..o + line + 16] == row1);
         checks.push(("fbsplash の画素がLFBに現れた", pattern_found));
 
         // ユーザー空間の本物のアプリ: bounce (tools/guest/bounce-fb) が /dev/fb0 を
@@ -368,11 +369,12 @@ fn linux_lfb() -> Outcome {
         // 聞いた画素形式 (赤が下位) どおりに描けている
         m.devices
             .uart
-            .feed(b"bounce </dev/null & sleep 1; kill $!; printf 'BNC%s\n' DONE\n");
+            .feed(b"bounce 60 </dev/null; printf 'BNC%s\n' DONE\n");
         let ok = run_until_serial(&mut m, "BNCDONE", 400_000_000).is_some();
         checks.push(("bounce が回って止まった", ok));
         let fb = m.lfb_frame();
-        let has = |rgb: [u8; 3]| fb.chunks_exact(3).any(|p| p == rgb);
+        // 画素は [詰め物, R, G, B] の4バイト (bounce は ioctl で聞いた並びで置く)
+        let has = |rgb: [u8; 3]| fb.chunks_exact(4).any(|p| p[1..] == rgb);
         let balls = [
             [255u8, 120, 0],
             [255, 32, 32],

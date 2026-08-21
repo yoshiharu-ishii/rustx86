@@ -104,11 +104,18 @@ cat > "$work/root/init" <<'INIT'
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t sysfs sys /sys
 /bin/busybox mount -t devtmpfs dev /dev 2>/dev/null
+# 擬似端末 (xterm など pty を開くものに要る)。無いと xterm が "not enough ptys"
+# で即死し、xinit ごと降りる (X が「上がってすぐ消える」の正体だった)
+/bin/busybox mkdir -p /dev/pts /dev/shm
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null
+/bin/busybox mount -t tmpfs shm /dev/shm 2>/dev/null
 /bin/busybox --install -s /bin
 # シリアルコンソールにはTERMが無い。viやlessがフルスクリーン描画の
 # 作法を選べるように、素直なxtermを名乗っておく
 export TERM=xterm
-/bin/busybox stty rows 24 cols 80
+# **シリアルにだけ** 80×24 を教える (/dev/console に向けると、そのときの VT = tty1
+# にも効いて、fbcon が 128×48 あるのに 80桁で折り返す画面になる — 実際になった)
+/bin/busybox stty rows 24 cols 80 < /dev/ttyS0 2>/dev/null
 # ループバックを上げる。**通常のLinuxではinitスクリプトの仕事**で、
 # うちのミニinitramfsは誰もやっていなかった — `ping 127.0.0.1` が
 # 100% packet loss になる (自分自身にすら届かない、妙な機械だった)。

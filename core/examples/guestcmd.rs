@@ -47,9 +47,17 @@ fn main() {
     if let Some(img) = disk {
         m.blk_attach(img);
     }
-    // LFB=1 でリニアフレームバッファを申告する (efifb の実走確認用)
-    if std::env::var("LFB").is_ok() {
-        m.lfb_enable();
+    // LFB=1 でリニアフレームバッファを申告する (efifb の実走確認用)。
+    // LFB_DUMP=path なら、降りるときに画面を PPM (P6) で書き出す
+    if let Ok(v) = std::env::var("LFB") {
+        // LFB=1 で既定 (640×480)、LFB=1024x768 のように解像度も言える
+        match v
+            .split_once('x')
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        {
+            Some((w, h)) => m.lfb_enable_sized(w, h),
+            None => m.lfb_enable(),
+        }
     }
     if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, Some(&initrd)) {
         eprintln!("起動できない: {e}");
@@ -105,6 +113,20 @@ fn main() {
             let mut out = std::io::stdout();
             let _ = out.write_all(&tx[printed..]);
             let _ = out.flush();
+        }
+    }
+    // LFB_DUMP=path: 画面の画素を PPM (P6) に落とす (X などの目視確認用)
+    if let (Ok(path), Some(l)) = (std::env::var("LFB_DUMP"), m.lfb) {
+        let mut ppm = format!("P6\n{} {}\n255\n", l.width, l.height).into_bytes();
+        let fb = m.lfb_frame();
+        match l.bpp {
+            // [詰め物, R, G, B] → R,G,B
+            32 => ppm.extend(fb.chunks_exact(4).flat_map(|p| [p[1], p[2], p[3]])),
+            _ => ppm.extend_from_slice(fb),
+        }
+        match std::fs::write(&path, &ppm) {
+            Ok(()) => eprintln!("[guestcmd] LFB → {path}"),
+            Err(e) => eprintln!("LFB_DUMP を書けない {path}: {e}"),
         }
     }
     if done_at.is_none() {

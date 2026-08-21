@@ -68,7 +68,8 @@ self.onmessage = (e) => {
           msg.initrd ? new Uint8Array(msg.initrd) : undefined,
           msg.cmdline ?? 'console=ttyS0',
           msg.ramMb ?? 128,
-          !!msg.lfb, // リニアFBの申告 (efifb)。偽なら起動はビット同一
+          msg.lfb?.width, // リニアFBの申告 (efifb)。無ければ起動はビット同一
+          msg.lfb?.height,
         );
         // NICを挿すのは電源を入れるこの瞬間だけ (VGA機と同じ)。
         // Linuxは起動時にしかPCIを数えないので、後から挿しても見えない
@@ -288,7 +289,7 @@ function loop() {
       const view = new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), emu.lfb_len());
       const copy = view.slice();
       postMessage(
-        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height() },
+        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height(), bpp: emu.lfb_bpp() },
         [copy.buffer],
       );
     }
