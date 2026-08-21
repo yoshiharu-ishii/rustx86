@@ -221,6 +221,8 @@
     aspect-ratio: 4 / 3; max-width: min(960px, calc((100vh - 17rem) * 4 / 3));
     image-rendering: pixelated;
   }
+  /* マウス捕獲中: 枠を光らせて「いま入力は全部ゲストへ行く」と言う */
+  #linuxScreen.captured { box-shadow: 0 0 0 3px var(--green); }
   #screen:focus, #linuxScreen:focus { outline: none; }
   /* ドラッグ中の合図。**受け皿がどれかを言う** —
      機械が動いていれば端末の面、まだなら投入口そのものが光る */

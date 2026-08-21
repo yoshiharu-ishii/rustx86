@@ -44,6 +44,24 @@ for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio
   ko=$(find -L "$work/lib" "$work/usr/lib" -name "$mod.ko" 2>/dev/null | head -1)
   [ -n "$ko" ] && cp "$ko" "$work/root/lib/modules/"
 done
+# PS/2マウス (6b)。Alpineのinitramfs-ltsには入っていないので、同じnetbootの
+# **modloop-lts** (全モジュールのsquashfs、カーネルと同じ版) から4つ借りる。
+# modloopが無ければ黙って抜く — マウス無しで起動は変わらない
+#   i2c-core   psmouse が (タッチパッド系のために) 依存している
+#   psmouse    PS/2マウスのプロトコル (serio の AUX ポートに bind)
+#   mousedev   /dev/input/mice (PS/2形式で読み出す古典の口)
+#   evdev      /dev/input/event* (X や SDL が読む口)
+if [ -f images/modloop-lts ]; then
+  mlo=$(mktemp -d)
+  # (modloop の中のモジュールは圧縮されていない .ko。apk側の .ko.gz とは違う)
+  unsquashfs -q -f -d "$mlo" images/modloop-lts \
+    'modules/*/kernel/drivers/i2c/i2c-core.ko' \
+    'modules/*/kernel/drivers/input/mouse/psmouse.ko' \
+    'modules/*/kernel/drivers/input/mousedev.ko' \
+    'modules/*/kernel/drivers/input/evdev.ko' >/dev/null 2>&1 || true
+  find "$mlo" -name "*.ko" -exec cp {} "$work/root/lib/modules/" \;
+  rm -rf "$mlo"
+fi
 # TLS一式 — busyboxのwgetはhttpsを外部ヘルパ ssl_client に投げる。
 # 全部Alpineのinitramfs-ltsから借りる (busybox/muslと同じ出自)。
 #   ssl_client            13KB  wgetのTLS口 (libssl/libcryptoに動的リンク)
@@ -108,6 +126,14 @@ export TERM=xterm
 for mod in virtio_ring virtio virtio_pci_modern_dev virtio_pci_legacy_dev virtio_pci virtio_blk squashfs overlay; do
   /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
 done
+# PS/2マウス。i8042 の第2ポート (AUX) に psmouse が bind し、mousedev が
+# /dev/input/mice を、evdev が /dev/input/event* を作る。**無くてもエラーにしない**
+# psmouse は proto=bare — 素の3ボタンPS/2マウスしか居ないので、Synaptics/ALPS/
+# IntelliMouse… の拡張を順に試すプローブ (ゲスト時間で約1.5秒) を省く
+/bin/busybox insmod /lib/modules/i2c-core.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/psmouse.ko proto=bare 2>/dev/null
+/bin/busybox insmod /lib/modules/mousedev.ko 2>/dev/null
+/bin/busybox insmod /lib/modules/evdev.ko 2>/dev/null
 #
 # --- ディスクがあれば、そちらを根にして移り住む ---
 #
