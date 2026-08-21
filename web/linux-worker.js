@@ -92,6 +92,10 @@ self.onmessage = (e) => {
       loop();
       break;
     }
+    case 'key':
+      // 物理キー (FBの顔のとき)。8042 → IRQ1 → カーネルの atkbd → VT
+      if (emu) emu.key(msg.code, msg.down);
+      break;
     case 'input':
       if (emu) emu.serial_in(new Uint8Array(msg.bytes));
       break;

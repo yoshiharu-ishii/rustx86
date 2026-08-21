@@ -74,6 +74,10 @@ export class AnsiTerminal {
 
     // 入力: キーが来たら onData(str) を呼ぶ (端末→ゲスト)
     this.onData = null;
+    /** 画素の顔 (drawRgb) が出ている間は、文字ではなく**物理キー**を渡す。
+     *  (code, down) => void。シェルが tty0 (fbcon) に居るときは、入力も
+     *  PS/2 キーボード (8042) からカーネルのVTへ入るのが実機の道 */
+    this.onKey = null;
     // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
     // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
     /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
@@ -102,7 +106,19 @@ export class AnsiTerminal {
         }
         return;
       }
+      // 画素の顔が出ている = シェルは tty0。文字にせず位置 (code) を渡す
+      if (this.gfxOn && this.onKey) {
+        e.preventDefault();
+        this.onKey(e.code, true);
+        return;
+      }
       this._key(e);
+    });
+    canvas.addEventListener('keyup', (e) => {
+      if (this.gfxOn && this.onKey) {
+        e.preventDefault();
+        this.onKey(e.code, false);
+      }
     });
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
