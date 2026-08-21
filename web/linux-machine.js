@@ -371,7 +371,7 @@ export function mountLinux(canvas, opts = {}) {
         }
         case 'lfb': {
           // efifb が描いた一枚 (24bpp、赤が先頭)。描き手は端末と同じcanvas
-          term.drawRgb(new Uint8Array(msg.bytes), msg.width, msg.height);
+          term.drawRgb(new Uint8Array(msg.bytes), msg.width, msg.height, msg.bpp ?? 24);
           break;
         }
         case 'state': {

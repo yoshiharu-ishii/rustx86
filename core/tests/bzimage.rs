@@ -231,20 +231,20 @@ fn zero_page_declares_an_efi_lfb_and_reserves_it_in_e820() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     let ram = 128u64 << 20;
     let lfb = Lfb::at_top_of(ram);
-    assert_eq!(lfb.base, (128 << 20) - 0x10_0000, "RAMの末尾1MB");
+    assert_eq!(lfb.base, (128 << 20) - 0x20_0000, "RAMの末尾2MB");
     let zp = build_zero_page(&img, ram, 0x9_0000, None, Some(lfb));
     assert_eq!(zp[0x0F], 0x70, "orig_video_isVGA = VIDEO_TYPE_EFI");
     assert_eq!(u16::from_le_bytes([zp[0x12], zp[0x13]]), 640);
     assert_eq!(u16::from_le_bytes([zp[0x14], zp[0x15]]), 480);
-    assert_eq!(u16::from_le_bytes([zp[0x16], zp[0x17]]), 24);
+    assert_eq!(u16::from_le_bytes([zp[0x16], zp[0x17]]), 32);
     assert_eq!(
         u32::from_le_bytes([zp[0x18], zp[0x19], zp[0x1A], zp[0x1B]]),
         lfb.base
     );
-    assert_eq!(u16::from_le_bytes([zp[0x24], zp[0x25]]), 1920, "linelength");
-    // 赤が下位 (b8g8r8): sysfb の simplefb 表に無い形式で efifb へ落とす
-    assert_eq!((zp[0x26], zp[0x27]), (8, 0), "red size/pos");
-    assert_eq!((zp[0x2A], zp[0x2B]), (8, 16), "blue size/pos");
+    assert_eq!(u16::from_le_bytes([zp[0x24], zp[0x25]]), 2560, "linelength");
+    // 赤が第2バイト (詰め物,R,G,B): sysfb の simplefb 表に無い形式で efifb へ落とす
+    assert_eq!((zp[0x26], zp[0x27]), (8, 8), "red size/pos");
+    assert_eq!((zp[0x2A], zp[0x2B]), (8, 24), "blue size/pos");
 
     // e820: usable は LFB の手前まで、LFB の窓は予約
     let n = zero_page_e820_count(&zp) as usize;

@@ -104,6 +104,11 @@ cat > "$work/root/init" <<'INIT'
 /bin/busybox mount -t proc proc /proc
 /bin/busybox mount -t sysfs sys /sys
 /bin/busybox mount -t devtmpfs dev /dev 2>/dev/null
+# 擬似端末 (xterm など pty を開くものに要る)。無いと xterm が "not enough ptys"
+# で即死し、xinit ごと降りる (X が「上がってすぐ消える」の正体だった)
+/bin/busybox mkdir -p /dev/pts /dev/shm
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null
+/bin/busybox mount -t tmpfs shm /dev/shm 2>/dev/null
 /bin/busybox --install -s /bin
 # シリアルコンソールにはTERMが無い。viやlessがフルスクリーン描画の
 # 作法を選べるように、素直なxtermを名乗っておく

@@ -288,7 +288,7 @@ function loop() {
       const view = new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), emu.lfb_len());
       const copy = view.slice();
       postMessage(
-        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height() },
+        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height(), bpp: emu.lfb_bpp() },
         [copy.buffer],
       );
     }
