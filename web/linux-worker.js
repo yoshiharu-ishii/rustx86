@@ -92,6 +92,10 @@ self.onmessage = (e) => {
       loop();
       break;
     }
+    case 'mouse':
+      // 相対移動とボタン → 8042 の第2ポート → IRQ12 → psmouse
+      if (emu) emu.mouse(msg.dx | 0, msg.dy | 0, msg.buttons & 7);
+      break;
     case 'key':
       // 物理キー (FBの顔のとき)。8042 → IRQ1 → カーネルの atkbd → VT
       if (emu) emu.key(msg.code, msg.down);

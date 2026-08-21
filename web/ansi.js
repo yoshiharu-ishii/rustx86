@@ -78,6 +78,12 @@ export class AnsiTerminal {
      *  (code, down) => void。シェルが tty0 (fbcon) に居るときは、入力も
      *  PS/2 キーボード (8042) からカーネルのVTへ入るのが実機の道 */
     this.onKey = null;
+    /** マウスの動き (画素の顔で捕獲中)。(dx, dy, buttons) => void。
+     *  dx/dy は相対移動 (pointer lock の movementX/Y)、buttons は bit0=左 bit1=右 bit2=中 */
+    this.onMouse = null;
+    /** 捕獲の出入りの合図 (true=捕獲した / false=解放した)。表示側が枠や案内を出す */
+    this.onCapture = null;
+    this.captured = false;
     // クリップボードは**VGA端末と同じ取っ手**にする (行き先は main.js が決める)。
     // ここで onData へ直に流すと、取り消しも状態表示も無い別経路が生まれる
     /** 貼り付けられたときに呼ばれる (⌘V など、中身が届く経路)。(text) => void */
@@ -120,6 +126,48 @@ export class AnsiTerminal {
         this.onKey(e.code, false);
       }
     });
+
+    // ---- ポインタの捕獲 (画素の顔のとき) ----
+    //
+    // 抜け道は4系統 (設計は rustx86-gfx-plan): ①ホストキー Ctrl+Alt+G
+    // ②Esc (窓モードではブラウザが強制解除する — 戦わず利用する)
+    // ③全画面ではEsc長押し (ブラウザの既定) ④自動解放 (blur・機械の停止)。
+    // **捕獲中は必ず見た目が変わり、抜け方がその場に書いてある** (onCapture)
+    const release = () => {
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+    };
+    canvas.addEventListener('click', () => {
+      if (this.gfxOn && this.onMouse && document.pointerLockElement !== canvas) {
+        canvas.requestPointerLock?.();
+      }
+    });
+    document.addEventListener('pointerlockchange', () => {
+      const on = document.pointerLockElement === canvas;
+      if (on === this.captured) return;
+      this.captured = on;
+      this.onCapture?.(on);
+    });
+    canvas.addEventListener('mousemove', (e) => {
+      if (this.captured) this.onMouse?.(e.movementX, e.movementY, e.buttons & 7);
+    });
+    canvas.addEventListener('mousedown', (e) => {
+      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+    });
+    canvas.addEventListener('contextmenu', (e) => { if (this.captured) e.preventDefault(); });
+    // ①ホストキー。物理位置 (code) で見るので配列と無縁
+    canvas.addEventListener('keydown', (e) => {
+      if (this.captured && e.ctrlKey && e.altKey && e.code === 'KeyG') {
+        e.preventDefault();
+        release();
+      }
+    }, true);
+    // ④自動解放: タブが裏へ回った
+    window.addEventListener('blur', release);
+    /** 機械が止まった/死んだときに表示側が呼ぶ (死んだゲストが入力を人質に取らない) */
+    this.releaseCapture = release;
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
       if (t) this.onPaste?.(t);

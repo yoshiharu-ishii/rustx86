@@ -26,18 +26,40 @@ pub const STATUS_IBF: u8 = 1 << 1;
 /// 出力ポート bit1 が A20 の開閉
 pub const OUTPORT_A20: u8 = 1 << 1;
 
+/// ステータス bit4: キーロック (1 = ロックされていない)。
+/// 0 のままだと Linux が "Keylock active" と警告する
+pub const STATUS_UNLOCKED: u8 = 1 << 4;
+/// ステータス bit5: 出力バッファの中身が**第2ポート (AUX = マウス)** から来た
+pub const STATUS_AUX: u8 = 1 << 5;
+
+/// コマンドバイト (0x20 で読み 0x60 で書く) のビット
+pub const CMD_KBD_IRQ: u8 = 1 << 0;
+pub const CMD_AUX_IRQ: u8 = 1 << 1;
+pub const CMD_SYSFLAG: u8 = 1 << 2;
+pub const CMD_KBD_DISABLE: u8 = 1 << 4;
+pub const CMD_AUX_DISABLE: u8 = 1 << 5;
+pub const CMD_TRANSLATE: u8 = 1 << 6;
+
 #[derive(Debug)]
 pub struct Kbd8042 {
-    /// CPUが 0x60 から読む1バイト
+    /// 8042 自身の返事 (セルフテストの 0x55 など)。キーより先に読ませる
     output_buf: u8,
     /// 出力バッファにデータがあるか
     has_output: bool,
+    /// 出力バッファの中身が AUX (マウス) 側か
+    output_is_aux: bool,
     /// 0x64 に書かれたコマンドのうち、続けてデータを待つもの
     pending: Option<u8>,
     /// 出力ポート。bit0=リセット bit1=A20
     pub output_port: u8,
+    /// コマンドバイト。**実体を持つ** — Linux は AUX を止めて (0xA7) 読み返し、
+    /// bit5 が立っていなければ "Failed to disable AUX port" と疑う。固定値を
+    /// 返していた頃はそこで第2ポート無しと判定されていた
+    pub command_byte: u8,
     /// キー入力の待ち行列
     keys: std::collections::VecDeque<u8>,
+    /// 第2ポートの向こうのマウス
+    pub mouse: super::Mouse,
     /// 今あるデータについて、既に割り込みを上げたか。
     ///
     /// **これが無いと文字が化ける。** 割り込みを「データがある間ずっと」上げると、
@@ -58,10 +80,15 @@ impl Kbd8042 {
         Self {
             output_buf: 0,
             has_output: false,
+            output_is_aux: false,
             pending: None,
             // 起動時からA20は開いている扱いにする。実機のBIOSも大抵そうする
             output_port: OUTPORT_A20 | 1,
+            // BIOSが渡す既定: 変換あり・システムフラグ・キーボード割り込み許可。
+            // AUX の割り込みは OS が開ける (Linux の i8042 はそうする)
+            command_byte: CMD_TRANSLATE | CMD_SYSFLAG | CMD_KBD_IRQ,
             keys: std::collections::VecDeque::new(),
+            mouse: super::Mouse::new(),
             irq_asserted: false,
         }
     }
@@ -74,11 +101,23 @@ impl Kbd8042 {
     /// ステータスポート (0x64) の読み出し。
     /// **入力バッファは常に空**にしてある — ホスト側は待たせる理由が無い
     pub fn read_status(&self) -> u8 {
-        let mut s = 0;
-        if self.has_output || !self.keys.is_empty() {
+        let mut s = STATUS_UNLOCKED;
+        if self.has_output {
             s |= STATUS_OBF;
+            if self.output_is_aux {
+                s |= STATUS_AUX;
+            }
+        } else if !self.keys.is_empty() {
+            s |= STATUS_OBF;
+        } else if self.aux_ready() {
+            s |= STATUS_OBF | STATUS_AUX;
         }
         s // IBFは立てない (常に書き込みを受け付ける)
+    }
+
+    /// マウスのバイトが出力バッファへ上がれる状態か (AUXが止められていない)
+    fn aux_ready(&self) -> bool {
+        self.command_byte & CMD_AUX_DISABLE == 0 && self.mouse.has_output()
     }
 
     /// データポート (0x60) の読み出し
@@ -87,10 +126,17 @@ impl Kbd8042 {
         self.irq_asserted = false;
         if self.has_output {
             self.has_output = false;
+            self.output_is_aux = false;
             return self.output_buf;
         }
+        if let Some(k) = self.keys.pop_front() {
+            return k;
+        }
+        if self.aux_ready() {
+            return self.mouse.pop().unwrap_or(0xFF);
+        }
         // 空を読まれたら 0xFF を返す。0 は正当なスキャンコードと紛らわしい
-        self.keys.pop_front().unwrap_or(0xFF)
+        0xFF
     }
 
     /// まだゲストへ配っていないスキャンコードの数。
@@ -100,14 +146,28 @@ impl Kbd8042 {
         self.keys.len()
     }
 
-    /// 今このタイミングでIRQ1を上げるべきか。**1バイトにつき1回だけ真を返す**
-    pub fn take_irq(&mut self) -> bool {
-        if self.has_data() && !self.irq_asserted {
-            self.irq_asserted = true;
+    /// 今このタイミングで上げるべき割り込み線 (1 = キーボード / 12 = マウス)。
+    /// **1バイトにつき1回だけ Some を返す**。どちらの線かは次に読まれるバイトの
+    /// 出どころで決まり、コマンドバイトでその線の割り込みが切られていれば上げない
+    pub fn take_irq(&mut self) -> Option<u8> {
+        if self.irq_asserted {
+            return None;
+        }
+        let aux = if self.has_output {
+            self.output_is_aux
+        } else if !self.keys.is_empty() {
+            false
+        } else if self.aux_ready() {
             true
         } else {
-            false
+            return None;
+        };
+        let enabled = self.command_byte & if aux { CMD_AUX_IRQ } else { CMD_KBD_IRQ } != 0;
+        if !enabled {
+            return None;
         }
+        self.irq_asserted = true;
+        Some(if aux { 12 } else { 1 })
     }
 
     /// コマンドポート (0x64) への書き込み
@@ -120,41 +180,66 @@ impl Kbd8042 {
             }
             // 次に 0x60 へ書かれる値を出力ポートにする = **A20の開閉**
             0xD1 => self.pending = Some(0xD1),
-            // キーボードの無効化/有効化。A20操作の前後で挟むのが定石
-            0xAD | 0xAE => {}
+            // キーボードの無効化/有効化。A20操作の前後で挟むのが定石。
+            // コマンドバイトに写すだけで、配送は止めない (止めると、再有効化を
+            // 忘れたゲストのキーが永久に届かなくなる — 今まで動いていた物を壊さない)
+            0xAD => self.command_byte |= CMD_KBD_DISABLE,
+            0xAE => self.command_byte &= !CMD_KBD_DISABLE,
+            // 第2ポート (マウス) の無効化/有効化。**こちらは配送も止める** —
+            // Linux は止めた状態で 0x20 を読み返して bit5 を確かめる
+            0xA7 => self.command_byte |= CMD_AUX_DISABLE,
+            0xA8 => self.command_byte &= !CMD_AUX_DISABLE,
+            // 第2ポートのインタフェーステスト。0x00 = 正常
+            0xA9 => self.reply(0x00),
             // セルフテスト。0x55 が「正常」の合図
-            0xAA => {
-                self.output_buf = 0x55;
-                self.has_output = true;
-            }
+            0xAA => self.reply(0x55),
             // インタフェーステスト
-            0xAB => {
-                self.output_buf = 0x00;
-                self.has_output = true;
-            }
+            0xAB => self.reply(0x00),
             // コマンドバイトの読み書き
-            0x20 => {
-                self.output_buf = 0x45;
-                self.has_output = true;
-            }
+            0x20 => self.reply(self.command_byte),
             0x60 => self.pending = Some(0x60),
+            // 次のバイトを出力バッファへ: 0xD2 はキーボード側として、0xD3 は
+            // AUX 側として見せる (ループバック)。Linux の i8042 は 0xD3 で
+            // 「AUX の経路が生きているか」を確かめる — 書いた値が AUX の印つきで
+            // 返ってこなければ第2ポート無しと判断する
+            0xD2 | 0xD3 => self.pending = Some(cmd),
+            // 次のバイトをマウスへ送る
+            0xD4 => self.pending = Some(0xD4),
             // リセットパルス (再起動)。ここでは何もしない
             0xFE => {}
             _ => {}
         }
     }
 
+    /// 8042 自身の返事を出力バッファへ (キーボード側として)
+    fn reply(&mut self, val: u8) {
+        self.output_buf = val;
+        self.has_output = true;
+        self.output_is_aux = false;
+    }
+
     /// データポート (0x60) への書き込み
     pub fn write_data(&mut self, val: u8) {
         match self.pending.take() {
             Some(0xD1) => self.output_port = val,
-            Some(0x60) => {} // コマンドバイトの設定
+            Some(0x60) => self.command_byte = val,
+            Some(0xD2) => self.reply(val),
+            Some(0xD3) => {
+                self.output_buf = val;
+                self.has_output = true;
+                self.output_is_aux = true;
+            }
+            Some(0xD4) => self.mouse.command(val),
             _ => {
                 // キーボード自身へのコマンド。ACK (0xFA) を返しておく
-                self.output_buf = 0xFA;
-                self.has_output = true;
+                self.reply(0xFA);
             }
         }
+    }
+
+    /// ホスト側のマウスの動き (dx: 右が正, dy: 下が正, buttons: bit0=左 bit1=右 bit2=中)
+    pub fn mouse_motion(&mut self, dx: i32, dy: i32, buttons: u8) {
+        self.mouse.motion(dx, dy, buttons);
     }
 
     /// ホスト側からスキャンコードを流し込む
@@ -165,7 +250,7 @@ impl Kbd8042 {
     /// 読ませるデータが残っているか。**IRQ1を上げ続ける条件**でもある。
     /// キーボードは割り込み駆動で、OSはハンドラの中で 0x60 を1バイト読む
     pub fn has_data(&self) -> bool {
-        self.has_output || !self.keys.is_empty()
+        self.has_output || !self.keys.is_empty() || self.aux_ready()
     }
 
     /// ASCII文字を押して離す。
@@ -380,20 +465,26 @@ impl Kbd8042 {
     pub fn save(&self, w: &mut crate::snapshot::Writer) {
         w.u8(self.output_buf);
         w.bool(self.has_output);
+        w.bool(self.output_is_aux);
         w.opt_u8(self.pending);
         w.u8(self.output_port);
+        w.u8(self.command_byte);
         w.bool(self.irq_asserted);
         let keys: Vec<u8> = self.keys.iter().copied().collect();
         w.bytes(&keys);
+        self.mouse.save(w);
     }
 
     pub fn load(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
         self.output_buf = r.u8()?;
         self.has_output = r.bool()?;
+        self.output_is_aux = r.bool()?;
         self.pending = r.opt_u8()?;
         self.output_port = r.u8()?;
+        self.command_byte = r.u8()?;
         self.irq_asserted = r.bool()?;
         self.keys = r.bytes()?.into();
+        self.mouse.load(r)?;
         Ok(())
     }
 }

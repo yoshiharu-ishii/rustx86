@@ -33,7 +33,8 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v11: x87に80bit原本サイドバンド (raw) が加わった — MMXがここに住む
 /// v13: RAMDAC (256色パレット) と現在ビデオモードが加わった (mode 13h)
 /// v14: Linuxへ申告するLFB (base/width/height/bpp、無ければ無し) が加わった
-pub const VERSION: u16 = 14;
+/// v15: 8042 にコマンドバイト・AUXの印・PS/2マウスが加わった
+pub const VERSION: u16 = 15;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
