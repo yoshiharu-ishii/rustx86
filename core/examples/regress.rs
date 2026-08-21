@@ -358,6 +358,30 @@ fn linux_lfb() -> Outcome {
             .step_by(3)
             .any(|o| fb[o..o + 12] == row0 && fb[o + line..o + line + 12] == row1);
         checks.push(("fbsplash の画素がLFBに現れた", pattern_found));
+
+        // ユーザー空間の本物のアプリ: bounce (tools/guest/bounce-fb) が /dev/fb0 を
+        // mmap して描く。stdin は /dev/null (EOFでは終わらない) にして裏で回し、
+        // 1秒 (ゲスト時計) 後に止める。8色のボールが LFB に居れば、ioctl で
+        // 聞いた画素形式 (赤が下位) どおりに描けている
+        m.devices
+            .uart
+            .feed(b"bounce </dev/null & sleep 1; kill $!; printf 'BNC%s\n' DONE\n");
+        let ok = run_until_serial(&mut m, "BNCDONE", 400_000_000).is_some();
+        checks.push(("bounce が回って止まった", ok));
+        let fb = m.lfb_frame();
+        let has = |rgb: [u8; 3]| fb.chunks_exact(3).any(|p| p == rgb);
+        let balls = [
+            [255u8, 120, 0],
+            [255, 32, 32],
+            [255, 240, 32],
+            [64, 240, 64],
+            [64, 240, 255],
+            [80, 120, 255],
+            [200, 64, 255],
+            [255, 160, 200],
+        ];
+        let n = balls.iter().filter(|c| has(**c)).count();
+        checks.push(("bounce の8色がLFBに居る (R,G,Bの並びどおり)", n == 8));
     }
     let logs = vec![(
         "linux-lfb-boot.log",

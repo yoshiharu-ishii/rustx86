@@ -25,6 +25,9 @@ cp "$work/bin/busybox" "$work/root/bin/busybox"
 cp "$work/lib/ld-musl-i386.so.1" "$work/root/lib/"
 cp "$work/lib/libc.musl-x86.so.1" "$work/root/lib/" 2>/dev/null || true
 cp tools/guest/snake "$work/root/bin/snake"
+# bounce: fbdev (/dev/fb0) で跳ねるボール。「Linux (フレームバッファ)」機で動く
+# (tools/guest/bounce-fb/。i386静的バイナリをコミットしてある)
+[ -f tools/guest/bounce-fb/bounce ] && cp tools/guest/bounce-fb/bounce "$work/root/bin/bounce"
 # ネットワークのモジュール。Alpineのinitramfsから3つだけ借りる —
 # カーネルと同じ荷物から取るので vermagic が必ず合う。
 #   8390 + ne2k-pci  NICのドライバ (RTL8029 = PCI版NE2000)
@@ -58,7 +61,7 @@ cp "$work/etc/ssl/certs/ca-certificates.crt" "$work/root/etc/ssl/certs/"
 # certs/ だけ入れても見つけてくれない — Alpineと同じ別名を張る
 ln -sf certs/ca-certificates.crt "$work/root/etc/ssl/cert.pem"
 chmod 755 "$work/root/bin/ssl_client"
-chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
+chmod 755 "$work/root/bin/busybox" "$work/root/bin/snake" "$work/root/bin/bounce" "$work/root/lib/"ld-musl* "$work/root/lib/"libc* 2>/dev/null || true
 # udhcpc がリースを**実際に適用する**スクリプト。busybox の udhcpc は
 # 取ったリースを自分では適用せず、このスクリプトに渡すだけである
 # (無いと「取れたのにアドレスが付かない」になる)
