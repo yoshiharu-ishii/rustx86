@@ -127,6 +127,11 @@ impl Pic8259 {
         self.imr
     }
 
+    /// ICW2 で決めたベクタの先頭 (連結の判定に使う)
+    pub fn vector_base(&self) -> u8 {
+        self.vector_base
+    }
+
     /// 装置が手を挙げる
     pub fn raise(&mut self, irq: u8) {
         self.irr |= 1 << (irq & 7);

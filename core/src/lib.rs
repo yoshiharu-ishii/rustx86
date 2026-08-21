@@ -546,9 +546,17 @@ impl Machine {
         if blk_irq {
             self.devices.pic[0].raise(dev::card::virtio_blk::IRQ_BLK);
         }
-        // キーボードは割り込み駆動。**1バイトにつき1回だけ**挙手する
-        if self.devices.keyboard.take_irq() {
-            self.devices.pic[0].raise(bus::isa::IRQ_KEYBOARD);
+        // キーボードとマウスは割り込み駆動。**1バイトにつき1回だけ**挙手する。
+        // どちらの線かは 8042 が決める (IRQ1 = キーボード / IRQ12 = 第2ポート)
+        match self.devices.keyboard.take_irq() {
+            Some(1) => self.devices.pic[0].raise(bus::isa::IRQ_KEYBOARD),
+            Some(12) => self.devices.pic[1].raise(bus::isa::IRQ_MOUSE & 7),
+            _ => {}
+        }
+        // **スレーブの挙手はマスタの IRQ2 に現れる** (連結)。PC/ATは8本では
+        // 足りず2個目の8259をIRQ2にぶら下げた — IRQ8〜15はこの線を通って届く
+        if self.devices.pic[1].has_pending() {
+            self.devices.pic[0].raise(bus::isa::IRQ_CASCADE);
         }
         // **ここでは acknowledge しない。** ベクタ番号が決まるのは CPU が
         // INTA で受ける瞬間で、それより早くベクタを固定すると、OSがPICを
@@ -896,7 +904,20 @@ impl Machine {
             }
             // PICからは**受ける瞬間に**ベクタをもらう (INTA相当)
             if self.pic_has_service() {
-                if let Some(vec) = self.devices.pic[0].acknowledge() {
+                if let Some(mut vec) = self.devices.pic[0].acknowledge() {
+                    // マスタの IRQ2 は「スレーブに聞け」の合図。実機の INTA も
+                    // 連結線ではスレーブがベクタを出す。スレーブに何も無ければ
+                    // (取り消された後など) マスタの IRQ2 のベクタがそのまま出る —
+                    // 実機の spurious と同じで、OS側のハンドラが捨てる
+                    if vec
+                        == self.devices.pic[0]
+                            .vector_base()
+                            .wrapping_add(bus::isa::IRQ_CASCADE)
+                    {
+                        if let Some(v2) = self.devices.pic[1].acknowledge() {
+                            vec = v2;
+                        }
+                    }
                     self.pic_service = self.devices.pic[0].has_pending();
                     self.halted = false;
                     cpu::interrupt(self, vec);

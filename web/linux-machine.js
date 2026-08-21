@@ -61,6 +61,12 @@ export function mountLinux(canvas, opts = {}) {
   // ここで onData へ直に流していたので、VGA機とは別の作法になっていた
   // 画素の顔のときの物理キー。ワーカー越しに 8042 へ (VGA機の key() と同じ経路)
   term.onKey = (code, down) => worker?.postMessage({ type: 'key', code, down });
+  // マウス (pointer lock の相対移動)。同じ 8042 の第2ポートへ
+  term.onMouse = (dx, dy, buttons) => worker?.postMessage({ type: 'mouse', dx, dy, buttons });
+  term.onCapture = (on) => {
+    canvas.classList.toggle('captured', on);
+    status(on ? 'マウスを捕獲中 — Ctrl+Alt+G か Esc で解放' : 'マウスを解放した (画面をクリックで再捕獲)');
+  };
   term.onPaste = (text) => opts.onPaste?.(text);
   term.onPasteRequest = () => opts.onPasteRequest?.();
   term.onCopyRequest = () => opts.onCopyRequest?.();
@@ -396,6 +402,7 @@ export function mountLinux(canvas, opts = {}) {
           opts.onTone?.(msg.hz);
           break;
         case 'trap':
+          term.releaseCapture?.();
           booted = false;
           status(`停止: ${msg.reason} — 画面は倒れた瞬間のまま`, true);
           opts.onState?.();

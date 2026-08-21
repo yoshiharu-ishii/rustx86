@@ -163,6 +163,9 @@ build_linux() {
   fi
   fetch "$ALPINE_BASE/vmlinuz-lts" "$IMAGES/vmlinuz-lts"
   fetch "$ALPINE_BASE/initramfs-lts" "$IMAGES/initramfs-lts"
+  # 全モジュール (242MB)。initramfs-lts に無いモジュール (PS/2マウス等) は
+  # ここから借りる。カーネルと同じ netboot の荷物なので vermagic が合う
+  [ -f "$IMAGES/modloop-lts" ] || fetch "$ALPINE_BASE/modloop-lts" "$IMAGES/modloop-lts"
   # System.map (ブート解剖 bootprof 用)。ファイル名に版が入るので一覧から拾う
   # head -1 が先にパイプを閉じ、まだ書いている側がSIGPIPE (141) を受ける。
   # pipefailはそれを失敗と数える — GNU grepはバッファで隠れ、箱のbusybox
