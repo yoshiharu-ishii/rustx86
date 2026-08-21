@@ -17,3 +17,4 @@ regress-out/
 dist/
 # 焼いたディスクイメージ (配布物)
 web/disk-gcc.img.gz
+.DS_Store
