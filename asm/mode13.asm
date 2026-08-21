@@ -61,6 +61,24 @@ start:
     inc  al
     stosb
 
+    ; --- 見た目の検証用: EGA16色の縦帯で画面の残りを埋める ---
+    ; (行4〜195、20画素幅×16本。テストが見るのは上の2行だけで、
+    ;  ここはブラウザのスクリーンショットで人間が確かめる領域)
+    mov  di, 4*320
+    mov  cx, 192             ; 192行
+.band_row:
+    push cx
+    xor  bl, bl              ; 色 0 から
+.band:
+    mov  al, bl
+    mov  cx, 20
+    rep  stosb               ; 20画素ぶん同じ色
+    inc  bl
+    cmp  bl, 16
+    jb   .band
+    pop  cx
+    loop .band_row
+
     ; --- 0x3DA を読む (値は捨てる。ポートの生存確認) ---
     mov  dx, 0x3DA
     in   al, dx

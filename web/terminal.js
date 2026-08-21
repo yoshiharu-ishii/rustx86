@@ -181,6 +181,7 @@ export class Terminal {
    * だから安い方だけを細かく呼べるように分けてある。
    */
   sample(cells, cursorRow, cursorCol) {
+    this.gfxOn = false;
     this.cursor.row = cursorRow;
     this.cursor.col = cursorCol;
 
@@ -251,7 +252,44 @@ export class Terminal {
     return out.join('\n');
   }
 
+  /** mode 13h の一枚を描く (320x200 → 2倍の 640x400、中央寄せ)。
+   *
+   * FBは色番号の列、色の実体はパレット (6bit値)。ここで 6bit→8bit に
+   * 伸ばす (val<<2 | val>>4 — 63が255になる標準の伸ばし方)。
+   * テキストの draw() とは独立した顔で、呼び分けは machine.js が
+   * video_mode を見て行う。選択・スクロールバックはテキスト専用の道具
+   * なので、グラフィック中は出てこない */
+  drawPixels(fb, pal6) {
+    // グラフィックの顔が出ている間、テキストの描き手 (blinkタイマーや
+    // スクロール操作からの draw()) は黙る。テキストへ戻った合図は sample()
+    // (テキストの顔だけが呼ぶ) が立てる
+    this.gfxOn = true;
+    if (!this.gfx) {
+      const cvs = document.createElement('canvas');
+      cvs.width = 320;
+      cvs.height = 200;
+      this.gfx = { img: new ImageData(320, 200), cvs, ctx: cvs.getContext('2d') };
+    }
+    const d = this.gfx.img.data;
+    for (let i = 0, o = 0; i < fb.length; i++, o += 4) {
+      const p = fb[i] * 3;
+      d[o] = (pal6[p] << 2) | (pal6[p] >> 4);
+      d[o + 1] = (pal6[p + 1] << 2) | (pal6[p + 1] >> 4);
+      d[o + 2] = (pal6[p + 2] << 2) | (pal6[p + 2] >> 4);
+      d[o + 3] = 255;
+    }
+    this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
+    const { ctx } = this;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    // 整数倍 (x2) で拡大し、補間は切る — 画素の縁が滲むとVGAではなくなる
+    ctx.imageSmoothingEnabled = false;
+    const x = Math.max(0, ((this.canvas.width - SCROLLBAR_W) - 640) >> 1);
+    ctx.drawImage(this.gfx.cvs, x, 0, 640, 400);
+  }
+
   draw() {
+    if (this.gfxOn) return; // 画素の一枚の上に文字の黒地を被せない
     const { ctx } = this;
     ctx.fillStyle = HOMEBREW.bg;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);

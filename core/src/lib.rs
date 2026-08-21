@@ -1055,8 +1055,15 @@ impl Machine {
         }
 
         // 5. トラップフラグが立っていたら、命令が終わってから INT 1。
-        //    「実行してから止まる」ので、デバッガは1命令ずつ進められる
-        if tf && !self.halted {
+        //    「実行してから止まる」ので、デバッガは1命令ずつ進められる。
+        //
+        //    **実行後にもTFを見る** — 命令自身がTFを落としたら配らない。
+        //    実機の作法: INT n はTFを落としてから跳ぶので、その後の
+        //    シングルステップは起きない (割り込みの中へはトレースで入れない)。
+        //    POPF/IRETがTFを落とした直後も同じく起きない (Intelの明文の癖)。
+        //    実行前だけ見て配っていたため、DOSのデバッガ (lDebug) がトレース中の
+        //    INT で「Unexpected single-step interrupt」を受けて壊れていた
+        if tf && self.cpu.flag(cpu::TF) && !self.halted {
             cpu::interrupt(self, 1);
         }
     }
