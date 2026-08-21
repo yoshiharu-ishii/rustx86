@@ -417,6 +417,11 @@ jobs:
           grep -q 'banner=true' wasmboot-report.md
           grep -q 'snake_board=true' wasmboot-report.md
 
+      # mode 13h の窓 (video_mode / fb_ptr / palette) がwasm経由で描き手に
+      # 渡す値そのものを返すか。asm/mode13.bin を実走して照合する
+      - name: VGA mode 13h (wasm経由)
+        run: node tools/webtest/vga-check.mjs
+
       # 貼り付けのIntegration。**配分の判断 (decide.js) と装置とゲストを
       # 一続きで見る**唯一の場所で、単体テストは配分の算数しか押さえられない。
       # wasmもイメージもこのジョブに揃っているので、ここに相乗りさせる

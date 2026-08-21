@@ -108,3 +108,104 @@ fn snapshot_preserves_palette_and_mode() {
     assert_eq!(n.devices.dac.color(17), [0, 63, 0]);
     assert_eq!(n.framebuffer()[0..4], [0, 1, 2, 3]);
 }
+
+/// **実物のDOSソフトが mode 13h を使う** — 1回目の起動でFreeDOSのDEBUG
+/// (lDebug) が .COM をその場で組んでフロッピーに書き出し、**その盤面で
+/// もう一度起動した**素のDOSがFATから読んで実行する。
+/// INT 10h AH=00 → 0xA0000 へのrep stosb → INT 20h終了、の全経路が
+/// 「本物のDOSが読み込んだプログラム」として通ることの証明
+#[test]
+fn freedos_debug_builds_and_runs_a_mode13_program() {
+    // fd14games.img = DEBUG (lDebug) 入りの盤 (webのfd14boot.imgと同一物)
+    let image_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/fd14games.img");
+    let Ok(image) = std::fs::read(image_path) else {
+        eprintln!("images/fd14games.img が無いのでスキップ");
+        return;
+    };
+
+    let run_until = |m: &mut Machine, needle: &str, budget: u64| -> bool {
+        for _ in 0..budget {
+            if m.halted && m.pending_irq.is_none() && !m.devices.pit.counters[0].running {
+                return false;
+            }
+            m.step();
+            if m.take_vram_dirty() && m.text_screen_string().contains(needle) {
+                return true;
+            }
+        }
+        false
+    };
+    let type_slowly = |m: &mut Machine, s: &str| {
+        for ch in s.chars() {
+            m.devices.keyboard.type_ascii(&ch.to_string());
+            for _ in 0..1_000_000 {
+                m.step();
+            }
+        }
+    };
+    let boot_to_prompt = |image: Vec<u8>| -> Machine {
+        let mut m = Machine::new();
+        m.boot_from_disk(image).expect("boot");
+        assert!(
+            run_until(&mut m, "FreeDOS kernel", 200_000_000),
+            "カーネル起動せず"
+        );
+        m.devices.keyboard.feed(&[0x3F, 0xBF]); // F5 (CONFIG/AUTOEXECを飛ばす)
+        assert!(
+            run_until(&mut m, "full shell command line", 400_000_000),
+            "シェルの場所を聞かれない"
+        );
+        type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+        assert!(
+            run_until(&mut m, "A:\\>", 400_000_000),
+            "DOSプロンプト到達せず"
+        );
+        m
+    };
+
+    // --- 1回目の起動: DEBUGで組んでフロッピーへ書く ---
+    let mut m = boot_to_prompt(image);
+    type_slowly(&mut m, "debug\n");
+    // mode 13h → 画面全部を色2で塗る → INT 20hで終了 (21バイト = 0x15)
+    type_slowly(
+        &mut m,
+        "a\nmov ax,13\nint 10\nmov ax,a000\nmov es,ax\nxor di,di\nmov cx,fa00\nmov al,2\nrep stosb\nint 20\n\n",
+    );
+    type_slowly(&mut m, "n vga.com\n");
+    type_slowly(&mut m, "r cx\n15\n");
+    type_slowly(&mut m, "w\n");
+    assert!(
+        m.text_screen_string().contains("Writing"),
+        "DEBUGがファイルを書けていない:\n{}",
+        m.text_screen_string()
+    );
+
+    // DOSが書いた盤面ごと取り出す (VGA.COM入りのフロッピー)
+    let written = m.disk.as_ref().expect("disk").data.clone();
+
+    // --- 2回目の起動: 素のDOSがFATから読んで実行する ---
+    let mut m = boot_to_prompt(written);
+    type_slowly(&mut m, "vga\n");
+    for _ in 0..100_000_000 {
+        m.step();
+        if m.video_mode == 0x13 {
+            break;
+        }
+    }
+    assert_eq!(
+        m.video_mode,
+        0x13,
+        "mode 13h に入っていない:\n{}",
+        m.text_screen_string()
+    );
+    // rep stosb の完走 (画面全部が色2) を待つ
+    for _ in 0..20_000_000 {
+        m.step();
+    }
+    let fb = m.framebuffer();
+    assert!(
+        fb.iter().all(|&b| b == 2),
+        "画面が色2で塗り切れていない (先頭16画素: {:?})",
+        &fb[..16]
+    );
+}

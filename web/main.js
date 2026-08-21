@@ -213,6 +213,8 @@ function boot(image, label) {
     if (redraw) term.draw();
     advanceScript();
   };
+  // mode 13h の顔。テキストとどちらを出すかは machine.js が video_mode で選ぶ
+  machine.onGfxFrame = (fb, pal) => term.drawPixels(fb, pal);
   // デバッガが止めたら、理由を子ウインドウへ。**開いていなくても状態表示は出す**
   machine.onDebugStop = (why) => {
     dbg.onStop(why);

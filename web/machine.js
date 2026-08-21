@@ -99,6 +99,12 @@ export class Machine {
     );
   }
 
+  /** mode 13h フレームバッファ (320x200、1バイト=色番号) をそのまま見る。
+      **ビューは毎回作り直す** — wasmメモリがgrowで移動すると古いビューは死ぬ */
+  fb() {
+    return new Uint8Array(wasmMemory.buffer, this.emu.fb_ptr(), this.emu.fb_len());
+  }
+
   cursor() {
     return [this.emu.cursor_row(), this.emu.cursor_col()];
   }
@@ -218,7 +224,12 @@ export class Machine {
       // viで矢印を押してもVRAMは変わらないので、文字の変化だけを見ていると
       // カーソルが画面上で固まったままになる (これでviが使い物にならなかった)。
       const moved = row !== this.lastCursor[0] || col !== this.lastCursor[1];
-      if (this.emu.take_vram_dirty() || moved) {
+      if (this.emu.video_mode() === 0x13) {
+        // グラフィックモード中はテキストを描かない (最後にFBを一枚描く)。
+        // dirtyは消費しておく — テキストへ戻った瞬間の描き直しは
+        // モード切替が立てるdirtyが担う
+        this.emu.take_vram_dirty();
+      } else if (this.emu.take_vram_dirty() || moved) {
         changed = true;
         this.lastCursor = [row, col];
         // 覗くのは細かく (スクロールを取りこぼさないため)
@@ -235,8 +246,12 @@ export class Machine {
     // NIC。フレームの送り出しと注入はスライス境界でまとめて行う
     this.netlink?.pump(this.emu);
 
-    // 描かせるのは1フレームに1回だけ
-    if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
+    // 描かせるのは1フレームに1回だけ。グラフィックモードはdirtyを見ない —
+    // FBはただのRAMで通知が無いので、毎フレーム全読みして描く (64KB。設計は
+    // docs/roadmap.md 6a: フック式はゲストの画素ストアをJITから弾いてしまう)
+    if (this.emu.video_mode() === 0x13) {
+      this.onGfxFrame?.(this.fb(), this.emu.palette());
+    } else if (changed) this.onFrame?.(this.vram(), ...this.cursor(), true);
     this.#schedule();
   }
 }
