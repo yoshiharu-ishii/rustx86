@@ -136,13 +136,19 @@ impl Emulator {
     /// bzImage / vmlinux (ELF) は中身で自動判別 — vmlinux なら自己解凍ステブが
     /// 無いぶん起動が4割速い。`ram_mb` はRAMサイズ (MB)。
     /// コンソールはシリアル (ttyS0) — `serial_out` / `serial_in` で読み書きする
+    /// `lfb` が真なら、Linuxへリニアフレームバッファ (640×480×24bpp、RAM末尾
+    /// 1MB) を申告する。**省略/偽なら従来どおりビット同一の起動**
     pub fn from_bzimage(
         kernel: &[u8],
         initrd: Option<Vec<u8>>,
         cmdline: &str,
         ram_mb: usize,
+        lfb: Option<bool>,
     ) -> Result<Emulator, JsError> {
         let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(ram_mb));
+        if lfb == Some(true) {
+            m.lfb_enable();
+        }
         m.boot_linux_with_initrd(kernel, cmdline, initrd.as_deref())
             .map_err(|e| JsError::new(&e))?;
         Ok(Emulator::wrap(m))
@@ -380,6 +386,33 @@ impl Emulator {
 
     pub fn fb_rows(&self) -> usize {
         rustx86_core::bus::GFX_ROWS
+    }
+
+    /// Linuxへ申告したリニアFBがあるか (32bit機)。描画側はこれで顔を選ぶ
+    pub fn lfb_on(&self) -> bool {
+        self.m.lfb.is_some()
+    }
+
+    /// リニアFBの先頭ポインタ (ゼロコピーの窓。申告していなければ null 相当の0長)
+    pub fn lfb_ptr(&self) -> *const u8 {
+        self.m.lfb_frame().as_ptr()
+    }
+
+    pub fn lfb_len(&self) -> usize {
+        self.m.lfb_frame().len()
+    }
+
+    pub fn lfb_width(&self) -> u16 {
+        self.m.lfb.map(|l| l.width).unwrap_or(0)
+    }
+
+    pub fn lfb_height(&self) -> u16 {
+        self.m.lfb.map(|l| l.height).unwrap_or(0)
+    }
+
+    /// 1画素のビット数 (24 = R,G,B が1バイトずつ、赤が先頭)
+    pub fn lfb_bpp(&self) -> u16 {
+        self.m.lfb.map(|l| l.bpp).unwrap_or(0)
     }
 
     /// パレット256色×(R,G,B)。**6bit値 (0〜63) のまま**返す — 8bitへの伸長は

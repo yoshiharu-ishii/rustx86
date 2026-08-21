@@ -136,6 +136,63 @@ mod zp {
     pub const ORIG_VIDEO_LINES: usize = 0x0E;
     pub const ORIG_VIDEO_ISVGA: usize = 0x0F;
     pub const ORIG_VIDEO_POINTS: usize = 0x10;
+    // リニアフレームバッファの申告欄 (screen_info の続き)。実機ではVBE/GOPを
+    // 呼んだブートローダが埋める。我々がfirmware側なので自分で書く
+    pub const LFB_WIDTH: usize = 0x12; // u16
+    pub const LFB_HEIGHT: usize = 0x14; // u16
+    pub const LFB_DEPTH: usize = 0x16; // u16 (bpp)
+    pub const LFB_BASE: usize = 0x18; // u32 物理アドレス
+    pub const LFB_SIZE: usize = 0x1C; // u32 (64KB単位)
+    pub const LFB_LINELENGTH: usize = 0x24; // u16 1行のバイト数
+    pub const RED_SIZE: usize = 0x26; // 以下 u8: size/pos の組 ×4
+    pub const RED_POS: usize = 0x27;
+    pub const GREEN_SIZE: usize = 0x28;
+    pub const GREEN_POS: usize = 0x29;
+    pub const BLUE_SIZE: usize = 0x2A;
+    pub const BLUE_POS: usize = 0x2B;
+    pub const RSVD_SIZE: usize = 0x2C;
+    pub const RSVD_POS: usize = 0x2D;
+    /// orig_video_isVGA の値: EFIのGOPが用意したLFB。
+    /// **vesafb ではなく efifb を選ぶ** — 使っているカーネル (Alpine linux-lts)
+    /// に vesafb は入っておらず、efifb + fbcon が焼き込まれている
+    pub const VIDEO_TYPE_EFI: u8 = 0x70;
+}
+
+/// ブートローダ (= 我々) が申告するリニアフレームバッファ。
+///
+/// **RAMの最上部を切り出して e820 で予約する**。バッキングは普通の `mem` の
+/// ままなので、メモリ経路・JIT・スナップショットに手を入れる必要が無い。
+/// カーネルから見れば「RAMの外にある装置のメモリ」で、ioremap して使う
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lfb {
+    pub base: u32,
+    pub width: u16,
+    pub height: u16,
+    /// 1画素のビット数。24 = R,G,B が1バイトずつ
+    pub bpp: u16,
+}
+
+impl Lfb {
+    /// 予約する大きさ (1MB。640×480×3 = 921,600 バイトが収まる)
+    pub const RESERVE: u32 = 0x10_0000;
+
+    /// RAMの末尾1MBに 640×480×24bpp を置く
+    pub fn at_top_of(ram_bytes: u64) -> Self {
+        Self {
+            base: (ram_bytes as u32) - Self::RESERVE,
+            width: 640,
+            height: 480,
+            bpp: 24,
+        }
+    }
+
+    pub fn line_bytes(&self) -> u32 {
+        self.width as u32 * (self.bpp as u32 / 8)
+    }
+
+    pub fn frame_bytes(&self) -> u32 {
+        self.line_bytes() * self.height as u32
+    }
 }
 
 /// zero page を組んで返す (4KB)。`ram_bytes` は MachineProfile の RAM。
@@ -145,6 +202,7 @@ pub fn build_zero_page(
     ram_bytes: u64,
     cmdline_ptr: u32,
     initrd: Option<(u32, u32)>,
+    lfb: Option<Lfb>,
 ) -> Vec<u8> {
     let mut zp = vec![0u8; 4096];
 
@@ -161,6 +219,31 @@ pub fn build_zero_page(
     zp[zp::ORIG_VIDEO_LINES] = 25;
     zp[zp::ORIG_VIDEO_ISVGA] = 1;
     zp[zp::ORIG_VIDEO_POINTS] = 16;
+
+    // 1.55. リニアフレームバッファ。**EFI型で申告する** (efifb が掴む)。
+    //       画素形式は 24bpp で赤を下位に置く (b8g8r8)。sysfb の simplefb 経路
+    //       (表にある形式だと simple-framebuffer 装置を作る) には simplefb/
+    //       simpledrm のドライバが入っていないので、表に無い形式で素通りさせ、
+    //       efi-framebuffer → efifb へ落とす
+    if let Some(l) = lfb {
+        zp[zp::ORIG_VIDEO_ISVGA] = zp::VIDEO_TYPE_EFI;
+        zp[zp::LFB_WIDTH..zp::LFB_WIDTH + 2].copy_from_slice(&l.width.to_le_bytes());
+        zp[zp::LFB_HEIGHT..zp::LFB_HEIGHT + 2].copy_from_slice(&l.height.to_le_bytes());
+        zp[zp::LFB_DEPTH..zp::LFB_DEPTH + 2].copy_from_slice(&l.bpp.to_le_bytes());
+        zp[zp::LFB_BASE..zp::LFB_BASE + 4].copy_from_slice(&l.base.to_le_bytes());
+        let size_64k = l.frame_bytes().div_ceil(0x1_0000);
+        zp[zp::LFB_SIZE..zp::LFB_SIZE + 4].copy_from_slice(&size_64k.to_le_bytes());
+        zp[zp::LFB_LINELENGTH..zp::LFB_LINELENGTH + 2]
+            .copy_from_slice(&(l.line_bytes() as u16).to_le_bytes());
+        zp[zp::RED_SIZE] = 8;
+        zp[zp::RED_POS] = 0;
+        zp[zp::GREEN_SIZE] = 8;
+        zp[zp::GREEN_POS] = 8;
+        zp[zp::BLUE_SIZE] = 8;
+        zp[zp::BLUE_POS] = 16;
+        zp[zp::RSVD_SIZE] = 0;
+        zp[zp::RSVD_POS] = 0;
+    }
 
     // 1.6. 「ブートローダが居る」と名乗る。**0のままだと、カーネルは
     //      ブートローダ不在とみなして ramdisk 欄ごと無視する** (実際に
@@ -200,11 +283,24 @@ pub fn build_zero_page(
             kind: 2,
         },
     ];
-    if ram_bytes > 0x0010_0000 {
+    // LFBを申告するなら、その窓はRAMの地図から外して予約にする。
+    // usable のままだと ioremap が「RAMには張れない」と断る
+    let usable_end = match lfb {
+        Some(l) => l.base as u64,
+        None => ram_bytes,
+    };
+    if usable_end > 0x0010_0000 {
         entries.push(E820 {
             base: 0x0010_0000,
-            size: ram_bytes - 0x0010_0000,
+            size: usable_end - 0x0010_0000,
             kind: 1,
+        });
+    }
+    if let Some(l) = lfb {
+        entries.push(E820 {
+            base: l.base as u64,
+            size: ram_bytes - l.base as u64,
+            kind: 2,
         });
     }
     zp[zp::E820_ENTRIES] = entries.len() as u8;

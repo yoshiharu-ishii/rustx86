@@ -39,6 +39,7 @@ let netInbox = [];
 let instrs = 0;
 let lastMeasure = 0;
 let lastTone = 0;
+let lastLfbAt = 0; // リニアFBを最後に送った時刻 (30fpsの刻み)
 
 const wasmExports = await init();
 let jitOn = false;
@@ -67,6 +68,7 @@ self.onmessage = (e) => {
           msg.initrd ? new Uint8Array(msg.initrd) : undefined,
           msg.cmdline ?? 'console=ttyS0',
           msg.ramMb ?? 128,
+          !!msg.lfb, // リニアFBの申告 (efifb)。偽なら起動はビット同一
         );
         // NICを挿すのは電源を入れるこの瞬間だけ (VGA機と同じ)。
         // Linuxは起動時にしかPCIを数えないので、後から挿しても見えない
@@ -266,6 +268,22 @@ function loop() {
   if (out.length) {
     // Uint8Array を transferable で渡す (コピーを避ける)
     postMessage({ type: 'serial', bytes: out.buffer }, [out.buffer]);
+  }
+
+  // リニアFB (efifb)。**ただのRAMで通知が無い**ので、時間で刻んで一枚ずつ送る。
+  // 30fps・921KB/枚の複写はメモリ帯域の誤差で、Worker境界はこれで越える
+  // (OffscreenCanvasに移すのは、これで足りなくなってから)
+  if (emu.lfb_on()) {
+    const now = performance.now();
+    if (now - lastLfbAt >= 33) {
+      lastLfbAt = now;
+      const view = new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), emu.lfb_len());
+      const copy = view.slice();
+      postMessage(
+        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height() },
+        [copy.buffer],
+      );
+    }
   }
 
   // PCスピーカー。値はスライスごとにポーリングし、**変わったときだけ**報告する

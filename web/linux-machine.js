@@ -318,8 +318,12 @@ export function mountLinux(canvas, opts = {}) {
                 kernel: kernel.buffer,
                 initrd: initrd?.buffer,
                 disk: disk?.buffer,
-                cmdline: 'console=ttyS0',
+                // フレームバッファを申告するときは tty0 も console にする —
+                // 起動ログがfbconに描かれ、実機のPCと同じ絵になる。
+                // 最後の console= (ttyS0) が /dev/console なのでシェルは従来どおり
+                cmdline: opts.fb?.() ? 'console=tty0 console=ttyS0' : 'console=ttyS0',
                 ramMb,
+                lfb: !!opts.fb?.(),
                 // NICを挿すかは電源を入れるこの瞬間に決まる (VGA機と同じ)。
                 // macの有無だけで伝える — 線の状態はメイン側の持ち物
                 mac: opts.mac?.(),
@@ -353,6 +357,11 @@ export function mountLinux(canvas, opts = {}) {
               bannerTail = '';
             }
           }
+          break;
+        }
+        case 'lfb': {
+          // efifb が描いた一枚 (24bpp、赤が先頭)。描き手は端末と同じcanvas
+          term.drawRgb(new Uint8Array(msg.bytes), msg.width, msg.height);
           break;
         }
         case 'state': {

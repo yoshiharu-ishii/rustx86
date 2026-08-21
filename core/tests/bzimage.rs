@@ -66,7 +66,7 @@ use rustx86_core::bzimage::{build_zero_page, zero_page_e820, zero_page_e820_coun
 fn e820はramサイズから作られる() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 128MB の機械
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None);
     // 640K + EBDA + VGA窓 + 1MB以降 = 4エントリ
     assert_eq!(zero_page_e820_count(&zp), 4);
     // 最後のエントリ = 1MB から (128MB - 1MB) の使えるRAM
@@ -80,14 +80,14 @@ fn e820はramサイズから作られる() {
 fn 小さいramでは1mb以降のエントリが無い() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 1MB ちょうど → 1MB以降のRAMが無いので3エントリ
-    let zp = build_zero_page(&img, 1 << 20, 0x9_0000, None);
+    let zp = build_zero_page(&img, 1 << 20, 0x9_0000, None, None);
     assert_eq!(zero_page_e820_count(&zp), 3);
 }
 
 #[test]
 fn zero_pageにヘッダとcmdlineが入る() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None);
     // setupヘッダのマジックが zero page にも写っている
     assert_eq!(&zp[0x202..0x206], b"HdrS");
     // cmdline ポインタ
@@ -220,5 +220,44 @@ fn 非gzipのinitrdは自分の大きさで見積もる() {
     assert_eq!(
         rustx86_core::initrd_ram_needed(&raw),
         (8 << 20) + (8 << 20) + (68 << 20)
+    );
+}
+
+/// リニアFBを申告すると、screen_info がEFI型のLFBを名乗り、e820 でその窓が
+/// 予約に変わる (usable のままだと ioremap が断る)。efifb が掴む前提条件
+#[test]
+fn zero_page_declares_an_efi_lfb_and_reserves_it_in_e820() {
+    use rustx86_core::bzimage::Lfb;
+    let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
+    let ram = 128u64 << 20;
+    let lfb = Lfb::at_top_of(ram);
+    assert_eq!(lfb.base, (128 << 20) - 0x10_0000, "RAMの末尾1MB");
+    let zp = build_zero_page(&img, ram, 0x9_0000, None, Some(lfb));
+    assert_eq!(zp[0x0F], 0x70, "orig_video_isVGA = VIDEO_TYPE_EFI");
+    assert_eq!(u16::from_le_bytes([zp[0x12], zp[0x13]]), 640);
+    assert_eq!(u16::from_le_bytes([zp[0x14], zp[0x15]]), 480);
+    assert_eq!(u16::from_le_bytes([zp[0x16], zp[0x17]]), 24);
+    assert_eq!(
+        u32::from_le_bytes([zp[0x18], zp[0x19], zp[0x1A], zp[0x1B]]),
+        lfb.base
+    );
+    assert_eq!(u16::from_le_bytes([zp[0x24], zp[0x25]]), 1920, "linelength");
+    // 赤が下位 (b8g8r8): sysfb の simplefb 表に無い形式で efifb へ落とす
+    assert_eq!((zp[0x26], zp[0x27]), (8, 0), "red size/pos");
+    assert_eq!((zp[0x2A], zp[0x2B]), (8, 16), "blue size/pos");
+
+    // e820: usable は LFB の手前まで、LFB の窓は予約
+    let n = zero_page_e820_count(&zp) as usize;
+    let (b, sz, kind) = zero_page_e820(&zp, n - 2);
+    assert_eq!(
+        (b, b + sz, kind),
+        (0x10_0000, lfb.base as u64, 1),
+        "usable が手前で終わる"
+    );
+    let (b, sz, kind) = zero_page_e820(&zp, n - 1);
+    assert_eq!(
+        (b, b + sz, kind),
+        (lfb.base as u64, ram, 2),
+        "LFBの窓は予約"
     );
 }

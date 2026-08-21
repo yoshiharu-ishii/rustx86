@@ -158,6 +158,7 @@ export class AnsiTerminal {
   }
 
   reset() {
+    this.gfxOn = false;
     this.grid = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => this._blank()),
     );
@@ -501,7 +502,40 @@ export class AnsiTerminal {
 
   // ---- 描画 ----
 
+  /** efifb が描いた一枚 (24bpp・R,G,Bの順) をそのまま置く。
+   * 解像度はゲストの申告 (640×480) で、canvasは 80×24 の升目の大きさ
+   * (730×384) なので縮めて収める — 補間は切る (文字の縁が滲む)。
+   * 出ている間、文字の描き手 (render) は黙る。戻すのは reset() */
+  drawRgb(rgb, width, height) {
+    this.gfxOn = true;
+    if (!this.gfx || this.gfx.w !== width || this.gfx.h !== height) {
+      const cvs = document.createElement('canvas');
+      cvs.width = width;
+      cvs.height = height;
+      this.gfx = { w: width, h: height, cvs, ctx: cvs.getContext('2d'), img: new ImageData(width, height) };
+    }
+    const d = this.gfx.img.data;
+    for (let i = 0, o = 0, n = width * height; i < n; i++, o += 4) {
+      d[o] = rgb[i * 3];
+      d[o + 1] = rgb[i * 3 + 1];
+      d[o + 2] = rgb[i * 3 + 2];
+      d[o + 3] = 255;
+    }
+    this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
+    const { ctx } = this;
+    const W = this.canvas.width - SCROLLBAR_W;
+    const H = this.canvas.height;
+    const scale = Math.min(W / width, H / height);
+    const dw = Math.floor(width * scale);
+    const dh = Math.floor(height * scale);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.gfx.cvs, (W - dw) >> 1, (H - dh) >> 1, dw, dh);
+  }
+
   render() {
+    if (this.gfxOn) return; // 画素の一枚の上に文字の黒地を被せない
     if (!this.dirty) return;
     this.dirty = false;
     const ctx = this.ctx;
