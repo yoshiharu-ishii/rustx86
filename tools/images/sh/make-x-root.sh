@@ -34,7 +34,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 #    icewm               ウィンドウマネージャ (タスクバー+メニュー。古典デスクトップの絵)
 #    dillo / w3m / links + ca-certificates  ブラウザ3種 (GUI / 端末 / 両用) と TLS の信頼束。
 #                        ネットワーク編の wsslirp 経由で https が通る
-#    feh / mupdf-x11 / xfe  画像・PDF・ファイラ
+#    feh / xfe           画像・ファイラ (mupdf-x11 は libmupdf 51MB で見送り)
 #    xclock / xeyes / xcalc / xmessage / xsetroot  X の定番の小物
 #    xboard + gnuchess   ゲーム
 #    font-dejavu + fontconfig  Xft を使うアプリ (dillo/icewm) の文字
@@ -47,7 +47,7 @@ apk --arch x86 --root "$work/pkg" --initdb -U --no-scripts \
       xterm font-misc-misc font-cursor-misc \
       icewm \
       dillo w3m links ca-certificates \
-      feh mupdf-x11 xfe \
+      feh xfe \
       xclock xeyes xcalc xmessage xsetroot \
       xboard gnuchess \
       font-dejavu fontconfig
@@ -66,7 +66,8 @@ find usr/lib -name "*.a" -delete 2>/dev/null || true
 # 木の 2/3 がこれだった。xorg.conf で glx を Disable し、実体も消す
 rm -rf usr/lib/libLLVM* usr/lib/dri usr/lib/libGL* usr/lib/libGLES* usr/lib/libEGL* \
        usr/lib/libgbm* usr/lib/libglapi* usr/lib/xorg/modules/extensions/libglx.so \
-       usr/lib/libvulkan* usr/share/vulkan usr/share/glvnd usr/lib/libLLVM*
+       usr/lib/libvulkan* usr/share/vulkan usr/share/glvnd \
+       usr/lib/libgallium* usr/lib/gallium-pipe usr/lib/libxatracker*
 mkdir -p tmp/.X11-unix var/log etc/X11 root
 chmod 1777 tmp tmp/.X11-unix
 
