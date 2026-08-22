@@ -1,0 +1,17 @@
+#!/bin/sh
+# 手元の門番: 1MB 超のファイルを commit させない (CI と同じ閾値)。
+# 有効化: git config core.hooksPath .githooks
+# CI (tools/build/check-large-files.sh) が最後の砦で、こちらは push 前に気づくため
+LIMIT=${LIMIT:-1000000}
+big=$(
+  git diff --cached --name-only --diff-filter=AM \
+    | while IFS= read -r f; do
+        s=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
+        [ "$s" -gt "$LIMIT" ] && printf '%10d  %s\n' "$s" "$f"
+      done
+)
+[ -z "$big" ] && exit 0
+echo "pre-commit: ${LIMIT} バイトを超えるファイルが staged になっている:" >&2
+echo "$big" >&2
+echo "像は rustx86-images へ。どうしても入れるなら LIMIT=... か --no-verify (CI でも落ちる)" >&2
+exit 1

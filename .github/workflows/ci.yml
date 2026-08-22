@@ -152,6 +152,28 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
+      # **大物の門番** (2026-08-22): 1MB 超のファイルが入っていたら落とす。
+      # FreeDOS+DOOM の像 4.5MB が public に commit され、履歴を書き換えて消した事故の再発防止。
+      # .gitignore は約束、これは仕組み。push ruleset は Organization 限定で個人の public には付かない。
+      # PR では base からの範囲も見る (入れてすぐ消しても blob は履歴に残るため)
+      - name: 大物検査
+        id: bigfile
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo '## 大物検査 — `tools/build/check-large-files.sh` (1MB 超を拒む)'
+            echo '```'
+            RANGE=
+            if [ -n "${{ github.base_ref }}" ]; then
+              git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+              RANGE="origin/${{ github.base_ref }}..HEAD"
+            fi
+            sh tools/build/check-large-files.sh $RANGE 2>&1 | tee /dev/stderr || RC=$?
+            echo '```'
+            exit ${RC:-0}
+          } > report-bigfile.md
+
       # ActionsのSummaryページにも同じレポートを掲示する (Checksタブとは別画面。
       # Checks=PRレビュー時の掲示板、Actions Summary=実行を深掘りするときの一覧)
       - name: Summaryへ掲示
@@ -167,12 +189,13 @@ jobs:
             echo "| ビルド | wasm | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
             echo "| 静的 | 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
             echo "| 静的 | lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 静的 | 大物検査 (1MB 超) | ${{ steps.bigfile.outcome == 'success' && '✅' || '❌' }} |"
             echo ''
             echo '上の層は別ジョブが受け持つ: **2 CPU層** (照合・互換) →'
             echo '**3 機械層** (OS起動回帰・wasm起動) → **4 機能層**'
             echo '(スナップショット・貼り付け)。層の意味は docs/reference/ci.md'
             echo ''
-            cat report-test.md report-uidecide.md report-wasm.md report-fmt.md report-lint.md 2>/dev/null
+            cat report-test.md report-uidecide.md report-wasm.md report-fmt.md report-lint.md report-bigfile.md 2>/dev/null
           } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- 合否掲示板への発行。1関門=1行、本文は右ペイン ----
@@ -227,6 +250,14 @@ jobs:
           outcome: ${{ steps.lint.outcome }}
           report-file: report-lint.md
           token: ${{ steps.app.outputs.token || github.token }}
+      - uses: ./.github/actions/publish-check
+        if: always()
+        with:
+          name: 1 土台 — 大物検査 (静的)
+          title: ${{ steps.bigfile.outcome == 'success' && '1MB 超のファイルなし' || '1MB 超のファイルが入っている (像は rustx86-images へ)' }}
+          outcome: ${{ steps.bigfile.outcome }}
+          report-file: report-bigfile.md
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: 合否判定
         run: |
@@ -234,7 +265,8 @@ jobs:
             && test "${{ steps.uidecide.outcome }}" = "success" \
             && test "${{ steps.wasm.outcome }}" = "success" \
             && test "${{ steps.fmt.outcome }}" = "success" \
-            && test "${{ steps.lint.outcome }}" = "success"
+            && test "${{ steps.lint.outcome }}" = "success" \
+            && test "${{ steps.bigfile.outcome }}" = "success"
 
   jita64:
     # jit-a64 の単体テストは**生成した arm64 機械語を実際に実行する**
