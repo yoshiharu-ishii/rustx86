@@ -134,7 +134,10 @@ cat > usr/bin/startx <<'STARTX'
 # HOME と SHELL は決め打ち — init のシェルは HOME=/ で来るので ~/.xinitrc が
 # 見つからず、xterm は SHELL 未設定だと /etc/passwd からログインシェルを引いて
 # (この木には無い) "No absolute path found for shell" と言って即死する
-export HOME=/root SHELL=/bin/sh
+# PATH も export する — init 由来のシェルは PATH を子へ渡さず、icewm は
+# メニューの各項目の実行ファイルを PATH で探して**見つからない項目を隠す**
+# (prog "xterm" すら消えて、Windows/Settings/Logout だけの空メニューになった)
+export HOME=/root SHELL=/bin/sh PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /usr/bin/xinit "${1:-/root/.xinitrc}" -- /usr/bin/Xorg :0 vt2 -config /etc/X11/xorg.conf -nolisten tcp -logfile /var/log/Xorg.0.log
 STARTX
 chmod 755 usr/bin/startx
