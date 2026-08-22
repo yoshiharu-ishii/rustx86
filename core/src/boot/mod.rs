@@ -207,11 +207,14 @@ impl Machine {
         }
         self.write_phys8(CMDLINE_ADDR + cmdline.len() as u32, 0);
 
-        // initrd をRAM上端寄り (1MBの余白を残してページ整列) に置く
+        // initrd をRAM上端寄り (1MBの余白を残してページ整列) に置く。
+        // LFB を申告しているなら**その窓の下**が上端 — 重ねると、カーネルは e820 の
+        // 予約域にある initrd を起動初期に複製し直してくれる (壊れはしない) が、
+        // 画面に gzip の残骸がノイズとして映る
         let initrd_loc = match initrd {
             Some(data) => {
                 let size = data.len() as u32;
-                let top = self.mem.len() as u32;
+                let top = self.lfb.map(|l| l.base).unwrap_or(self.mem.len() as u32);
                 // 置き場所ではなく**展開しきれるか**で判定する。カーネルは
                 // 足りなくても墜ちず、"rootfs image is not initramfs
                 // (write error); looks like an initrd" と言って中身が欠けた
