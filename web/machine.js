@@ -78,6 +78,8 @@ export class Machine {
     // ISO 9660 (セクタ 16 に "CD001") なら El Torito で起動、それ以外はフロッピー
     const iso = image.length > 0x8006 && image[0x8001] === 0x43 && image[0x8002] === 0x44 && image[0x8003] === 0x30 && image[0x8004] === 0x30 && image[0x8005] === 0x31;
     this.emu = iso ? Emulator.from_iso(image) : Emulator.from_disk(image);
+    /** PCI 付きの機械か (ISO は 32bit PC に載る)。NIC の名前 (RTL8029 / NE2000) の根拠 */
+    this.pci = iso;
     // RTCを実時刻に合わせる (DOSのDATE/TIMEが今日を示す)。
     // CIのヘッドレス検証は注入しないので、そちらは決定的なまま
     this.emu.set_rtc_unix(Date.now() / 1000);

@@ -77,8 +77,8 @@ export function netOff(search) {
  * ISAを知らないOSにISAのカードを挿しても見えない (逆も同じ)
  * @param {boolean} isLinux 32bit Linux (PCIしか見ない) か
  */
-export function nicFor(isLinux) {
-  return isLinux
+export function nicFor(isPci) {
+  return isPci
     ? { label: 'RTL8029 (PCI)', usable: true }
     : { label: 'NE2000 (ISA 0x300)', usable: true };
 }
