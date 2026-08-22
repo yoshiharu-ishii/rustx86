@@ -23,7 +23,7 @@
 //         {type:'dbg-stop', why}             見張り (ブレークポイント等) が機械を止めた
 
 import init, { Emulator } from './pkg/rustx86_wasm.js';
-import { setupJit, pumpJit, resetJit } from './jit-runtime.js';
+import { setupJit, pumpJit, releaseJit, resetJit } from './jit-runtime.js';
 
 let emu = null;
 let running = false;
@@ -40,6 +40,8 @@ let instrs = 0;
 let lastMeasure = 0;
 let lastTone = 0;
 let lastLfbAt = 0; // リニアFBを最後に送った時刻 (30fpsの刻み)
+let lfbInFlight = false; // メインが描き終えるまで次を送らない (背圧)
+let lfbBuf = null; // 往復させる一枚分のバッファ
 
 const wasmExports = await init();
 let jitOn = false;
@@ -93,6 +95,11 @@ self.onmessage = (e) => {
       loop();
       break;
     }
+    case 'lfb-ack':
+      // メインが描き終えた。バッファを受け取り直して次の一枚に使う
+      lfbInFlight = false;
+      if (msg.bytes) lfbBuf = msg.bytes;
+      break;
     case 'mouse':
       // 相対移動とボタン → 8042 の第2ポート → IRQ12 → psmouse
       if (emu) emu.mouse(msg.dx | 0, msg.dy | 0, msg.buttons & 7);
@@ -135,6 +142,7 @@ self.onmessage = (e) => {
       if (msg.on && !jitOn) jitEnable();
       if (!msg.on && jitOn) {
         emu.jit_disable();
+        releaseJit(emu); // 捨てたブロックの添字を null に (モジュールを GC へ)
         jitOn = false;
       }
       postMessage({ type: 'jit', on: jitOn });
@@ -280,18 +288,25 @@ function loop() {
   }
 
   // リニアFB (efifb)。**ただのRAMで通知が無い**ので、時間で刻んで一枚ずつ送る。
-  // 30fps・921KB/枚の複写はメモリ帯域の誤差で、Worker境界はこれで越える
-  // (OffscreenCanvasに移すのは、これで足りなくなってから)
-  if (emu.lfb_on()) {
+  // Worker境界は postMessage (transferable) で越える (OffscreenCanvasに移すのは、
+  // これで足りなくなってから)。
+  // **背圧つき**: メインが1枚描いて 'lfb-ack' を返すまで次を送らない。
+  // 投げっぱなしだと、メインが追いつかない (タブが裏に回った等) ときに
+  // 3MB/枚 (1024×768×4) の行列が postMessage に溜まり続け、レンダラが
+  // メモリで落ちた (Chrome のエラーコード 5)。バッファは往復させて使い回す
+  if (emu.lfb_on() && !lfbInFlight) {
     const now = performance.now();
     if (now - lastLfbAt >= 33) {
       lastLfbAt = now;
-      const view = new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), emu.lfb_len());
-      const copy = view.slice();
+      const len = emu.lfb_len();
+      if (!lfbBuf || lfbBuf.byteLength !== len) lfbBuf = new ArrayBuffer(len);
+      new Uint8Array(lfbBuf).set(new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), len));
+      lfbInFlight = true;
       postMessage(
-        { type: 'lfb', bytes: copy.buffer, width: emu.lfb_width(), height: emu.lfb_height(), bpp: emu.lfb_bpp() },
-        [copy.buffer],
+        { type: 'lfb', bytes: lfbBuf, width: emu.lfb_width(), height: emu.lfb_height(), bpp: emu.lfb_bpp() },
+        [lfbBuf],
       );
+      lfbBuf = null; // 所有権はメインへ。ack で戻ってくる
     }
   }
 

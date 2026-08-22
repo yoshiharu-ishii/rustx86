@@ -53,6 +53,8 @@ pub struct Emulator {
     /// drain_batch/install_batch (instantiateはJSにしかできない)
     jit_rt: Box<jit::JitRt>,
     pending_batch: Vec<(u32, u32, u32)>,
+    /// 今 instantiate 待ちのバッチのモジュール番号
+    pending_module: u32,
 }
 
 impl Emulator {
@@ -62,6 +64,7 @@ impl Emulator {
             m,
             jit_rt: Box::new(jit::JitRt::new()),
             pending_batch: Vec::new(),
+            pending_module: 0,
         }
     }
 }
@@ -313,25 +316,52 @@ impl Emulator {
         }
         let bodies: Vec<Vec<u8>> = jobs.iter().map(|j| j.body.clone()).collect();
         self.pending_batch = jobs.iter().map(|j| (j.pa, j.gen, j.n)).collect();
+        self.pending_module = self.jit_rt.new_module(jobs.len());
         let m = jit::compile_batch(&bodies);
         Some(js_sys::Uint8Array::from(m.as_slice()))
     }
 
-    /// バッチの据え付け本数 (JSがtable.growに使う)
+    /// バッチの据え付け本数
     pub fn pending_count(&self) -> usize {
         self.pending_batch.len()
     }
 
-    /// JS が table.set した先頭スロットを受け、バッチ全員を直接マップへ据える
-    pub fn install_batch(&mut self, first_slot: u32) {
+    /// バッチ各ブロックの据え付け先 (関数テーブルの添字)。退去したブロックが
+    /// 返した添字を先に使い回し、足りない分は `0xFFFFFFFF` (= 伸ばして取れ) で
+    /// 返す。JS は grow した番号に置き換えて table.set し、install_batch に渡す
+    pub fn assign_slots(&mut self) -> Vec<u32> {
+        self.jit_rt.assign_slots(self.pending_batch.len())
+    }
+
+    /// JS が table.set した添字 (assign_slots の順) を受け、バッチ全員を直接マップへ据える
+    pub fn install_batch(&mut self, slots: &[u32]) {
+        let module = self.pending_module;
         for (i, (pa, gen, n)) in self.pending_batch.drain(..).enumerate() {
-            self.jit_rt.install(pa, gen, n, first_slot + i as u32);
+            self.jit_rt.install(pa, gen, n, slots[i], module);
         }
     }
 
-    /// instantiate に失敗したバッチを捨てる (coreはインタプリタで走り続ける)
-    pub fn discard_batch(&mut self) {
+    /// 退去済みで JS が null にすべき添字 (pump の頭で呼ぶ)。添字に関数が
+    /// 据わったままだとモジュール (4096 ブロック分の Code) が GC されない
+    pub fn take_freed(&mut self) -> Vec<u32> {
+        self.jit_rt.take_freed()
+    }
+
+    /// 早期引退させたモジュール数 (診断)
+    pub fn jit_retired(&self) -> f64 {
+        self.jit_rt.retired as f64
+    }
+
+    /// instantiate に失敗したバッチを捨てる (coreはインタプリタで走り続ける)。
+    /// 使い回すつもりだった添字は返す
+    pub fn discard_batch(&mut self, slots: &[u32]) {
+        self.jit_rt.release_slots(slots);
         self.pending_batch.clear();
+    }
+
+    /// 使い回した添字の累計 (診断: テーブルが伸び続けていないかの定規)
+    pub fn jit_recycled(&self) -> f64 {
+        self.jit_rt.recycled as f64
     }
 
     /// 診断モード (jit-checkの税分解用)

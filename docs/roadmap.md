@@ -365,7 +365,7 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
       埋めており (今は「80x25のテキスト」と申告している)、**同じ構造体にLFBの欄がある**。
       我々がfirmware側なのだから、自分で用意したフレームバッファを申告すればよい。
       **要実走確認** (ここは推測なので、6a着手時に必ず実物で確かめる)
-- [x] **6b: PS/2 マウス** — 8042 の第2ポート (AUX)。2026-08-21: コマンドバイトの実体化・0xA7/A8/A9/D3/D4・IRQ12 (スレーブPICの連結もここで初めて配線)・素の3ボタンPS/2マウス素子。Linuxは psmouse (proto=bare) + mousedev + evdev を modloop-lts から借りて `/dev/input/mice` / `event*`。ブラウザは pointer lock で捕獲 (Ctrl+Alt+G / Esc / blur で解放)
+- [x] **6b: PS/2 マウス** — 8042 の第2ポート (AUX)。2026-08-21: コマンドバイトの実体化・0xA7/A8/A9/D3/D4・IRQ12 (スレーブPICの連結もここで初めて配線)・素の3ボタンPS/2マウス素子。Linuxは psmouse (proto=bare) + mousedev + evdev を modloop-lts から借りて `/dev/input/mice` / `event*`。ブラウザは pointer lock で捕獲 (Ctrl+Alt+G / Esc / blur で解放)。**2026-08-22 捕獲を廃止**: X 側の加速を切り、枠に入るたび/押す直前に左上へ押し込んで位置を合わせ直す「相対のまま絶対位置風」(ansi.js)。画面の上に居る間だけ届き、脱出キー無し (台帳: virtio-input tablet = 本物の絶対デバイス)
 - [ ] **6c: ISO起動** — ATA/ATAPI (PIOで読むだけ) + El Torito。
       **ISOの中に埋めたフロッピーイメージをドライブAに見せる**のが El Torito の
       floppy emulation モードで、これなら既存の `INT 13h` 経路がそのまま使える。

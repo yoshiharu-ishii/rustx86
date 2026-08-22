@@ -14,6 +14,8 @@
 
 /** 生成モジュールが共有する import と、core の関数テーブル */
 let ctx = null;
+/** assign_slots が返す「テーブルを伸ばして新しく取れ」の印 (core の jit::FRESH と同じ値) */
+const FRESH = 0xffffffff;
 
 /**
  * @param emu      Emulator (jit_function_table を持つ)
@@ -45,25 +47,48 @@ export function setupJit(emu, exports) {
  */
 export function pumpJit(emu) {
   let installed = 0;
+  releaseJit(emu);
   for (;;) {
     // バッチ (1モジュール=最大4096ブロック)。モジュール数を減らすのが本体 —
     // 1ブロック=1モジュールはエンジンのコンパイル固定費でブート+19sだった
     const bytes = emu.drain_batch();
     if (!bytes) break;
-    const n = emu.pending_count();
+    // 据え付け先の添字。**退去したブロックの添字を使い回す** — テーブルが
+    // 伸びる一方だと、退去済みブロックのモジュール (Code) が添字に掴まれた
+    // まま GC されず、X のような焼き直しの続く負荷で 6〜8 分でレンダラが
+    // 落ちた (V8 の ExternalEntityTable 枯渇 = Chrome エラーコード 5)。
+    // FRESH (0xFFFFFFFF) の分だけ伸ばし、grow した番号を当てる
+    const slots = emu.assign_slots();
+    const n = slots.length;
     try {
       const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), ctx.imports);
-      const first = ctx.table.grow(n);
-      for (let i = 0; i < n; i++) ctx.table.set(first + i, inst.exports['b' + i]);
-      emu.install_batch(first);
+      let fresh = 0;
+      for (let i = 0; i < n; i++) if (slots[i] === FRESH) fresh++;
+      let next = fresh ? ctx.table.grow(fresh) : 0;
+      for (let i = 0; i < n; i++) {
+        if (slots[i] === FRESH) slots[i] = next++;
+        ctx.table.set(slots[i], inst.exports['b' + i]);
+      }
+      emu.install_batch(slots);
       installed += n;
     } catch (e) {
       // 焼き損じはバッチごと捨てる — coreはインタプリタで走り続ける
       console.error('jit instantiate failed:', e);
-      emu.discard_batch();
+      emu.discard_batch(slots);
     }
   }
   return installed;
+}
+
+/**
+ * 退去したブロックの添字を null にして、モジュールを GC に渡す。
+ * pump の頭で毎回呼ぶ。jit_disable (flush) の後にも呼ぶ — 添字に関数が
+ * 据わったままだと、退去しても 4096 ブロック分の Code が残り続ける
+ */
+export function releaseJit(emu) {
+  if (!ctx) return;
+  const freed = emu.take_freed();
+  for (let i = 0; i < freed.length; i++) ctx.table.set(freed[i], null);
 }
 
 /** テスト・再起動用 (テーブルはインスタンスごとに新しいので状態は持たない) */
