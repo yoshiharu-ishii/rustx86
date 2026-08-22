@@ -11,7 +11,7 @@ fn isolinux_boots_linux_from_iso() {
         eprintln!("skip: {path} が無い (tools/images/sh/make-test-iso.sh)");
         return;
     };
-    let mut m = Machine::with_profile(MachineProfile::pc_floppy(128));
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
     m.boot_from_iso(iso).expect("El Torito");
     // ISO_TRACE=1: まず INT 13h AH=42 を直接呼んで読みの正しさを検算し、
     // 最初に HLT するまでの直前 60 命令 (重複畳み) を出す
@@ -222,7 +222,7 @@ fn iso_lockstep() {
     let path = std::env::var("RUSTX86_ISO").unwrap_or_else(|_| ISO.to_string());
     let iso = std::fs::read(&path).expect("iso");
     let boot = |dbg: bool| {
-        let mut m = Machine::with_profile(MachineProfile::pc_floppy(128));
+        let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
         m.boot_from_iso(iso.clone()).expect("El Torito");
         m.dbg.on = dbg;
         m
@@ -288,7 +288,7 @@ fn tinycore_boots_from_iso_to_shell() {
         eprintln!("skip: {TC} が無い (tools/images/sh/fetch-images.sh tinycore)");
         return;
     };
-    let mut m = Machine::with_profile(MachineProfile::pc_floppy(128));
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(128));
     m.boot_from_iso(iso).expect("El Torito");
     let run_until = |m: &mut Machine, needle: &str, budget: u64| -> bool {
         let mut i = 0u64;
