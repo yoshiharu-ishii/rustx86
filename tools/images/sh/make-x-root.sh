@@ -38,6 +38,7 @@ work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 #    xclock / xeyes / xcalc / xmessage / xsetroot  X の定番の小物
 #    xboard + gnuchess   ゲーム
 #    font-dejavu + fontconfig  Xft を使うアプリ (dillo/icewm) の文字
+#    font-ipaex          日本語 (IPAex 明朝/ゴシック、約11MB。noto-cjk は 88MB なので見送り)
 mkdir -p "$work/pkg"
 apk --arch x86 --root "$work/pkg" --initdb -U --no-scripts \
   --keys-dir /etc/apk/keys \
@@ -50,7 +51,7 @@ apk --arch x86 --root "$work/pkg" --initdb -U --no-scripts \
       feh xfe \
       xclock xeyes xcalc xmessage xsetroot \
       xboard gnuchess \
-      font-dejavu fontconfig
+      font-dejavu fontconfig font-ipaex
 rm -rf "$work/pkg/lib/apk" "$work/pkg/var/cache" "$work/pkg/etc/apk" "$work/pkg/dev"
 
 # 2. ミニの木の上に重ねる
@@ -144,6 +145,52 @@ xterm -geometry 100x30+8+8 -fn fixed -e /bin/sh &
 exec icewm-session
 XINITRC
 chmod 755 root/.xinitrc
+# icewm のメニュー (タスクバー左の icewm ボタン)。入れたアプリを役割ごとに並べる。
+# 端末系 (w3m/links) は xterm の中で起こす。/etc/icewm/menu は全ユーザー共通の既定
+mkdir -p etc/icewm
+cat > etc/icewm/menu <<'MENU'
+prog "xterm" xterm xterm -fn fixed -geometry 100x30
+separator
+menu "ブラウザ" folder {
+    prog "Dillo (GUI)" dillo dillo
+    prog "links -g (グラフィック)" links links -g https://pocraft.net/
+    prog "w3m (xterm)" xterm xterm -fn fixed -geometry 100x36 -e w3m https://pocraft.net/
+    prog "links (xterm)" xterm xterm -fn fixed -geometry 100x36 -e links https://pocraft.net/
+}
+menu "道具" folder {
+    prog "xfe (ファイラ)" xfe xfe
+    prog "feh (画像)" feh feh /usr/share/icewm
+    prog "xcalc" xcalc xcalc
+    prog "xclock" xclock xclock -geometry 150x150
+    prog "xeyes" xeyes xeyes
+}
+menu "ゲーム" folder {
+    prog "xboard (gnuchess)" xboard xboard -fcp gnuchess
+}
+separator
+prog "bounce (fbdev、X終了後に)" xterm xterm -fn fixed -e sh -c 'echo "X を終了してから ~ # bounce"; sleep 3'
+separator
+restart "icewm を再起動" icewm icewm
+MENU
+# icewm のメニューと xterm の日本語: icewm は Xft (fontconfig) で IPAex を拾う。
+# xterm は bitmap の fixed だと日本語が出ないので、Xft 版の項目を別に用意する
+sed -i 's#^prog "xterm" xterm xterm -fn fixed -geometry 100x30$#prog "xterm" xterm xterm -fn fixed -geometry 100x30\nprog "xterm (日本語, Xft)" xterm xterm -u8 -fa "IPAexGothic" -fs 11 -geometry 100x30#' etc/icewm/menu
+mkdir -p etc/icewm
+cat > etc/icewm/preferences <<'PREFS'
+# 日本語が出るフォント (Xft)。無い環境なら DejaVu に落ちる
+TitleFontNameXft="IPAexGothic:size=10:bold"
+MenuFontNameXft="IPAexGothic:size=10"
+StatusFontNameXft="IPAexGothic:size=10"
+QuickSwitchFontNameXft="IPAexGothic:size=10"
+NormalButtonFontNameXft="IPAexGothic:size=10"
+ActiveButtonFontNameXft="IPAexGothic:size=10:bold"
+NormalTaskBarFontNameXft="IPAexGothic:size=10"
+ActiveTaskBarFontNameXft="IPAexGothic:size=10:bold"
+ToolButtonFontNameXft="IPAexGothic:size=10"
+ListBoxFontNameXft="IPAexGothic:size=10"
+LabelFontNameXft="IPAexGothic:size=10"
+ClockFontNameXft="IPAexGothic:size=10"
+PREFS
 # root の行 — xterm は SHELL の他に /etc/passwd も引き、無いと
 # "No absolute path found for shell" と警告する (動きはする)。whoami 等にも効く
 mkdir -p etc
