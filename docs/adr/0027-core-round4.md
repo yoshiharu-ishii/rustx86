@@ -1,6 +1,6 @@
 # 0027: core第4ラウンド — フォールバック税と具現化税を削る
 
-日付: 2026-08-18 / 状態: 採用 / 関係: [core-roadmap](../reference/core-roadmap.md), [0020](0020-external-review3.md)
+日付: 2026-08-18 / 状態: 採用 / 関係: [core-roadmap](../reference/core-roadmap.md), [0020](0020-external-review-round3.md)
 
 ## 背景
 

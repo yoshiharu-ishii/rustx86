@@ -66,6 +66,15 @@ PCは40年分の後方互換が地層になってできている。今のCPUも�
 | [0017](adr/0017-network-isa-first.md) | ネットワークの境界とバス順 — ISA NE2000 から始める |
 | [0018](adr/0018-devices-chip-card-bus.md) | 装置は「なにか」と「どう見つかるか」で分ける — chip / card と bus |
 | [0019](adr/0019-disk-virtio-blk-first.md) | ディスクは virtio-blk-pci から — 速さはvirtio、互換はATAで後から |
+| [0020](adr/0020-external-review-round3.md) | 外部レビュー第3弾を台帳で裁く — 判別則(4)の精密化 |
+| [0021](adr/0021-broad-sweep-round.md) | 広範囲調査を4バッチで裁く (cold外し・鎖・Entry痩身・外部技法) |
+| [0022](adr/0022-cpu-round3-before-gfx.md) | CPU第3ラウンド — 税なしJIT (F1d) を Tier 6 の前に |
+| [0023](adr/0023-f1d-g-density.md) | F1d-g — 生成コードの密度 (cc死储省略・条件インライン) |
+| [0024](adr/0024-f1d-i-chaining.md) | TB chaining は実装検証の上で不採用 — tick粒度が天井 |
+| [0025](adr/0025-tick-256.md) | tick粒度 64→256 (時間の換算は不変) |
+| [0026](adr/0026-fastmem.md) | fastmem — 段2+PGEまで検証して寝かせる |
+| [0027](adr/0027-core-round4.md) | core第4ラウンド — フォールバック税と具現化税 |
+| [0028](adr/0028-part3-cpu-and-gfx.md) | 最適化 Part 3 — 画面が出たら定規が変わる (X窓・画素の配管・wasm JITの枠) |
 
 ## 読む順番 (初見の人向けの道)
 
