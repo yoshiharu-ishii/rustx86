@@ -138,10 +138,11 @@ impl Emulator {
         Ok(Emulator::wrap(m))
     }
 
-    /// ISO 9660 の像 (El Torito) から起動する。RAM は 128MB — 中身が Linux の
-    /// ことが多い (isolinux がカーネルを 1MB 以上へ置く) ので 16bit 機より広く取る
+    /// ISO 9660 の像 (El Torito) から起動する。機械は **PCI 付きの 32bit PC (128MB)** —
+    /// 中身は Linux のことが多く、NIC (RTL8029、PCI) を Linux 機と同じに見せたい
+    /// (ISA の NE2000 窓は 16bit 機だけのもの)。BIOS の起動経路は機械の種類に依らない
     pub fn from_iso(image: &[u8]) -> Result<Emulator, JsError> {
-        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(128));
+        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(128));
         m.boot_from_iso(image.to_vec())
             .map_err(|e| JsError::new(&e))?;
         Ok(Emulator::wrap(m))
