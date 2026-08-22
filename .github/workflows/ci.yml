@@ -455,6 +455,7 @@ jobs:
           tools/images/sh/fetch-images.sh elks
           tools/images/sh/fetch-images.sh freedos
           tools/images/sh/fetch-images.sh doom
+          tools/images/sh/fetch-images.sh tinycore
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
@@ -573,6 +574,7 @@ jobs:
           tools/images/sh/fetch-images.sh elks
           tools/images/sh/fetch-images.sh freedos
           tools/images/sh/fetch-images.sh doom
+          tools/images/sh/fetch-images.sh tinycore
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
@@ -652,6 +654,7 @@ jobs:
           tools/images/sh/fetch-images.sh elks
           tools/images/sh/fetch-images.sh freedos
           tools/images/sh/fetch-images.sh doom
+          tools/images/sh/fetch-images.sh tinycore
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
@@ -769,6 +772,7 @@ jobs:
           tools/images/sh/fetch-images.sh elks
           tools/images/sh/fetch-images.sh freedos
           tools/images/sh/fetch-images.sh doom
+          tools/images/sh/fetch-images.sh tinycore
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh

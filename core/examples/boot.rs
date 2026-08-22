@@ -40,12 +40,21 @@ fn main() {
     // 載らない DOS ソフトの器。そのときは**ブラウザと同じ 386 の機械** (pc_floppy、
     // 16MB) にする — Machine::new() は PC/XT (8086) で、DOS/16M が「386 が要る」と言う
     let hdd = std::env::var("HDD").ok();
-    let mut m = if hdd.is_some() {
+    // ISO 9660 (セクタ 16 に CD001) なら El Torito で起動 — 中身は Linux のことが
+    // 多いので 128MB の 386 機で
+    let is_iso = image.len() > 0x8006 && &image[0x8001..0x8006] == b"CD001";
+    let mut m = if is_iso {
+        Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(128))
+    } else if hdd.is_some() {
         Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(16))
     } else {
         Machine::new()
     };
-    m.boot_from_disk(image).expect("boot");
+    if is_iso {
+        m.boot_from_iso(image).expect("El Torito");
+    } else {
+        m.boot_from_disk(image).expect("boot");
+    }
     if let Some(p) = hdd {
         let img = std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"));
         m.hdd_attach(img).expect("hdd");
