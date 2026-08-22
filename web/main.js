@@ -164,7 +164,8 @@ function syncControls() {
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
   // 16bit (ELKS/DOS) はISAのNE2000、32bitのLinuxはPCIのRTL8029。
   // 中身は同じDP8390で、皮 (番地の見つかり方) だけが違う
-  const nic = nicFor(!!linux);
+  // PCI 機 (Linux ワーカー、ISO を載せた 32bit PC) は RTL8029、素の 16bit 機は ISA の NE2000
+  const nic = nicFor(!!linux || !!machine?.pci);
   $('netSel').querySelector('option[value="on"]').textContent = nic.label;
   $('netSel').title = NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off;
   // 左のデバイス欄も同じ判断で書き直す — ランプの状態変化しか見ていないと、
@@ -734,7 +735,7 @@ function setNetLamp(state) {
   $('netSel').title = NET_LABEL[state] ?? NET_LABEL.off;
   // 選択そのものも状態に追従させる (「設定…」を選んだ後に戻す用でもある)
   $('netSel').value = link ? 'on' : 'off';
-  const nicName = nicFor(!!linux).label;
+  const nicName = nicFor(!!linux || !!machine?.pci).label;
   $('devNic').textContent = link
     ? { up: nicName, wait: '接続中…', down: 'リンク無し' }[state] ?? nicName
     : '未接続';
