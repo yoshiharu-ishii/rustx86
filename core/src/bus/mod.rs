@@ -54,6 +54,8 @@ pub enum IoTarget {
     VgaSeq,
     /// 0x3CE / 0x3CF: VGA グラフィックスコントローラ (読み出しマップ等)
     VgaGc,
+    /// 0x388 / 0x389: Adlib (OPL2、YM3812)。DOOM の音楽
+    Opl,
     /// 0x3DA: 入力状態レジスタ1 (垂直帰線・表示ブランク)。
     /// レジスタの実体は無く、機械の時計から合成する — ゲームはここを
     /// ポーリングしてテンポを取る (ティアリング無しの描き換えの合図)
@@ -108,6 +110,8 @@ pub struct Devices {
     pub dac: crate::dev::Dac,
     /// VGA シーケンサ/GC (0x3C4/5, 0x3CE/F)。Mode Y (unchained) のプレーン
     pub vga: crate::dev::Vga,
+    /// Adlib / OPL2 (0x388/0x389)。FM 音源 — DOOM の音楽
+    pub opl: crate::dev::Opl2,
     /// システム制御ポート (0x61)。bit4がDRAMリフレッシュの矩形波で、
     /// OSはこれを数えて時間を測ることがある
     pub sysctl: u8,
@@ -139,6 +143,7 @@ impl Devices {
             crtc: crate::dev::Crtc::new(),
             dac: crate::dev::Dac::new(),
             vga: crate::dev::Vga::new(),
+            opl: crate::dev::Opl2::new(),
             sysctl: 0,
             net: None,
             pci: None,

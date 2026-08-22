@@ -86,6 +86,10 @@ impl Machine {
                 _ => 0xFF, // 0x3C7の読みは状態レジスタ (未実装。書き専用として扱う)
             },
             IoTarget::VideoStatus => self.video_status(),
+            IoTarget::Opl => {
+                let now = self.cpu.tsc;
+                self.devices.opl.status(now) // 0x389 の読みも status を返す (実機と同じ)
+            }
             IoTarget::SystemControl => {
                 // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
                 // 時間を測る古い手口に付き合うため
@@ -263,6 +267,14 @@ impl Machine {
             },
             // 0x3DA への書きはVGAの機能制御レジスタ。読む者が居ないので受けて捨てる
             // (書いた事実は unhandled_io に残し、使うソフトが現れたら台帳から取り出す)
+            IoTarget::Opl => {
+                if port == 0x388 {
+                    self.devices.opl.write_index(val);
+                } else {
+                    let now = self.cpu.tsc;
+                    self.devices.opl.write_data(val, now);
+                }
+            }
             IoTarget::VideoStatus => {
                 self.unhandled_io.insert(port);
             }
