@@ -330,6 +330,32 @@ fn cold_imul(m: &mut Machine, reg: u8, rm: Rm) {
 
 #[cold]
 #[inline(never)]
+fn cold_movsx8(m: &mut Machine, reg: u8, rm: Rm, prev_ip: u32) {
+    let v = match rm {
+        Rm::Reg(r) => m.cpu.reg8(r as usize),
+        Rm::Mem(mr) => {
+            let off = off_of(m, &mr);
+            match m.fast_read8(mr.seg as usize, off) {
+                Some(v) => v,
+                None => slow_read8(m, &mr, prev_ip),
+            }
+        }
+    };
+    m.cpu.regs[reg as usize] = v as i8 as i32 as u32;
+}
+
+#[cold]
+#[inline(never)]
+fn cold_cmov(m: &mut Machine, cc: u8, reg: u8, rm: Rm) {
+    // 読みは条件に関わらず行う (偽でもメモリオペランドのフォールトは起きる)
+    let v = read_rm32(m, rm);
+    if condition(&m.cpu, cc) {
+        m.cpu.regs[reg as usize] = v;
+    }
+}
+
+#[cold]
+#[inline(never)]
 fn cold_movsx16(m: &mut Machine, reg: u8, rm: Rm) {
     let v = match rm {
         Rm::Reg(r) => m.cpu.regs[r as usize] as u16,
@@ -872,27 +898,11 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             };
             m.cpu.regs[DX] = v;
         }
-        Uop::MovsxB { reg, rm } => {
-            let v = match rm {
-                Rm::Reg(r) => m.cpu.reg8(r as usize),
-                Rm::Mem(mr) => {
-                    let off = off_of(m, &mr);
-                    match m.fast_read8(mr.seg as usize, off) {
-                        Some(v) => v,
-                        None => slow_read8(m, &mr, prev_ip),
-                    }
-                }
-            };
-            m.cpu.regs[reg as usize] = v as i8 as i32 as u32;
-        }
+        // 稀uopは arm を太らせない (C11 の教訓: 嵩は I-cache の税 — ブートで
+        // 測って -2% だったので cold へ)
+        Uop::MovsxB { reg, rm } => cold_movsx8(m, reg, rm, prev_ip),
         Uop::MovsxW { reg, rm } => cold_movsx16(m, reg, rm),
-        Uop::Cmov { cc, reg, rm } => {
-            // 読みは条件に関わらず行う (偽でもメモリオペランドのフォールトは起きる)
-            let v = read_rm32(m, rm);
-            if condition(&m.cpu, cc) {
-                m.cpu.regs[reg as usize] = v;
-            }
-        }
+        Uop::Cmov { cc, reg, rm } => cold_cmov(m, cc, reg, rm),
         Uop::ImulRRmI { reg, rm, imm } => cold_imul3(m, reg, rm, imm),
         Uop::BitScan { reg, rm, reverse } => cold_bit_scan(m, reg, rm, reverse),
         Uop::ShxdImm { rm, reg, imm, left } => cold_shxd(m, rm, reg, imm, left),

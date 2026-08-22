@@ -34,7 +34,7 @@
 |---|---|---|---|---|
 | jboot (ブート、bench対) | 970M | 8.8s | **7.3s = 133 MIPS** | ADR-0025 |
 | jcmd (gcc窓) | 518M | 80-83 MIPS | **92-96 MIPS** | C15後の冷間 |
-| **X窓** (Xorg+xeyes+xclock+xterm) | 1284M | 56.5 MIPS | **64-65 MIPS** | **gcc窓より-30%** — 命令ミックス (語彙の穴2.9%) |
+| **X窓** (Xorg+xeyes+xclock+xterm) | 1284M | ~69 MIPS | **~69-71 MIPS** (on≈off) | gcc窓 (同日 off 73-75) より -5〜-8%、**JIT の上積みが消える** — 命令ミックス (語彙の穴2.9%)。調査時の 56.5/64 は ESET スキャン中の値 |
 
 X窓のセンサスと画素の配管の実測は [gfx-roadmap.md](gfx-roadmap.md)、
 裁定は [ADR-0028](../adr/0028-part3-cpu-and-gfx.md)。
@@ -141,7 +141,7 @@ flowchart TD
 | C12 | 鎖の直短縮バッチ (set_ip32・execのipレジスタ返し・slot計算のcarry化) | 数% | 💤 | **実測ワッシュ** (2026-08-16、8周1勝6敗1分+2%)。バッチC後の世界では鎖の微調整はOoOの影 — 判別則(4)の3度目。タグ exp/chain-batch |
 | C13 | jcc conditionの単一ディスパッチ化 | 1〜2% | 💤 | C12と同バッチで実測ワッシュ (タグ exp/chain-batch)。cc_sign実体化は未試行のまま同タグへ |
 | C14 | **dead-flags elimination** — デコード時にフラグ死活を解析、死んだ定義はlazy storeも省く | 数% | 🔒観測粒度待ち | 机上監査で降格 (2026-08-16): 毎命令が割り込み受付点=EFLAGSの非同期観測点なので、省いたフラグをcosim/lockstepが即検出する。QEMU/Box64はTB粒度だから許される。C10と同じ箱 |
-| C16 | **0F 語彙の拡張** (movsx 0FBE/BF・cmov・bt/shrd/bsf・cmpxchg) + A8/A9・69/6B・99 | X窓 ~5% | 🔬 | X窓の従来経路落ち37Mの~55%。exec は twobyte.rs の原本へ委譲 (StrOne の型)。[ADR-0028](../adr/0028-part3-cpu-and-gfx.md) |
+| C16 | **0F 語彙の拡張** (movsx 0FBE/BF・cmov・bsf/bsr・shld/shrd) + A8/A9・69/6B・99 | X窓 ~5% | 🔬 **実測済み・裁定待ち** (PR #215) | 落ち 37M→23M。交互A/B: **gcc窓 off +2〜7% / on +5〜6% (7勝1敗)、X窓 off +0〜3% / on +3〜4% (6勝0敗)、ブート -2% (順序反転込み 1勝1分8敗)**。bt系/cmpxchg/cli-sti は従来経路のまま。授業料 = F_REPROBE (語彙入りで JIT の受け口を失い +30% → 再プローブで復帰)。[ADR-0028](../adr/0028-part3-cpu-and-gfx.md) |
 | C17 | 16bit ALU の o16 通し (66 付き cmp/test/C7) | 落ちの~10% | 🔬 | C15-PR3 と同じ処方 |
 | C18 | **SSE2 移動系を dcache へ** (movd/movq/movaps/movdqa/pshufd) — decode.rs の 66/F2/F3 門を 0F に開ける | 落ちの~8-10% | 🔬 | pixman のシャドウ合成と libc memcpy。画素ストア経路は穴ではない (ShadowFB) |
 | C19 | `write_m128` の変換1回化 (ページ内16B) | 小 | 🔬 | sse.rs:70 が write32×4 で変換4回。フォールト順序不変 |
