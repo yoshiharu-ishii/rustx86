@@ -46,6 +46,8 @@ pub enum IoTarget {
     Cmos,
     /// 0x61: システム制御 (スピーカ、リフレッシュビット)
     SystemControl,
+    /// 0x92: System Control Port A (bit1 = A20 の速いゲート)
+    SysPortA,
     /// 0x3D4 / 0x3D5: CRTC (カーソル位置、表示開始アドレス)
     Crtc,
     /// 0x3C6-0x3C9: RAMDAC (256色パレット)

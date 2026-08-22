@@ -243,6 +243,8 @@ publish_to_web() {
   [ -f "$IMAGES/fd14games.img" ] && cp "$IMAGES/fd14games.img" "$WEB/fd14boot.img"
   [ -f "$IMAGES/vmlinuz-lts" ] && cp "$IMAGES/vmlinuz-lts" "$WEB/vmlinuz-lts"
   [ -f "$IMAGES/initramfs-lts" ] && cp "$IMAGES/initramfs-lts" "$WEB/initramfs-lts"
+  # ISO 起動の実物 (Tiny Core)。ライブラリは居れば並べる (probe)
+  [ -f "$IMAGES/Core-current.iso" ] && cp "$IMAGES/Core-current.iso" "$WEB/Core-current.iso"
   say "web/ へ複製した"
 }
 
@@ -290,15 +292,24 @@ build_doom() {
   sh tools/images/sh/make-doom-hdd.sh "$WORK/doom/unpacked"
 }
 
+# Tiny Core Linux (x86、20MB の ISO)。ISO 起動 (6c) の実物の当て先 — isolinux 4.05 から
+# 本物の Linux が上がり tc@box: に着く。そのまま images/ に置くだけ (焼き直しは無い)
+TINYCORE_URL=http://tinycorelinux.net/16.x/x86/release/Core-current.iso
+build_tinycore() {
+  say "Tiny Core Linux の ISO"
+  fetch "$TINYCORE_URL" "$IMAGES/Core-current.iso"
+}
+
 case "${1:-all}" in
   elks) build_elks ;;
   doom) build_doom ;;
+  tinycore) build_tinycore ;;
   freedos) build_freedos ;;
   freedos-boot) build_freedos_boot ;;
   linux) build_linux ;;
   test386) build_test386 ;;
   all) build_elks; build_freedos; build_linux ;;
-  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux|test386|doom]" >&2; exit 1 ;;
+  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux|test386|doom|tinycore]" >&2; exit 1 ;;
 esac
 publish_to_web
 

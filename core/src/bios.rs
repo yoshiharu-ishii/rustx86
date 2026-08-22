@@ -381,6 +381,11 @@ impl Machine {
                             col += 1;
                         }
                     }
+                    // AH=4F: VESA VBE。**持っていない**と答える (AL≠0x4F)。isolinux や DOS の
+                    // ゲームは有無を聞いてから VGA の道へ引き返す (VBE は ADR-0004 の「底が無い」側)
+                    0x4F => {
+                        self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0xFFFF_0000) | 0x0100;
+                    }
                     _ => panic!("INT 10h AH={ah:#04x} 未実装"),
                 }
             }
@@ -463,6 +468,31 @@ impl Machine {
                 0x88 => {
                     let ext_kb = (self.mem.len().saturating_sub(0x10_0000) / 1024).min(0xFFFF);
                     self.cpu.regs[cpu::AX] = ext_kb as u32;
+                    self.cpu.set_flag_cf(false);
+                }
+                // AH=24: A20 ゲート (AL=00 閉じる / 01 開く / 02 照会 / 03 対応の有無)
+                0x24 => {
+                    if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+                        eprintln!("A20 via INT15 AX={:#06x}", self.cpu.regs[cpu::AX] & 0xFFFF);
+                    }
+                    match self.cpu.regs[cpu::AX] & 0xFF {
+                        0x00 => self.cpu.a20 = false,
+                        0x01 => self.cpu.a20 = true,
+                        0x02 => {
+                            self.cpu.regs[cpu::AX] =
+                                (self.cpu.regs[cpu::AX] & 0xFF00) | self.cpu.a20 as u32;
+                        }
+                        _ => self.cpu.regs[cpu::BX] = 0x0003, // 8042 と 0x92 の両方
+                    }
+                    self.cpu.regs[cpu::AX] &= 0x00FF;
+                    self.cpu.set_flag_cf(false);
+                }
+                // AH=86: CX:DX マイクロ秒待つ。**待たずに返す** — この機械の時間は命令数で
+                // 進むので、ブロックしても誰も得をしない。isolinux はシリアルの文字間隔や
+                // 自前の遅延ループの代わりにこれを呼び、無いと `out 80h` の空回りに落ちて
+                // 2G 命令回しても先へ進まなかった (2026-08-22)
+                0x86 => {
+                    self.cpu.regs[cpu::AX] &= 0x00FF;
                     self.cpu.set_flag_cf(false);
                 }
                 // AX=E801: 同じことを 1〜16MB (KB) と 16MB 以上 (64KB 単位) に分けて
@@ -841,6 +871,17 @@ impl Machine {
     /// (`hdd_attach` で挿した像)。それ以外は「無い」(タイムアウト)
     fn bios_disk(&mut self, ah: u8) {
         let dl = (self.cpu.regs[cpu::DX] & 0xFF) as u8;
+        if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+            eprintln!(
+                "INT13 AH={ah:#04x} DL={dl:#04x} AX={:#06x} CX={:#06x}",
+                self.cpu.regs[cpu::AX] & 0xFFFF,
+                self.cpu.regs[cpu::CX] & 0xFFFF
+            );
+        }
+        if dl == 0xE0 && self.cd.is_some() {
+            self.bios_cd(ah);
+            return;
+        }
         let hdd = dl & 0x80 != 0;
         let present = if hdd {
             dl == 0x80 && self.hdd.is_some()
@@ -951,6 +992,115 @@ impl Machine {
             // Tier 6c でCD-ROMをやるときに初めて「ある」と答えることになる
             0x41 => self.disk_error(0x01), // 機能が無効
             _ => panic!("INT 13h AH={ah:#04x} 未実装"),
+        }
+    }
+
+    /// INT 13h のドライブ 0xE0 = CD-ROM (El Torito、2048B セクタ)。
+    /// CHS は無く、**EDD (AH=41/42/48) だけ**で読む — isolinux も GRUB もそう読む。
+    /// AH=4B は El Torito の「起動状態の照会/終了」
+    fn bios_cd(&mut self, ah: u8) {
+        const SEC: usize = 2048;
+        if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+            let dap = cpu::operand::linear(self.cpu.sregs[cpu::DS], self.cpu.regs[cpu::SI] as u16);
+            let raw: Vec<String> = (0..16)
+                .map(|i| format!("{:02x}", self.read8(dap + i)))
+                .collect();
+            eprintln!("  dap raw: {}", raw.join(" "));
+            eprintln!(
+                "INT13 CD AH={ah:#04x} AL={:#04x} DS:SI={:04x}:{:04x} dap[count={} buf={:04x}:{:04x} lba={}]",
+                self.cpu.regs[cpu::AX] & 0xFF,
+                self.cpu.sregs[cpu::DS],
+                self.cpu.regs[cpu::SI] as u16,
+                self.read16(dap + 2),
+                self.read16(dap + 6),
+                self.read16(dap + 4),
+                self.read32(dap + 8)
+            );
+        }
+        match ah {
+            0x00 | 0x01 | 0x16 => self.disk_ok(0),
+            // CHS の読み書きと形状は CD に無い
+            0x02 | 0x03 | 0x08 => self.disk_error(0x01),
+            0x15 => {
+                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x0200;
+                self.cpu.set_flag_cf(false);
+            }
+            // EDD あり: BX=AA55、AH=版 (3.0)、CX bit0 = 拡張読み書きに対応
+            0x41 => {
+                self.cpu.regs[cpu::BX] = 0xAA55;
+                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x3000;
+                self.cpu.regs[cpu::CX] = 0x0001;
+                self.cpu.set_flag_cf(false);
+            }
+            // 拡張読み: DS:SI の DAP = [size u8][0][count u16][buf off u16][buf seg u16][LBA u64]
+            0x42 => {
+                let dap =
+                    cpu::operand::linear(self.cpu.sregs[cpu::DS], self.cpu.regs[cpu::SI] as u16);
+                let count = self.read16(dap + 2) as usize;
+                let off = self.read16(dap + 4);
+                let seg = self.read16(dap + 6);
+                // LBA は u64 で受ける (wasm32 の usize は 32bit — << 32 は溢れる)
+                let lba64 = self.read32(dap + 8) as u64 | ((self.read32(dap + 12) as u64) << 32);
+                let lba = lba64 as usize;
+                let dst = cpu::operand::linear(seg, off);
+                let cd = self.cd.as_ref().unwrap();
+                let Some(src) = cd.get(lba * SEC..(lba + count) * SEC) else {
+                    self.write16(dap + 2, 0);
+                    self.disk_error(0x04);
+                    return;
+                };
+                let buf = src.to_vec();
+                for (i, b) in buf.iter().enumerate() {
+                    self.write8(dst.wrapping_add(i as u32), *b);
+                }
+                self.disk_ok(0);
+            }
+            // 拡張の形状: DS:SI のバッファ (size u16 ≥ 0x1A) に
+            // flags / C / H / S (CD は 0) / 総セクタ数 u64 / バイト/セクタ u16
+            0x48 => {
+                let p =
+                    cpu::operand::linear(self.cpu.sregs[cpu::DS], self.cpu.regs[cpu::SI] as u16);
+                let size = self.read16(p);
+                if size < 0x1A {
+                    self.disk_error(0x01);
+                    return;
+                }
+                let total = (self.cd.as_ref().unwrap().len() / SEC) as u64;
+                self.write16(p, 0x1A);
+                self.write16(p + 2, 0x0004); // 取り外し可 (媒体の交換あり)
+                self.write32(p + 4, 0);
+                self.write32(p + 8, 0);
+                self.write32(p + 12, 0);
+                self.write32(p + 16, total as u32);
+                self.write32(p + 20, (total >> 32) as u32);
+                self.write16(p + 24, SEC as u16);
+                self.disk_ok(0);
+            }
+            // El Torito: AL=01 で起動状態のパケット (size 0x13) を DS:SI へ。AL=00 は
+            // エミュレーションの終了 (何もしない)
+            0x4B => {
+                let al = (self.cpu.regs[cpu::AX] & 0xFF) as u8;
+                if al == 1 {
+                    let p = cpu::operand::linear(
+                        self.cpu.sregs[cpu::DS],
+                        self.cpu.regs[cpu::SI] as u16,
+                    );
+                    self.write8(p, 0x13);
+                    self.write8(p + 1, 0); // no-emulation
+                    self.write8(p + 2, 0xE0);
+                    self.write8(p + 3, 0);
+                    self.write32(p + 4, 0); // 起動像の LBA (isolinux は見ない)
+                    self.write16(p + 8, 0);
+                    self.write16(p + 10, 0);
+                    self.write16(p + 12, 0x07C0);
+                    self.write16(p + 14, 4);
+                    self.write8(p + 16, 0);
+                    self.write8(p + 17, 0);
+                    self.write8(p + 18, 0);
+                }
+                self.disk_ok(0);
+            }
+            _ => panic!("INT 13h (CD) AH={ah:#04x} 未実装"),
         }
     }
 

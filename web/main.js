@@ -10,7 +10,7 @@
 
 import { loadWasm, charset, onPanic, Machine } from './machine.js';
 import { Terminal } from './terminal.js';
-import { MACHINES, ROOTFS, byGroup } from './machines.js';
+import { MACHINES, ROOTFS, ISOS, byGroup } from './machines.js';
 import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
@@ -20,7 +20,7 @@ import { NetLink } from './netlink.js';
 // 画面の**判断**は decide.js に集めてある (node --test で押さえられる)。
 // ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
 import {
-  isKernel, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
+  isKernel, isIso, isBootable, withToken, netUrlFromQuery, netOff, nicFor, scriptFor, guestChar, setHidden,
   THEMES, nextTheme, resolveTheme, menuAbility, pasteChunk,
 } from './decide.js';
 
@@ -155,16 +155,17 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('layout').hidden = !!linux;
-  $('layout').previousElementSibling.hidden = !!linux;
+  $('ctlLayout').hidden = !!linux;
   // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
-  for (const id of ['rootLbl', 'rootSel', 'ramLbl', 'ramSel', 'jitLbl', 'jitSel']) $(id).hidden = !linux;
+  // ラベルと選択肢は対で包んである (index.html の .ctl) — 出し入れも対で
+  for (const id of ['ctlRoot', 'ctlIso', 'ctlRam', 'ctlJit']) $(id).hidden = !linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
   // 16bit (ELKS/DOS) はISAのNE2000、32bitのLinuxはPCIのRTL8029。
   // 中身は同じDP8390で、皮 (番地の見つかり方) だけが違う
-  const nic = nicFor(!!linux);
+  // PCI 機 (Linux ワーカー、ISO を載せた 32bit PC) は RTL8029、素の 16bit 機は ISA の NE2000
+  const nic = nicFor(!!linux || !!machine?.pci);
   $('netSel').querySelector('option[value="on"]').textContent = nic.label;
   $('netSel').title = NET_LABEL[link?.state ?? 'off'] ?? NET_LABEL.off;
   // 左のデバイス欄も同じ判断で書き直す — ランプの状態変化しか見ていないと、
@@ -267,9 +268,10 @@ function boot(image, label, hdd = null) {
 }
 
 /** 状態を右上のピルと左のカードへ同時に書く。**同じ数字を2つ持たない** */
-function showState(text, hist) {
+function showState(text, hist, histTitle = '') {
   $('pillState').textContent = text;
   $('pillHist').textContent = hist;
+  $('pillHist').title = histTitle;
   // 走っていれば緑、止まっていれば灰
   const live = text !== '停止中' && text !== '電源オフ';
   $('pillDot').classList.toggle('ok', live);
@@ -280,9 +282,30 @@ setInterval(() => {
   if (linux) {
     // 起動の定規 (時間で統一、2026-08-13)。headless.mjs と同じ定義の秒数
     const boot = linux.bootSecs != null ? `起動 ${linux.bootSecs.toFixed(1)}s` : '';
+    // **電源オフ → 起動中 → 走っている速さ** の順に遷移する。機械を選んだだけの
+    // 状態を「起動中」と言うと、電源を入れたのかどうかが画面から分からない
+    // (VGA機の側は最初から電源オフと言っていた)。
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
-    const run = linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '起動中';
-    showState(run, boot || '—');
+    const run = linux.paused
+      ? '停止中'
+      : !linux.booted
+        ? linux.busy
+          ? '起動中'
+          : '電源オフ'
+        : linux.idle
+          // シェルに着く前の休みは「アイドル」ではなく「起動中」— isolinux の
+          // boot: 待ちも HLT で休むので、着いたように見えてしまう
+          ? (linux.bootSecs == null ? '起動中' : 'アイドル')
+          : linux.mips
+            ? `${linux.mips.toFixed(0)} MIPS`
+            : '起動中';
+    showState(
+      run,
+      boot || '—',
+      linux.bootSecs != null
+        ? '電源ONからシェルまで (ISO はプロンプトが出た瞬間、他はバナー)'
+        : 'まだシェルに着いていない',
+    );
     return;
   }
   if (!machine) {
@@ -309,10 +332,27 @@ setInterval(() => {
 // 256MBなのか」が、選べるものの一覧として見えているのが一番効く。
 // URLは初期値、選び直したら憶える。**効くのは次の電源ONから** (機械の構成なので)
 const ROOT_KEY = 'rustx86.rootfs';
+const ISO_KEY = 'rustx86.iso';
 const RAM_KEY = 'rustx86.ram';
 const rootSel = $('rootSel');
+const isoSel = $('isoSel');
 const ramSel = $('ramSel');
 const jitSel = $('jitSel');
+// ルートFS と ISO は**排他** — どちらも先頭に「—」(空) を持ち、片方を選ぶと他方が「—」になる。
+// ISO はカーネルごと CD の中にあるのでルートFSを載せる場所が無い (BIOS 経由の起動)
+for (const sel of [rootSel, isoSel]) {
+  const o = document.createElement('option');
+  o.value = '';
+  o.textContent = '—';
+  sel.append(o);
+}
+for (const r of ISOS) {
+  const o = document.createElement('option');
+  o.value = r.name;
+  o.textContent = r.label;
+  o.title = r.note;
+  isoSel.append(o);
+}
 for (const r of ROOTFS) {
   const o = document.createElement('option');
   o.value = r.name;
@@ -321,9 +361,12 @@ for (const r of ROOTFS) {
   rootSel.append(o);
 }
 const q0 = new URLSearchParams(location.search);
+isoSel.value = q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+if (!isoSel.value) isoSel.value = ''; // 知らない名前
 rootSel.value =
-  q0.get('initrd') || localStorage.getItem(ROOT_KEY) || ROOTFS[0].name;
-if (!rootSel.value) rootSel.value = ROOTFS[0].name; // URLに知らない名前が来たとき
+  q0.get('initrd') || (isoSel.value ? '' : localStorage.getItem(ROOT_KEY) || ROOTFS[0].name);
+if (!rootSel.value) rootSel.value = isoSel.value ? '' : ROOTFS[0].name; // URLに知らない名前が来たとき
+if (rootSel.value) isoSel.value = ''; // URLでルートFSが明示されたら ISO は下ろす
 ramSel.value = q0.get('ram') || localStorage.getItem(RAM_KEY) || 'auto';
 // JIT (F1d wasm)。q0の宣言より前に置くとTDZでmain.jsごと死ぬ (2026-08-17に実際に死んだ)
 jitSel.value = q0.get('jit') || localStorage.getItem('rx86.jit') || 'off';
@@ -335,9 +378,17 @@ jitSel.addEventListener('change', () => {
 if (!ramSel.value) ramSel.value = 'auto';
 for (const [sel, key] of [
   [rootSel, ROOT_KEY],
+  [isoSel, ISO_KEY],
   [ramSel, RAM_KEY],
 ]) {
   sel.addEventListener('change', () => {
+    // 排他: ISO を選んだらルートFSを「—」に、ルートFSを選んだら ISO を「—」に。
+    // 両方「—」は許さない (何も無い機械に意味が無い) — ルートFSの先頭に戻す
+    if (sel === isoSel && isoSel.value) rootSel.value = '';
+    if (sel === rootSel && rootSel.value) isoSel.value = '';
+    if (!rootSel.value && !isoSel.value) rootSel.value = ROOTFS[0].name;
+    localStorage.setItem(ROOT_KEY, rootSel.value);
+    localStorage.setItem(ISO_KEY, isoSel.value);
     localStorage.setItem(key, sel.value);
     syncRootfsHint();
     focusScreen();
@@ -347,13 +398,15 @@ for (const [sel, key] of [
 /** 選択の理由を画面に出す。selectのtitleと、状態欄への一言 */
 function syncRootfsHint() {
   const r = ROOTFS.find(x => x.name === rootSel.value);
-  rootSel.title = r ? `${r.sub} — ${r.note}` : '';
+  rootSel.title = r ? `${r.sub} — ${r.note}` : 'ISO から起動するときは「—」';
+  const i = ISOS.find(x => x.name === isoSel.value);
+  isoSel.title = i ? `${i.sub} — ${i.note}` : 'ISO (El Torito) から BIOS 経由で起動する。ルートFSと排他';
   ramSel.title =
     ramSel.value === 'auto'
       ? 'initramfsの展開後の大きさから決める (足りないと中身が黙って欠ける)'
       : `${ramSel.value}MB を明示する`;
   // 走っている機械の構成は変えられない — 次の電源ONから効くことを言う
-  if (linux?.booted) setStatus('ルートFS/RAMの変更は次の電源ONから効きます');
+  if (linux?.booted) setStatus('ルートFS/ISO/RAMの変更は次の電源ONから効きます');
 }
 
 const LAYOUT_KEY = 'rustx86.layout';
@@ -734,7 +787,7 @@ function setNetLamp(state) {
   $('netSel').title = NET_LABEL[state] ?? NET_LABEL.off;
   // 選択そのものも状態に追従させる (「設定…」を選んだ後に戻す用でもある)
   $('netSel').value = link ? 'on' : 'off';
-  const nicName = nicFor(!!linux).label;
+  const nicName = nicFor(!!linux || !!machine?.pci).label;
   $('devNic').textContent = link
     ? { up: nicName, wait: '接続中…', down: 'リンク無し' }[state] ?? nicName
     : '未接続';
@@ -1106,12 +1159,20 @@ async function insertMedia(f) {
     await linux.boot({ kernel: bytes, kernelName: f.name });
     return;
   }
+  // ISO (CD001) は Linux の機械で BIOS 経由 (El Torito) — 画面は VGA の升目で写す
+  if (isIso(bytes)) {
+    if (!linux) await select(MACHINES.find(x => x.kind === 'linux'), { autoBoot: false });
+    bootOrigin = 'image';
+    lastLabel = f.name;
+    await linux.boot({ iso: bytes, isoName: f.name });
+    return;
+  }
   // ディスクとして通す前に**印を確かめる**。拡張子で絞るのをやめた以上、
   // 何を落とされてもおかしくない — 分からないものは分からないと言う
   if (!isBootable(bytes)) {
     setStatus(
       `${f.name} は起動できる形に見えません ` +
-        '(ブートセクタの印 0x55AA が無く、Linuxカーネルでもスナップショットでもない)',
+        '(ブートセクタの印 0x55AA も ISO 9660 の印 CD001 も無く、Linuxカーネルでもスナップショットでもない)',
       true,
     );
     return;
@@ -1317,7 +1378,7 @@ async function select(m, { autoBoot = true } = {}) {
       // 線が来ていればRTL8029が挿さって出る — MACも16bit機と同じ
       mac: () => (link ? [0x52, 0x54, 0x00, 0x12, 0x34, 0x56] : undefined),
       // どのルートFSを何MBで載せるかも電源の瞬間に決まる (上のNICと同じ)
-      rootfs: () => ({ name: rootSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
+      rootfs: () => ({ name: rootSel.value, iso: isoSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
       jit: () => jitSel.value === 'on',
       // 画面: フレームバッファか (機械の定義で決まる — 「Linux (フレームバッファ)」)
       fb: () => m.fb === true,

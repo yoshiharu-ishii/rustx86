@@ -30,6 +30,7 @@ RUN apk add --no-cache \
     nasm \
     xz \
     zstd \
+    xorriso \
  && cp /usr/share/apk/keys/x86/* /etc/apk/keys/
 # 最後のcp: x86 (32bit) のパッケージ署名鍵。コンテナは自分の石の鍵しか
 # 鍵輪に持たないが、うちが組むrootfsはx86 — 鍵が無いと署名検証を

@@ -32,7 +32,20 @@ export function isKernel(b) {
  * (core側も同じ検査をする。こちらで見るのは日本語で理由を言うため)
  */
 export function isBootable(b) {
+  return isBootSector(b) || isIso(b);
+}
+
+/** ブートセクタの印 (末尾の 0x55AA) */
+export function isBootSector(b) {
   return b.length >= 512 && b[510] === 0x55 && b[511] === 0xaa;
+}
+
+/** ISO 9660 (セクタ 16 に "CD001")。El Torito で起動する (machine.js が見分ける) */
+export function isIso(b) {
+  return (
+    b.length > 0x8006 &&
+    b[0x8001] === 0x43 && b[0x8002] === 0x44 && b[0x8003] === 0x30 && b[0x8004] === 0x30 && b[0x8005] === 0x31
+  );
 }
 
 /** 繋ぎ先URLにトークンを足す (空なら何もしない) */
@@ -64,8 +77,8 @@ export function netOff(search) {
  * ISAを知らないOSにISAのカードを挿しても見えない (逆も同じ)
  * @param {boolean} isLinux 32bit Linux (PCIしか見ない) か
  */
-export function nicFor(isLinux) {
-  return isLinux
+export function nicFor(isPci) {
+  return isPci
     ? { label: 'RTL8029 (PCI)', usable: true }
     : { label: 'NE2000 (ISA 0x300)', usable: true };
 }

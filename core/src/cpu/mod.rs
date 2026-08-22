@@ -161,6 +161,8 @@ pub struct Cpu {
     /// 実機のような周波数の意味は無いが、カーネルの較正は
     /// 「PITと突き合わせて比率を測る」だけなので、単調に増えれば成立する
     pub tsc: u64,
+    /// A20 ゲートの状態 (true = 1MB 以上が見える)。8042 の出力ポートの写し
+    pub a20: bool,
     /// デバッグレジスタ DR0-DR7。**保持のみ** — ハードウェアブレークは
     /// 実装しない (カーネルが初期化で触るのに答えるため)。
     /// DR6/DR7 はリセット値に意味がある (それぞれ 0xFFFF0FF0 / 0x400)
@@ -217,6 +219,7 @@ impl Cpu {
             fpu_cw: 0x037F, // FNINIT後の既定値
             fpu: fpu::Fpu::default(),
             tsc: 0,
+            a20: true,
             gdtr_base: 0,
             gdtr_limit: 0,
             idtr_base: 0,
@@ -331,7 +334,11 @@ impl Cpu {
     /// リアルモードは1MBで折り返す (8086のアドレスバスが20本だったため)
     pub fn lin(&self, seg: usize, off: u32) -> u32 {
         let a = self.seg_base(seg).wrapping_add(off);
-        if self.pe() {
+        // A20 ゲート: 閉じていれば 1MB で折り返す (8086 の 20 本のアドレスバスの名残)。
+        // 開閉は 8042 の出力ポート bit1 / ポート 0x92 / INT 15h AX=24xx (isolinux は
+        // 0:0x3ACC と FFFF:0x3ADC を比べて A20 の開閉を知り、閉じていれば開けようと
+        // 回り続ける — 折り返しが固定だと永久に「閉じている」ように見えた)
+        if self.pe() || self.a20 {
             a
         } else {
             a & 0xF_FFFF

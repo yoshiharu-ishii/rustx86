@@ -46,6 +46,7 @@ pub fn decode(port: u16) -> Option<IoTarget> {
         0x40..=0x43 => IoTarget::Pit,
         0x60 | 0x64 => IoTarget::Keyboard,
         0x61 => IoTarget::SystemControl,
+        0x92 => IoTarget::SysPortA,
         0x70 | 0x71 => IoTarget::Cmos,
         NET_BASE..=NET_LAST => IoTarget::Net,
         0x3C4 | 0x3C5 => IoTarget::VgaSeq,

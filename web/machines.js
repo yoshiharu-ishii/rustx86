@@ -167,6 +167,25 @@ export function byGroup(machines = MACHINES) {
  *
  * `ram` は空なら自動 (initrdの展開後の大きさから決める。linux-machine.js)。
  */
+/** ISO (El Torito) の棚。Linux の機械の「ISO」つまみに並ぶ — ルートFSと排他で、
+ *  選ぶと BIOS 経由 (isolinux) で起動する。中身の Linux がシリアルでなく VGA に
+ *  出るので、画面はテキスト VRAM を升目で写す (linux-worker.js → ansi.js showVga) */
+export const ISOS = [
+  {
+    name: 'Core-current.iso',
+    label: 'Tiny Core Linux 16.x',
+    sub: 'ISO から起動 — isolinux → 本物の Linux (20MB)',
+    note:
+      '**ISO から起動する** (6c): BIOS の CD (INT 13h ドライブ 0xE0) を El Torito で読み、' +
+      'isolinux が boot: を出す。Enter で Tiny Core 16.x が上がって tc@box:~$ に着く (約 1.8G 命令)。' +
+      'isolinux は boot: の直後にキー待ち行列を捨てるので Enter は 2 回。NIC は RTL8029 (ne2k-pci) で ' +
+      'eth0 が出る。CD の装置 (ATAPI) はまだ無いので起動後に /mnt/sr0 は見えない (6c の 2 段目)',
+    source: 'http://tinycorelinux.net/16.x/x86/release/Core-current.iso',
+    sourceLabel: 'Tiny Core Linux 16.x (x86)',
+    file: 'Core-current.iso (tools/images/sh/fetch-images.sh tinycore)',
+  },
+];
+
 export const ROOTFS = [
   {
     name: 'initramfs-mini',

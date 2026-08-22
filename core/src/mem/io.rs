@@ -90,6 +90,13 @@ impl Machine {
                 let now = self.cpu.tsc;
                 self.devices.opl.status(now) // 0x389 の読みも status を返す (実機と同じ)
             }
+            IoTarget::SysPortA => {
+                if self.cpu.a20 {
+                    0x02
+                } else {
+                    0x00
+                }
+            }
             IoTarget::SystemControl => {
                 // bit4 をトグルし続ける。OSがリフレッシュ矩形波を数えて
                 // 時間を測る古い手口に付き合うため
@@ -221,7 +228,12 @@ impl Machine {
                 if port == 0x64 {
                     self.devices.keyboard.write_command(val)
                 } else {
-                    self.devices.keyboard.write_data(val)
+                    self.devices.keyboard.write_data(val);
+                    // 出力ポート (0xD1) の A20 bit を CPU の折り返しに写す
+                    self.cpu.a20 = self.devices.keyboard.a20_enabled();
+                    if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+                        eprintln!("A20 via 8042: {}", self.cpu.a20);
+                    }
                 }
             }
             IoTarget::Uart => self.devices.uart.write(port & 7, val),
@@ -279,6 +291,13 @@ impl Machine {
                 self.unhandled_io.insert(port);
             }
             IoTarget::SystemControl => self.devices.sysctl = val,
+            // ポート 0x92 (System Control Port A): bit1 = A20 (速い A20 ゲート)
+            IoTarget::SysPortA => {
+                self.cpu.a20 = val & 0x02 != 0;
+                if std::env::var("RUSTX86_TRACE_ALL").is_ok() {
+                    eprintln!("A20 via 0x92: {} (val={val:#x})", self.cpu.a20);
+                }
+            }
             IoTarget::Net => match &mut self.devices.net {
                 Some(net) if !self.profile.has_pci => net.write(port - bus::isa::NET_BASE, val),
                 _ => {

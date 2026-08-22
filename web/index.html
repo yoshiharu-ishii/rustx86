@@ -135,6 +135,11 @@
   /* --- 右: 上段 (机の備品) と操作列 --- */
   .bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .55rem .7rem; }
   .bar .lbl { font-size: .78rem; color: var(--dim); }
+  /* ラベルと選択肢の対。**折り返しても離れない** */
+  .bar .ctl { display: inline-flex; align-items: center; gap: .4rem; }
+  /* 名前の長い棚 (ルートFS・ISO) は幅を頭打ちにする — 1 つで行を食い潰さない */
+  .bar select.wide { max-width: 11rem; text-overflow: ellipsis; }
+  #volume { width: 80px; vertical-align: middle; }
   .bar .spacer { flex: 1 }
   select {
     font: inherit; font-size: .8rem; padding: .3rem 1.6rem .3rem .55rem; border-radius: .45rem;
@@ -222,7 +227,7 @@
        1024×768 は等倍 (枠が 1024 より狭ければ縮む — そのときは JS がぼかしに切替) */
     aspect-ratio: var(--fbw) / var(--fbh);
     width: 100%;
-    max-width: min(calc(var(--fbw) * 1.5px), 1024px);
+    max-width: min(calc(var(--fbw) * var(--fbscale, 1.5) * 1px), 1024px);
     /* ホストのカーソルは隠す — ゲストのカーソルが同じ位置に居る (絶対位置風)。
        二重に見えるのは、ズレたときだけ分かればよい情報ではなく単に煩い */
     cursor: none;
@@ -248,7 +253,7 @@
   }
   .foot .spacer { flex: 1 }
   .foot svg { width: .95rem; height: .95rem; }
-  #status { margin: 0; color: var(--dim); }
+  #status { margin: 0; color: var(--dim); flex: 1; }
   #status.warn { color: var(--amber); }
 
   /* --- オープニング --- */
@@ -461,38 +466,54 @@
 
     <!-- 挿さっているもの (機械に依らない) と、今の状態 -->
     <div class="card bar" id="barRig" hidden>
-      <span class="lbl">NIC</span>
-      <select id="netSel" title="Network:Disable">
-        <option value="off">未接続</option>
-        <option value="on">NE2000 (ISA 0x300)</option>
-        <option value="config">設定…</option>
-      </select>
-      <span class="lbl">配列</span>
-      <select id="layout">
-        <option value="jp">JIS</option>
-        <option value="us">US</option>
-      </select>
+      <!-- **ラベルと選択肢は 1 つの塊**。折り返すときに「RAM」と「自動」が
+           別の行に離れないよう、対ごとに包む (机の備品が増えて実際に離れた) -->
+      <span class="ctl">
+        <span class="lbl">NIC</span>
+        <select id="netSel" title="Network:Disable">
+          <option value="off">未接続</option>
+          <option value="on">NE2000 (ISA 0x300)</option>
+          <option value="config">設定…</option>
+        </select>
+      </span>
+      <span class="ctl" id="ctlLayout">
+        <span class="lbl">配列</span>
+        <select id="layout">
+          <option value="jp">JIS</option>
+          <option value="us">US</option>
+        </select>
+      </span>
       <!-- Linuxの機械だけに出る。中身は machines.js の ROOTFS から作る -->
-      <span class="lbl" id="rootLbl" hidden>ルートFS</span>
-      <select id="rootSel" hidden></select>
-      <span class="lbl" id="ramLbl" hidden>RAM</span>
-      <select id="ramSel" hidden>
-        <option value="auto">自動</option>
-        <option value="128">128 MB</option>
-        <option value="256">256 MB</option>
-        <option value="512">512 MB</option>
-        <option value="1024">1024 MB</option>
-      </select>
-      <label id="jitLbl" for="jitSel" hidden>JIT</label>
-      <select id="jitSel" hidden title="JIT (F1d wasm) — on/offで実行結果は1bitも変わらない">
-        <option value="off">JIT off</option>
-        <option value="on">JIT on</option>
-      </select>
-      <label for="volume" title="マスター音量 (OPL2 の音楽と PC スピーカー)">🔊</label>
-      <input id="volume" type="range" min="0" max="100" value="70" style="width:90px;vertical-align:middle" title="マスター音量 (OPL2 の音楽と PC スピーカー)">
-      <span class="spacer"></span>
-      <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>
-      <span class="pill" id="pillHist">履歴 0 行</span>
+      <span class="ctl" id="ctlRoot" hidden>
+        <span class="lbl">ルートFS</span>
+        <select id="rootSel" class="wide"></select>
+      </span>
+      <!-- ISO (El Torito) から起動する。ルートFSと排他 — どちらかを選ぶと他方が「—」になる -->
+      <span class="ctl" id="ctlIso" hidden>
+        <span class="lbl">ISO</span>
+        <select id="isoSel" class="wide"></select>
+      </span>
+      <span class="ctl" id="ctlRam" hidden>
+        <span class="lbl">RAM</span>
+        <select id="ramSel">
+          <option value="auto">自動</option>
+          <option value="128">128 MB</option>
+          <option value="256">256 MB</option>
+          <option value="512">512 MB</option>
+          <option value="1024">1024 MB</option>
+        </select>
+      </span>
+      <span class="ctl" id="ctlJit" hidden>
+        <label for="jitSel">JIT</label>
+        <select id="jitSel" title="JIT (F1d wasm) — on/offで実行結果は1bitも変わらない">
+          <option value="off">JIT off</option>
+          <option value="on">JIT on</option>
+        </select>
+      </span>
+      <span class="ctl">
+        <label for="volume" title="マスター音量 (OPL2 の音楽と PC スピーカー)">🔊</label>
+        <input id="volume" type="range" min="0" max="100" value="70" title="マスター音量 (OPL2 の音楽と PC スピーカー)">
+      </span>
     </div>
 
 
@@ -553,6 +574,9 @@
         <svg id="footDisk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
              aria-hidden="true" hidden><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4"/></svg>
         <p id="status">読み込み中…</p>
+        <!-- 状態のピル (MIPS/アイドル・履歴) は右下 — ツールバーに置くと ISO や音量で折り返す -->
+        <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>
+        <span class="pill" id="pillHist">履歴 0 行</span>
       </div>
     </section>
 
