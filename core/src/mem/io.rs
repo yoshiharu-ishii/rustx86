@@ -65,6 +65,20 @@ impl Machine {
                     0xFF
                 }
             }
+            IoTarget::VgaSeq => {
+                if port == 0x3C5 {
+                    self.devices.vga.seq_read_data()
+                } else {
+                    0xFF
+                }
+            }
+            IoTarget::VgaGc => {
+                if port == 0x3CF {
+                    self.devices.vga.gc_read_data()
+                } else {
+                    0xFF
+                }
+            }
             IoTarget::Dac => match port {
                 0x3C6 => self.devices.dac.read_pel_mask(),
                 0x3C8 => self.devices.dac.read_write_index(),
@@ -212,6 +226,22 @@ impl Machine {
                     self.devices.cmos.write_index(val)
                 } else {
                     self.devices.cmos.write_data(val)
+                }
+            }
+            IoTarget::VgaSeq => {
+                if port == 0x3C4 {
+                    self.devices.vga.seq_write_index(val);
+                } else {
+                    let ev = self.devices.vga.seq_write_data(val);
+                    self.vga_event(ev);
+                }
+            }
+            IoTarget::VgaGc => {
+                if port == 0x3CE {
+                    self.devices.vga.gc_write_index(val);
+                } else {
+                    let ev = self.devices.vga.gc_write_data(val);
+                    self.vga_event(ev);
                 }
             }
             IoTarget::Crtc => {

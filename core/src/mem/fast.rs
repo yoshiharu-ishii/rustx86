@@ -76,6 +76,9 @@ impl Machine {
         if a + 3 >= bus::VRAM_TEXT_BASE as usize && a <= bus::VRAM_TEXT_END as usize {
             return None; // テキストVRAM窓は遅い道 (vram_dirtyの約束)
         }
+        if self.devices.vga.planar && self.in_gfx_window(a, 4) {
+            return None; // Mode Y の窓は遅い道 (プレーンへ)
+        }
         self.mem[a..a + 4].copy_from_slice(&val.to_le_bytes());
         self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる
         Some(())
@@ -103,6 +106,9 @@ impl Machine {
         if a + 3 >= bus::VRAM_TEXT_BASE as usize && a <= bus::VRAM_TEXT_END as usize {
             return None;
         }
+        if self.devices.vga.planar && self.in_gfx_window(a, 4) {
+            return None; // Mode Y の窓は遅い道 (プレーンへ)
+        }
         Some(a)
     }
 
@@ -122,6 +128,9 @@ impl Machine {
         }
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             return None;
+        }
+        if self.devices.vga.planar && self.in_gfx_window(a, 1) {
+            return None; // Mode Y の窓は遅い道 (プレーンへ)
         }
         Some(a)
     }
@@ -145,6 +154,9 @@ impl Machine {
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             self.vram_dirty = true;
         }
+        if self.devices.vga.planar && self.in_gfx_window(a, 1) {
+            self.vram_dirty = true; // Mode Y の窓は遅い道 (プレーンへ)
+        }
         Some(())
     }
 
@@ -167,6 +179,9 @@ impl Machine {
         }
         if a + 1 >= bus::VRAM_TEXT_BASE as usize && a <= bus::VRAM_TEXT_END as usize {
             return None;
+        }
+        if self.devices.vga.planar && self.in_gfx_window(a, 2) {
+            return None; // Mode Y の窓は遅い道 (プレーンへ)
         }
         self.mem[a..a + 2].copy_from_slice(&v.to_le_bytes());
         self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる

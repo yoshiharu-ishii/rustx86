@@ -207,7 +207,11 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 }
                 if lar {
                     // アクセス権: 上位ダブルワードの bit 8-23 (16bit形は bit 8-15 だけ)
-                    Some(if d.opsize32 { hi & 0x00FF_FF00 } else { hi & 0xFF00 })
+                    Some(if d.opsize32 {
+                        hi & 0x00FF_FF00
+                    } else {
+                        hi & 0xFF00
+                    })
                 } else {
                     let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
                     if hi & 0x0080_0000 != 0 {
@@ -218,7 +222,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             };
             match result {
                 Some(v) => {
-                    m.cpu.set_reg_w(reg as usize, v, d.opsize32);
+                    m.cpu.set_reg_w(reg, v, d.opsize32);
                     m.cpu.set_flag(super::ZF, true);
                 }
                 None => m.cpu.set_flag(super::ZF, false),

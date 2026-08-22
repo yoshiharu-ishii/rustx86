@@ -700,6 +700,9 @@ impl Machine {
         match mode {
             0x13 => {
                 self.video_mode = 0x13;
+                // シーケンサ/GC を mode 13h の既定 (チェーン4 on) に戻す — Mode Y の
+                // 後にモードを立て直すソフトのため (DOOM は終了時にテキストへ戻る)
+                self.devices.vga.reset_mode13();
                 if clear {
                     let b = bus::VRAM_GFX_BASE as usize;
                     self.mem[b..b + 0x1_0000].fill(0);
