@@ -598,7 +598,11 @@ export class Terminal {
     const isModifier = /^(Control|Alt|Meta|Shift)/.test(e.code);
     const printable = e.key.length === 1;
 
-    if (this.layout === 'us' || !printable || e.ctrlKey || e.altKey || e.metaKey) {
+    // スペースは配列によらず同じ位置なので**押下と解放を別々に**送る — 文字として
+    // 一気に make+break を流すと、35Hz の tic ごとに「今押されているか」を見る
+    // DOOM の Use (ドアを開ける) が一度も成立しない (2026-08-22)。矢印や Ctrl が
+    // 効いてスペースだけ効かなかったのはこれ
+    if (this.layout === 'us' || !printable || e.code === 'Space' || e.ctrlKey || e.altKey || e.metaKey) {
       // JP配列でも Shift は握りつぶす。文字を送る側 (下) が自分で組み立てるので、
       // 両方から送ると二重になる
       if (this.layout === 'jp' && /^Shift/.test(e.code)) return true;
