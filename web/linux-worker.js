@@ -42,6 +42,9 @@ let lastTone = 0;
 let lastLfbAt = 0; // リニアFBを最後に送った時刻 (30fpsの刻み)
 let lfbInFlight = false; // メインが描き終えるまで次を送らない (背圧)
 let lfbBuf = null; // 往復させる一枚分のバッファ
+// u32 で画素を詰め替えるのは LE のときだけ (wasm は LE 固定だが JS の TypedArray は
+// ホスト依存)。BE のホストは素の並びで送ってメインのバイト経路に任せる
+const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 const wasmExports = await init();
 let jitOn = false;
@@ -299,11 +302,26 @@ function loop() {
     if (now - lastLfbAt >= 33) {
       lastLfbAt = now;
       const len = emu.lfb_len();
+      const bpp = emu.lfb_bpp();
       if (!lfbBuf || lfbBuf.byteLength !== len) lfbBuf = new ArrayBuffer(len);
-      new Uint8Array(lfbBuf).set(new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), len));
+      // **ここで canvas の形 (RGBA) に詰め替える** (ADR-0028 G3)。どうせ 3MB を
+      // 読むので、写すついでに並べ替えればメインは putImageData だけで済む。
+      // ゲストの 32bpp は [詰め物,R,G,B] (X が扱える形) で、LE の u32 で見れば
+      // 0xBBGGRRxx — 8bit 右へずらして 0xFFBBGGRR にすると、それがそのまま
+      // ImageData の [R,G,B,A] のメモリ並びになる。バイト単位の 4 代入 (3.7ms/枚) が
+      // u32 1 演算 (1.1ms/枚) になる
+      let fmt = 'raw';
+      if (bpp === 32 && LITTLE_ENDIAN && (emu.lfb_ptr() & 3) === 0) {
+        const src = new Uint32Array(wasmExports.memory.buffer, emu.lfb_ptr(), len >>> 2);
+        const dst = new Uint32Array(lfbBuf);
+        for (let i = 0, n = src.length; i < n; i++) dst[i] = (src[i] >>> 8) | 0xff000000;
+        fmt = 'rgba';
+      } else {
+        new Uint8Array(lfbBuf).set(new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), len));
+      }
       lfbInFlight = true;
       postMessage(
-        { type: 'lfb', bytes: lfbBuf, width: emu.lfb_width(), height: emu.lfb_height(), bpp: emu.lfb_bpp() },
+        { type: 'lfb', bytes: lfbBuf, width: emu.lfb_width(), height: emu.lfb_height(), bpp, fmt },
         [lfbBuf],
       );
       lfbBuf = null; // 所有権はメインへ。ack で戻ってくる
