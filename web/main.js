@@ -30,6 +30,21 @@ const term = new Terminal($('screen'), { scrollback: 1000 });
 // ブラウザの自動再生ポリシーがあるので、最初のキー/クリックで unlock する
 const speaker = new Speaker();
 const opl = new Opl();
+// マスター音量 (OPL2 + PC スピーカー)。覚えておく — 機械を替えても音量は机の設定
+{
+  const el = $('volume');
+  const apply = () => {
+    const v = Number(el.value) / 100;
+    opl.setVolume(v);
+    speaker.setVolume(v);
+  };
+  el.value = localStorage.getItem('rx86.volume') ?? '70';
+  el.addEventListener('input', () => {
+    localStorage.setItem('rx86.volume', el.value);
+    apply();
+  });
+  apply();
+}
 for (const ev of ['keydown', 'pointerdown']) {
   document.addEventListener(ev, () => { speaker.unlock(); opl.unlock(); }, { once: false, capture: true });
 }
