@@ -482,8 +482,8 @@ impl Opl2 {
             }
             self.lfo_am = save_am;
             self.lfo_vib = save_vib;
-            // 9ch 合成の余裕を見て 1/4 に落とし、飽和させる
-            let v = (mix * 0.25 * 32767.0).clamp(-32768.0, 32767.0);
+            // 9ch 合成の余裕を見て 1/2 に落とし、飽和は clamp が守る (1/4 は小さすぎた)
+            let v = (mix * 0.5 * 32767.0).clamp(-32768.0, 32767.0);
             out.push(v as i16);
         }
         out

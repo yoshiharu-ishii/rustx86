@@ -12,6 +12,8 @@ export class Opl {
   #written = 0; // 送り済みのサンプル数
   #ready = false;
   #rate = 0;
+  #gain = null;
+  #volume = 0.7;
 
   async unlock() {
     if (this.#ctx) {
@@ -23,12 +25,21 @@ export class Opl {
     try {
       await this.#ctx.audioWorklet.addModule('./opl-worklet.js');
       this.#node = new AudioWorkletNode(this.#ctx, 'opl-player', { outputChannelCount: [1] });
-      this.#node.connect(this.#ctx.destination);
+      this.#gain = this.#ctx.createGain();
+      this.#gain.gain.value = this.#volume;
+      this.#node.connect(this.#gain);
+      this.#gain.connect(this.#ctx.destination);
       this.#ready = true;
     } catch (e) {
       console.warn('OPL: AudioWorklet を用意できない', e);
     }
     if (this.#ctx.state === 'suspended') this.#ctx.resume();
+  }
+
+  /** マスター音量 (0..1)。開く前に呼ばれても覚えておく */
+  setVolume(v) {
+    this.#volume = Math.max(0, Math.min(1, v));
+    if (this.#gain) this.#gain.gain.setTargetAtTime(this.#volume, this.#ctx.currentTime, 0.01);
   }
 
   /** 合成器のサンプルレート (core に伝える)。まだ開いていなければ 0 */

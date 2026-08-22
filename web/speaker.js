@@ -13,12 +13,20 @@
 //   紙コーン1個の控えめな音なので、ゲインは小さく固定する
 
 const VOLUME = 0.04;
+/** マスター音量 (0..1)。スピーカーの固定ゲインに掛ける */
+let master = 0.7;
 
 export class Speaker {
   #ctx = null;
   #osc = null;
   #gain = null;
   #hz = 0;
+
+  /// マスター音量。鳴っている最中なら即反映
+  setVolume(v) {
+    master = Math.max(0, Math.min(1, v));
+    if (this.#gain && this.#hz > 0) this.#gain.gain.setTargetAtTime(VOLUME * master * 2, this.#ctx.currentTime, 0.01);
+  }
 
   // AudioContextを作る。ユーザー操作を待つ間はsuspendedのままでよい
   #ensure() {
@@ -49,7 +57,7 @@ export class Speaker {
       this.#osc.frequency.setValueAtTime(hz, t);
       // 立ち上がりを数msなだらかにしてクリックノイズを避ける
       this.#gain.gain.cancelScheduledValues(t);
-      this.#gain.gain.setTargetAtTime(VOLUME, t, 0.005);
+      this.#gain.gain.setTargetAtTime(VOLUME * master * 2, t, 0.005);
     } else {
       this.#gain.gain.cancelScheduledValues(t);
       this.#gain.gain.setTargetAtTime(0, t, 0.005);
