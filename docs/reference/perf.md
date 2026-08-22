@@ -28,6 +28,17 @@
   ネイティブJIT (Cranelift) はTier 7の入口で別ADR
 - 目標: フルブート10秒 (Tier 3d)。出口条件~100 MIPSで一旦Tierへ (ADR-0007)
 
+## 現在地 (2026-08-22、3定規 — 画面が出て定規が1本増えた)
+
+| 定規 | 命令数 | JIT off | JIT on | 備考 |
+|---|---|---|---|---|
+| jboot (ブート、bench対) | 970M | 8.8s | **7.3s = 133 MIPS** | ADR-0025 |
+| jcmd (gcc窓) | 518M | 80-83 MIPS | **92-96 MIPS** | C15後の冷間 |
+| **X窓** (Xorg+xeyes+xclock+xterm) | 1284M | 56.5 MIPS | **64-65 MIPS** | **gcc窓より-30%** — 命令ミックス (語彙の穴2.9%) |
+
+X窓のセンサスと画素の配管の実測は [gfx-roadmap.md](gfx-roadmap.md)、
+裁定は [ADR-0028](../adr/0028-part3-cpu-and-gfx.md)。
+
 ## 北極星: v86の実測 (2026-08-12 — 目標はこの数字)
 
 [v86](https://github.com/copy/v86) (x86→wasm JITを常用する同類の完成形) に、
@@ -130,6 +141,10 @@ flowchart TD
 | C12 | 鎖の直短縮バッチ (set_ip32・execのipレジスタ返し・slot計算のcarry化) | 数% | 💤 | **実測ワッシュ** (2026-08-16、8周1勝6敗1分+2%)。バッチC後の世界では鎖の微調整はOoOの影 — 判別則(4)の3度目。タグ exp/chain-batch |
 | C13 | jcc conditionの単一ディスパッチ化 | 1〜2% | 💤 | C12と同バッチで実測ワッシュ (タグ exp/chain-batch)。cc_sign実体化は未試行のまま同タグへ |
 | C14 | **dead-flags elimination** — デコード時にフラグ死活を解析、死んだ定義はlazy storeも省く | 数% | 🔒観測粒度待ち | 机上監査で降格 (2026-08-16): 毎命令が割り込み受付点=EFLAGSの非同期観測点なので、省いたフラグをcosim/lockstepが即検出する。QEMU/Box64はTB粒度だから許される。C10と同じ箱 |
+| C16 | **0F 語彙の拡張** (movsx 0FBE/BF・cmov・bt/shrd/bsf・cmpxchg) + A8/A9・69/6B・99 | X窓 ~5% | 🔬 | X窓の従来経路落ち37Mの~55%。exec は twobyte.rs の原本へ委譲 (StrOne の型)。[ADR-0028](../adr/0028-part3-cpu-and-gfx.md) |
+| C17 | 16bit ALU の o16 通し (66 付き cmp/test/C7) | 落ちの~10% | 🔬 | C15-PR3 と同じ処方 |
+| C18 | **SSE2 移動系を dcache へ** (movd/movq/movaps/movdqa/pshufd) — decode.rs の 66/F2/F3 門を 0F に開ける | 落ちの~8-10% | 🔬 | pixman のシャドウ合成と libc memcpy。画素ストア経路は穴ではない (ShadowFB) |
+| C19 | `write_m128` の変換1回化 (ページ内16B) | 小 | 🔬 | sse.rs:70 が write32×4 で変換4回。フォールト順序不変 |
 
 ### D. メモリとデータ配置
 
@@ -164,6 +179,44 @@ flowchart TD
 | **S1** | **エンジン外の鉱脈 (第5ラウンド調査)** | 起動は「桁」級 (状態イメージ) | 📋台帳 | core/JIT以外の全部 — 状態イメージ配布は💤保留 (2026-08-20ユーザー裁定「根本の解決じゃない」— 再訪条件=ネイティブアプリ化)。ほか boot args・linux-virt・シリアルバッチ・遅延ブロック取得・wasm-opt -O3・mimalloc等。イメージ側は**コース変更=指紋張り替え**なのでA/Bと帳簿を分ける。台帳: [system-roadmap](system-roadmap.md) |
 | F2 | 投機的な先行デコード | 数% | 💤 | 複雑さに見合わない |
 | F3 | ホストフラグの流用 | — | 💤 | F1cの中でのみ意味を持つ |
+
+### J. ネイティブJIT の残り玉 ([jit-roadmap3](jit-roadmap3.md) の採番、2026-08-22 時点の状態)
+
+| # | 案 | 期待 | 状態 | メモ |
+|---|---|---|---|---|
+| J0 | 常駐化⓪ 無料の巻き上げ (x23-x26 にブロック不変量) | — | ✅済 (PR #202) | gcc窓 -5〜11% |
+| J1 | **焼き直しの嵐の鎮火** (2-way スロット / Assembler 再利用 / PROFIT スイープ) | 窓 ~9% | 🔬 | gcc窓 108k/86k、**X窓でも 116k/86k** で再演 |
+| J2 | 常駐化① ストアTLBインライン | ~1% 単体、②の前座 | 🔬 | 画素書きが主役の X で gcc より効く見込み |
+| J3 | 常駐化② 6本常駐+cc材料 / ③ NZCV (FEX式) | 窓 -6〜8% | 🔬 | ②は⓪と席が被るので再配置から |
+| J4 | JIT collect 語彙 (grp3 36% / imul 12% / REP 17% で停止) | X窓カバレッジ 74.8% → 上 | 🔬 | |
+| J5 | call/ret の戻り先比較 (rv8/Dynarmic RSB 式) | 間接分岐の再訪枠 | 💤 | chaining (ADR-0024) と同じ tick 天井に当たる可能性。census が先 |
+
+### G. 画素の配管 (ホスト側のみ — ゲストの遷移に触れない。秒/フレームで裁く)
+
+全量と根拠は [gfx-roadmap.md](gfx-roadmap.md) §2。約束: **画素ストアにフックを付けない**。
+
+| # | 案 | 期待 | 状態 | メモ |
+|---|---|---|---|---|
+| G1 | 未使用のオフスクリーン canvas への `putImageData` を削る | 3MB/frame | 🔬 | ansi.js:657、1行 |
+| G2 | 詰め替えを Uint32 で | 3.7→1.1ms/frame | 🔬 | node 実測 |
+| G3 | 詰め替えを Worker 側で (main は putImageData だけ) | main の描画負荷ほぼ0 | 🔬 | G1-G3 で1本のPR |
+| G4 | Worker 側の行比較で送信スキップ (読むだけ) | アイドル時の転送+描画が消える | 🔬 | 最悪 0.32ms/frame |
+| G5 | 変化行帯だけ送り dirty rect で描く | 文字入力で 3MB→数十KB | 🔬 | G4 の延長 |
+| G6 | LFB 書き込みフック+ページビットマップ (v86式) | — | 💤 | 約束に反する。復帰条件 = G4/G5 で届かない絵が要件になったとき |
+| G7 | OffscreenCanvas を Worker へ | postMessage 往復が消える | 🔬 | G3 の次 |
+| G8 | SharedArrayBuffer でゼロコピー | ①消滅 | 💤 | COOP/COEP + shared-memory ビルド。配布環境の制約 |
+| G9 | `desynchronized:true` / rAF 駆動 pull | 合成レイテンシ・裏タブ | 🔬 | 1行級 |
+| G10 | mode 13h のパレット Vec コピー→ゼロコピー+LUT | 0.1-0.2ms | 🔬 | 優先度低 |
+| G11 | WebGL/WebGPU テクスチャ | — | 💤 | putImageData との同条件比較が無い |
+| G12 | ホストMMU (mprotect) ダーティ検出 | — | 💤 | macOS arm64 の fault 原価が未計測、wasm に載らない |
+
+### W. wasm/ブラウザ固有
+
+| # | 案 | 期待 | 状態 | メモ |
+|---|---|---|---|---|
+| W1 | **wasm JIT スロット表 64K→256K or 2-way** | 焼き260万→桁減 | 🔬 | soak 実測: 据付31K vs 焼き2.68M (X+dillo 30G命令)。判定は帳簿 `jit_baked/recycled` と同一命令数の秒 |
+| W2 | モジュール引退 (1/8則) のしきい値を帳簿で決め直す | retired 7,193/30G | 🔬 | W1 と同じ定規 |
+| W3 | 動的生成モジュールの tier (Liftoff 止まりか) を計測 | ブラウザ JIT が効かない構造の説明 | 🔬 | V8: Liftoff は TurboFan 比 50-70% 遅く OSR 無し |
 
 ## 起動経路の測り方
 
