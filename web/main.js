@@ -155,10 +155,10 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('layout').hidden = !!linux;
-  $('layout').previousElementSibling.hidden = !!linux;
+  $('ctlLayout').hidden = !!linux;
   // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
-  for (const id of ['rootLbl', 'rootSel', 'isoLbl', 'isoSel', 'ramLbl', 'ramSel', 'jitLbl', 'jitSel']) $(id).hidden = !linux;
+  // ラベルと選択肢は対で包んである (index.html の .ctl) — 出し入れも対で
+  for (const id of ['ctlRoot', 'ctlIso', 'ctlRam', 'ctlJit']) $(id).hidden = !linux;
   // デバッガ。Linuxはワーカーの中だが、覗き見RPC (linux-machine.js) 越しに覗ける
   $('debug').disabled = !on && !linux?.booted;
   // **どのNICを挿すかは、そのOSが知っているバスで決まる。**
@@ -268,9 +268,10 @@ function boot(image, label, hdd = null) {
 }
 
 /** 状態を右上のピルと左のカードへ同時に書く。**同じ数字を2つ持たない** */
-function showState(text, hist) {
+function showState(text, hist, histTitle = '') {
   $('pillState').textContent = text;
   $('pillHist').textContent = hist;
+  $('pillHist').title = histTitle;
   // 走っていれば緑、止まっていれば灰
   const live = text !== '停止中' && text !== '電源オフ';
   $('pillDot').classList.toggle('ok', live);
@@ -283,7 +284,13 @@ setInterval(() => {
     const boot = linux.bootSecs != null ? `起動 ${linux.bootSecs.toFixed(1)}s` : '';
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
     const run = linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '起動中';
-    showState(run, boot || '—');
+    showState(
+      run,
+      boot || '—',
+      linux.bootSecs != null
+        ? '電源ONからシェルまで (ISO はプロンプトが出た瞬間、他はバナー)'
+        : 'まだシェルに着いていない',
+    );
     return;
   }
   if (!machine) {

@@ -402,7 +402,19 @@ export function mountLinux(canvas, opts = {}) {
         }
         case 'text': {
           // ISO 機のテキスト VRAM (80×25、文字+属性)。描き手は端末と同じ canvas
-          term.showVga(new Uint8Array(msg.cells), msg.row, msg.col, msg.charset);
+          const cells = new Uint8Array(msg.cells);
+          term.showVga(cells, msg.row, msg.col, msg.charset);
+          // **ISO の起動の定規は別**: 画面が VGA なのでバナー (シリアル) が来ない。
+          // 人間が「着いた」と判断するのと同じ合図 — カーソルの居る行が
+          // シェルのプロンプト ($ / #) で終わった瞬間で止める
+          if (bootT0 !== null && msg.row < 25) {
+            let line = '';
+            for (let x = 0; x < 80 && x < msg.col; x++) line += String.fromCharCode(cells[(msg.row * 80 + x) * 2] || 32);
+            if (/[$#] ?$/.test(line)) {
+              bootSecs = (performance.now() - bootT0) / 1000;
+              bootT0 = null;
+            }
+          }
           break;
         }
         case 'lfb': {
