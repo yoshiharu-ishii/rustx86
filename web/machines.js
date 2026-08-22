@@ -188,16 +188,18 @@ export const ROOTFS = [
   {
     name: 'disk-x',
     label: 'X入り (ディスク)',
-    sub: 'Xorg fbdev + twm/xterm、1024×768',
+    sub: 'Xorg fbdev + icewm、dillo/w3m/links、1024×768',
     initrd: 'initramfs-mini',
     disk: 'disk-x.img.gz',
     // X は広い方が使える。xorg.conf はモード無指定なので fb の解像度にそのまま乗る
     lfb: { width: 1024, height: 768 },
     note:
-      'virtio-blkの/dev/vdaに Xorg (fbdevドライバ) + evdev + twm + xterm。' +
+      'virtio-blkの/dev/vdaに Xorg (fbdevドライバ) + evdev + **icewm** + xterm、' +
+      'ブラウザ3種 (**dillo** / w3m / links、CA束つき — NICを挿せば https も)、' +
+      'feh / xfe / xclock・xeyes・xcalc / xboard。gz 51MB。' +
       '「Linux (フレームバッファ)」機で起動して `startx` と打つと、' +
       'efifb の **1024×768** に X が上がる (GPUは無いので全部ソフトウェア描画)。' +
-      'マウスは画面クリックで捕獲。tools/images/sh/make-x-disk.sh で作る',
+      'マウスは画面の上に居る間だけゲストへ届く (捕獲も脱出キーも無し、Esc は vi のもの)。tools/images/sh/make-x-disk.sh で作る',
   },
   {
     name: 'initramfs-gcc',

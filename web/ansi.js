@@ -137,74 +137,68 @@ export class AnsiTerminal {
     // 環境 (pointer-lock を許さない iframe、埋め込みの閲覧面) では**ソフト捕獲**
     // — canvas 上の移動を前回の座標との差で相対化して渡す。ポインタは
     // 画面の外へ出られるが、入力の経路は同じなので動作の確認はできる
-    let soft = false;
-    let last = null;
-    const setCaptured = (on) => {
-      if (on === this.captured) return;
-      this.captured = on;
-      last = null;
-      this.onCapture?.(on);
-    };
-    const release = () => {
-      if (document.pointerLockElement === canvas) document.exitPointerLock();
-      if (soft) { soft = false; setCaptured(false); }
-    };
-    canvas.addEventListener('click', () => {
-      if (!this.gfxOn || !this.onMouse || this.captured) return;
-      // **既定はソフト捕獲。** 窓モードの pointer lock は Esc でブラウザが
-      // 強制解除し、そのとき Esc はゲストに届かない — vi の Esc が潰れる。
-      // ソフト捕獲なら Esc もそのままゲストへ行く (解放はホストキーだけ)。
-      // pointer lock は全画面のとき (keyboard lock で Esc を守れる) に限る
-      if (document.fullscreenElement && canvas.requestPointerLock) {
-        const fallback = () => { soft = true; setCaptured(true); };
-        const p = canvas.requestPointerLock();
-        if (p && typeof p.catch === 'function') p.catch(fallback);
-        return;
-      }
-      soft = true;
-      setCaptured(true);
-    });
-    document.addEventListener('pointerlockchange', () => {
-      const on = document.pointerLockElement === canvas;
-      if (on) { soft = false; setCaptured(true); }
-      else if (!soft) setCaptured(false);
-    });
-    document.addEventListener('pointerlockerror', () => { soft = true; setCaptured(true); });
-    canvas.addEventListener('mousemove', (e) => {
-      if (!this.captured) return;
-      if (document.pointerLockElement === canvas) {
-        this.onMouse?.(e.movementX, e.movementY, e.buttons & 7);
-        return;
-      }
-      // ソフト捕獲: CSS の座標差を canvas の画素に直す
+    // ---- マウス (FB の顔): 相対デバイスのまま絶対位置に見せる ----
+    //
+    // **捕獲しない。** canvas の上にホストのカーソルがある間だけゲストへ届き、
+    // 枠を出れば自然に抜ける (VNC の絶対モードの触り心地)。脱出キーは要らず、
+    // Esc はずっと vi のもの。
+    // PS/2 は相対しか送れないので、X 側で加速を切り (xorg.conf の
+    // AccelerationScheme none) 「送った差分 = 動く画素」にした上で、**枠に入る
+    // たび/押す直前に左上の角へ押し込んで位置を合わせ直す** — X は 0,0 で止める
+    // ので、そこからホスト座標ぶん進めれば揃う。ズレても次の入り直しで消える。
+    // 以前の捕獲 (pointer lock / ホストキー Ctrl+Alt+Shift+G) は、加速でズレる
+    // から閉じ込めるしかなかった形で、根を切ったので要らなくなった (2026-08-22)
+    let sent = null; // ゲストのカーソルが居るはずの canvas 画素 (整数)
+    const guestXY = (e) => {
       const r = canvas.getBoundingClientRect();
       const k = canvas.width / r.width;
-      const x = (e.clientX - r.left) * k, y = (e.clientY - r.top) * k;
-      if (last) this.onMouse?.(Math.round(x - last.x), Math.round(y - last.y), e.buttons & 7);
-      last = { x, y };
-    });
+      const clamp = (v, hi) => Math.max(0, Math.min(hi - 1, Math.round(v)));
+      return { x: clamp((e.clientX - r.left) * k, canvas.width), y: clamp((e.clientY - r.top) * k, canvas.height) };
+    };
+    // PS/2 の1パケットは ±255 まで (素子もそこで切る) — 大きい差分は分けて送る
+    const send = (dx, dy, buttons) => {
+      while (dx || dy) {
+        const sx = Math.max(-255, Math.min(255, dx)), sy = Math.max(-255, Math.min(255, dy));
+        this.onMouse?.(sx, sy, buttons);
+        dx -= sx;
+        dy -= sy;
+      }
+    };
+    const resync = (p, buttons) => {
+      // 左上の角へ画面より多く押し込む (X は 0,0 で止める) → 座標ぶん進める
+      const over = Math.max(canvas.width, canvas.height) + 255;
+      send(-over, -over, buttons);
+      send(p.x, p.y, buttons);
+      sent = p;
+    };
+    const move = (e) => {
+      if (!this.gfxOn || !this.onMouse) return;
+      const p = guestXY(e), b = e.buttons & 7;
+      if (!sent) { resync(p, b); return; }
+      const dx = p.x - sent.x, dy = p.y - sent.y;
+      if (dx || dy) { send(dx, dy, b); sent = p; }
+    };
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseenter', (e) => { sent = null; move(e); });
+    canvas.addEventListener('mouseleave', () => { sent = null; });
     canvas.addEventListener('mousedown', (e) => {
-      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+      if (!this.gfxOn || !this.onMouse) return;
+      e.preventDefault();
+      canvas.focus();
+      // 押す直前に合わせ直す (ゲストが自分でカーソルを飛ばしていてもここで揃う)。
+      // 角への押し込みは**押す前のボタン状態**で行い、押下は揃ってから
+      const pressed = [1, 4, 2][e.button] ?? 0; // DOM button → PS/2 bit (左1 中4 右2)
+      resync(guestXY(e), (e.buttons & 7) & ~pressed);
+      this.onMouse(0, 0, e.buttons & 7);
     });
     canvas.addEventListener('mouseup', (e) => {
-      if (this.captured) { e.preventDefault(); this.onMouse?.(0, 0, e.buttons & 7); }
+      if (!this.gfxOn || !this.onMouse) return;
+      e.preventDefault();
+      this.onMouse(0, 0, e.buttons & 7);
     });
-    canvas.addEventListener('contextmenu', (e) => { if (this.captured) e.preventDefault(); });
-    // ①ホストキー。物理位置 (code) で見るので配列と無縁
-    // ①ホストキーは Ctrl+Alt+Shift+G — Esc は使わない (vi のもの)。
-    // 物理位置 (code) で見るので配列と無縁
-    canvas.addEventListener('keydown', (e) => {
-      if (!this.captured) return;
-      if (e.ctrlKey && e.altKey && e.shiftKey && e.code === 'KeyG') {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        release();
-      }
-    }, true);
-    // ④自動解放: タブが裏へ回った
-    window.addEventListener('blur', release);
-    /** 機械が止まった/死んだときに表示側が呼ぶ (死んだゲストが入力を人質に取らない) */
-    this.releaseCapture = release;
+    canvas.addEventListener('contextmenu', (e) => { if (this.gfxOn) e.preventDefault(); });
+    /** 互換: 捕獲は無くなったので何もしない (表示側が停止時に呼ぶ) */
+    this.releaseCapture = () => {};
     canvas.addEventListener('paste', (e) => {
       const t = e.clipboardData?.getData('text');
       if (t) this.onPaste?.(t);
@@ -223,6 +217,7 @@ export class AnsiTerminal {
     // ドラッグで選ぶ (VGA端末と同じ操作感)。**選んだ範囲だけがコピーの対象**
     let dragging = null;
     canvas.addEventListener('mousedown', (e) => {
+      if (this.gfxOn) return; // 画素の顔では選択もスクロールバーも無い (マウスはゲストへ)
       // 右ボタンでは選択を触らない (選んで右を押してコピー、が成り立つように)
       if (e.button !== 0) return;
       const p = this._cellAt(e);
