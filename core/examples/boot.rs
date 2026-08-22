@@ -36,8 +36,20 @@ fn main() {
         .unwrap_or(DEFAULT_MAX);
 
     let image = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let mut m = Machine::new();
+    // HDD=path で C: (INT 13h ドライブ 0x80) を挿す — DOOM のような、フロッピーに
+    // 載らない DOS ソフトの器。そのときは**ブラウザと同じ 386 の機械** (pc_floppy、
+    // 16MB) にする — Machine::new() は PC/XT (8086) で、DOS/16M が「386 が要る」と言う
+    let hdd = std::env::var("HDD").ok();
+    let mut m = if hdd.is_some() {
+        Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(16))
+    } else {
+        Machine::new()
+    };
     m.boot_from_disk(image).expect("boot");
+    if let Some(p) = hdd {
+        let img = std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        m.hdd_attach(img).expect("hdd");
+    }
 
     // 画面に文字列が出るまで走らせ、出たらキーを打つ。
     //

@@ -49,6 +49,37 @@ impl Disk {
         })
     }
 
+    /// ハードディスク像 (INT 13h のドライブ 0x80)。
+    ///
+    /// 形状は BIOS が自由に決めてよい — DOS は AH=08 で聞いた形状をそのまま
+    /// 使うので、16ヘッド×63セクタ (かつての IDE の定番、504MB まで) に固定し、
+    /// シリンダ数はサイズから割る。MBR のパーティション表もこの形状で書く
+    /// (`tools/images/sh/make-doom-hdd.sh`)。DOOM の 4.2MB の WAD はフロッピーに
+    /// 載らないので、これが DOS に「C:」を見せる最短の道 (ATA の素子は要らない)
+    pub fn hdd_from_image(data: Vec<u8>) -> Result<Self, String> {
+        if !data.len().is_multiple_of(SECTOR_SIZE) || data.is_empty() {
+            return Err(format!(
+                "HDD像の大きさが512の倍数ではない: {} バイト",
+                data.len()
+            ));
+        }
+        let (heads, sectors) = (16u8, 63u8);
+        let per_cyl = heads as usize * sectors as usize * SECTOR_SIZE;
+        let cylinders = data.len().div_ceil(per_cyl);
+        if cylinders > 1024 {
+            return Err(format!(
+                "HDD像が大きすぎる (CHS の上限 504MB): {} バイト",
+                data.len()
+            ));
+        }
+        Ok(Self {
+            data,
+            cylinders: cylinders as u16,
+            heads,
+            sectors,
+        })
+    }
+
     /// CHS を先頭からの通し番号 (LBA) に直す
     pub fn chs_to_lba(&self, c: u16, h: u8, s: u8) -> Option<usize> {
         if s == 0 || s > self.sectors || h >= self.heads || c >= self.cylinders {

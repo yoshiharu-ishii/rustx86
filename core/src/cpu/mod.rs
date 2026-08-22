@@ -258,7 +258,16 @@ impl Cpu {
         if self.vm86() {
             3
         } else if self.pe() {
-            (self.sregs[CS] & 3) as u8
+            // PE を立てた直後、far jmp で CS を積み直すまでの窓: CS にはリアルモードの
+            // 値が残っていて下位2bitは無意味、隠しレジスタはリアルの写し (データ型、
+            // bit3=0)。実CPUはこの間 CPL=0 で走る — DOS/16M (DOOM) は LMSW の後、
+            // CS を積み直す前に OUT を打つ (CS=0x242E の RPL=2 で #GP していた)。
+            // PM で CS に積めるのはコード型 (bit3=1) だけなので、写しの型で見分く
+            if self.hidden[CS].access & 0x08 == 0 {
+                0
+            } else {
+                (self.sregs[CS] & 3) as u8
+            }
         } else {
             0
         }
