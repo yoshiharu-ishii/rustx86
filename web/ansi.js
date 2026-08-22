@@ -609,17 +609,15 @@ export class AnsiTerminal {
 
   // ---- 描画 ----
 
-  /** efifb が描いた一枚 (32bpp=[詰め物,R,G,B] / 24bpp=[R,G,B]) をそのまま置く。
-   * 解像度はゲストの申告 (640×480) で、canvasは 80×24 の升目の大きさ
-   * (730×384) なので縮めて収める — 補間は切る (文字の縁が滲む)。
+  /** efifb が描いた一枚を置く。ワーカーが写すついでに canvas の形 (RGBA、
+   * fmt='rgba') に詰め替えてくるのが常道で、ここは ImageData を被せて
+   * putImageData するだけ (3MB の読み書きをメインでしない — ADR-0028 G1〜G3)。
+   * fmt='raw' は保険: 32bpp=[詰め物,R,G,B] / 24bpp=[R,G,B] をここで並べ替える。
    * 出ている間、文字の描き手 (render) は黙る。戻すのは reset() */
-  drawRgb(rgb, width, height, bpp = 24) {
+  drawRgb(rgb, width, height, bpp = 24, fmt = 'raw') {
     this.gfxOn = true;
     if (!this.gfx || this.gfx.w !== width || this.gfx.h !== height) {
-      const cvs = document.createElement('canvas');
-      cvs.width = width;
-      cvs.height = height;
-      this.gfx = { w: width, h: height, cvs, ctx: cvs.getContext('2d'), img: new ImageData(width, height) };
+      this.gfx = { w: width, h: height, img: null };
       // **canvas をゲストの解像度に張り替える** (等倍)。文字の升目 (730×384) に
       // 縮めて収めると 8×16 のフォントが潰れる。見た目の大きさは CSS (.fb) が決める
       this.textSize ??= { w: this.canvas.width, h: this.canvas.height };
@@ -637,6 +635,14 @@ export class AnsiTerminal {
       fit();
       (this.fitObserver ??= new ResizeObserver(fit)).observe(this.canvas);
     }
+    if (fmt === 'rgba') {
+      // 届いたバッファをそのまま ImageData に被せる (コピー無し)。バッファは
+      // 呼び手が ack でワーカーへ返すので、ImageData はこの一回限り
+      const img = new ImageData(new Uint8ClampedArray(rgb.buffer, rgb.byteOffset, width * height * 4), width, height);
+      this.ctx.putImageData(img, 0, 0);
+      return;
+    }
+    this.gfx.img ??= new ImageData(width, height);
     const d = this.gfx.img.data;
     if (bpp === 32) {
       // [詰め物, R, G, B] の4バイト (X が扱える形。赤は第2バイト)
@@ -654,7 +660,6 @@ export class AnsiTerminal {
         d[o + 3] = 255;
       }
     }
-    this.gfx.ctx.putImageData(this.gfx.img, 0, 0);
     this.ctx.putImageData(this.gfx.img, 0, 0);
   }
 

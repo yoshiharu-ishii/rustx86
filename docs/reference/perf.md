@@ -197,9 +197,9 @@ flowchart TD
 
 | # | 案 | 期待 | 状態 | メモ |
 |---|---|---|---|---|
-| G1 | 未使用のオフスクリーン canvas への `putImageData` を削る | 3MB/frame | 🔬 | ansi.js:657、1行 |
-| G2 | 詰め替えを Uint32 で | 3.7→1.1ms/frame | 🔬 | node 実測 |
-| G3 | 詰め替えを Worker 側で (main は putImageData だけ) | main の描画負荷ほぼ0 | 🔬 | G1-G3 で1本のPR |
+| G1 | 未使用のオフスクリーン canvas への `putImageData` を削る | 3MB/frame | ✅済 | PR #213 — gfx.cvs/ctx ごと撤去 |
+| G2 | 詰め替えを Uint32 で | 3.7→1.1ms/frame | ✅済 | PR #213 — `(s>>>8)\|0xff000000` (LE のときだけ、BE は素の並びで送る保険) |
+| G3 | 詰め替えを Worker 側で (main は putImageData だけ) | main の描画負荷ほぼ0 | ✅済 | PR #213 — fmt='rgba'。ブラウザ実測: main の putImageData 平均 **0.08ms/枚** (640×480)、bounce の8色が pix(R,G,B) と完全一致 |
 | G4 | Worker 側の行比較で送信スキップ (読むだけ) | アイドル時の転送+描画が消える | 🔬 | 最悪 0.32ms/frame |
 | G5 | 変化行帯だけ送り dirty rect で描く | 文字入力で 3MB→数十KB | 🔬 | G4 の延長 |
 | G6 | LFB 書き込みフック+ページビットマップ (v86式) | — | 💤 | 約束に反する。復帰条件 = G4/G5 で届かない絵が要件になったとき |
