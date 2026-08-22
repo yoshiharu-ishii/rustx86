@@ -91,25 +91,6 @@ export const MACHINES = [
   },
   {
     group: 'OSライブラリ',
-    id: 'tinycore',
-    label: 'Tiny Core Linux (ISO)',
-    sub: 'ISO から起動 — isolinux → 本物の Linux',
-    // 中身は ISO 9660 (CD001)。machine.js が El Torito で起動する (BIOS の CD、128MB)
-    image: './Core-current.iso',
-    status: 'ok',
-    note:
-      '**ISO から起動する** (6c): BIOS の CD (INT 13h ドライブ 0xE0) を El Torito で読み、' +
-      'isolinux が boot: を出す。Enter で本物の Linux (Tiny Core 16.x、20MB) が上がって ' +
-      'tc@box:~$ に着く (約 1.8G 命令)。isolinux は boot: を出した直後にキー待ち行列を捨てるので、' +
-      '自動打鍵は Enter を 3 回。CD の装置 (ATAPI) はまだ無いので、起動後に /mnt/sr0 は見えない ' +
-      '(6c の 2 段目)。ISO は手元のファイルを「イメージを開く…」で落としても同じ経路で起動する',
-    script: [{ when: 'boot:', send: '\n\n\n' }],
-    source: 'http://tinycorelinux.net/16.x/x86/release/Core-current.iso',
-    sourceLabel: 'Tiny Core Linux 16.x (x86)',
-    file: 'Core-current.iso (tools/images/sh/fetch-images.sh tinycore)',
-  },
-  {
-    group: 'OSライブラリ',
     id: 'linux',
     label: 'Linux (コンソール)',
     sub: '画面はシリアル端末 (ttyS0) — カーネルの文字出力をブラウザの端末が描く',
@@ -186,6 +167,25 @@ export function byGroup(machines = MACHINES) {
  *
  * `ram` は空なら自動 (initrdの展開後の大きさから決める。linux-machine.js)。
  */
+/** ISO (El Torito) の棚。Linux の機械の「ISO」つまみに並ぶ — ルートFSと排他で、
+ *  選ぶと BIOS 経由 (isolinux) で起動する。中身の Linux がシリアルでなく VGA に
+ *  出るので、画面はテキスト VRAM を升目で写す (linux-worker.js → ansi.js showVga) */
+export const ISOS = [
+  {
+    name: 'Core-current.iso',
+    label: 'Tiny Core Linux 16.x',
+    sub: 'ISO から起動 — isolinux → 本物の Linux (20MB)',
+    note:
+      '**ISO から起動する** (6c): BIOS の CD (INT 13h ドライブ 0xE0) を El Torito で読み、' +
+      'isolinux が boot: を出す。Enter で Tiny Core 16.x が上がって tc@box:~$ に着く (約 1.8G 命令)。' +
+      'isolinux は boot: の直後にキー待ち行列を捨てるので Enter は 2 回。NIC は RTL8029 (ne2k-pci) で ' +
+      'eth0 が出る。CD の装置 (ATAPI) はまだ無いので起動後に /mnt/sr0 は見えない (6c の 2 段目)',
+    source: 'http://tinycorelinux.net/16.x/x86/release/Core-current.iso',
+    sourceLabel: 'Tiny Core Linux 16.x (x86)',
+    file: 'Core-current.iso (tools/images/sh/fetch-images.sh tinycore)',
+  },
+];
+
 export const ROOTFS = [
   {
     name: 'initramfs-mini',

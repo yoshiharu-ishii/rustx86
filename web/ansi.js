@@ -113,7 +113,7 @@ export class AnsiTerminal {
         return;
       }
       // 画素の顔が出ている = シェルは tty0。文字にせず位置 (code) を渡す
-      if (this.gfxOn && this.onKey) {
+      if ((this.gfxOn || this.vgaOn) && this.onKey) {
         e.preventDefault();
         this.onKey(e.code, true);
         return;
@@ -121,7 +121,7 @@ export class AnsiTerminal {
       this._key(e);
     });
     canvas.addEventListener('keyup', (e) => {
-      if (this.gfxOn && this.onKey) {
+      if ((this.gfxOn || this.vgaOn) && this.onKey) {
         e.preventDefault();
         this.onKey(e.code, false);
       }
@@ -254,18 +254,9 @@ export class AnsiTerminal {
   }
 
   reset() {
-    this.gfxOn = false;
-    if (this.textSize) {
-      // 文字の顔へ戻す: canvas の寸法も升目に戻す
-      this.canvas.width = this.textSize.w;
-      this.canvas.height = this.textSize.h;
-      this.canvas.classList.remove('fb');
-      this.canvas.style.removeProperty('--fbw');
-      this.canvas.style.removeProperty('--fbh');
-      this.canvas.style.imageRendering = '';
-      this.fitObserver?.disconnect();
-      this.gfx = null;
-    }
+    this._leaveGfx();
+    this.vgaOn = false;
+    this._setRows(this.textRows ?? this.rows);
     this.grid = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => this._blank()),
     );
@@ -284,6 +275,70 @@ export class AnsiTerminal {
 
   _blank() {
     return { ch: ' ', fg: 7, bg: 0, bold: false, inv: false };
+  }
+
+  /** 画素の顔 (drawRgb) を畳んで文字の升目に戻す */
+  _leaveGfx() {
+    this.gfxOn = false;
+    if (this.textSize) {
+      // 文字の顔へ戻す: canvas の寸法も升目に戻す
+      this.canvas.width = this.textSize.w;
+      this.canvas.height = this.textSize.h;
+      this.canvas.classList.remove('fb');
+      this.canvas.style.removeProperty('--fbw');
+      this.canvas.style.removeProperty('--fbh');
+      this.canvas.style.removeProperty('--fbscale');
+      this.canvas.style.imageRendering = '';
+      this.fitObserver?.disconnect();
+      this.gfx = null;
+    }
+  }
+
+  /** 行数を変える (シリアル端末は 24 行、VGA のテキストは 25 行)。canvas の高さも合わせる */
+  _setRows(n) {
+    this.textRows ??= this.rows;
+    if (n === this.rows && this.canvas.height === n * CELL_H) return;
+    this.rows = n;
+    this.canvas.height = n * CELL_H;
+    if (this.textSize) this.textSize.h = n * CELL_H;
+    // CSS の aspect-ratio は 24 行前提 (730/384) なので、違う行数は inline で言う
+    if (n === this.textRows) this.canvas.style.removeProperty('aspect-ratio');
+    else this.canvas.style.aspectRatio = `${this.canvas.width} / ${this.canvas.height}`;
+    this.grid = Array.from({ length: n }, () => Array.from({ length: this.cols }, () => this._blank()));
+    this.cy = Math.min(this.cy, n - 1);
+    this.dirty = true;
+  }
+
+  /** VGA のテキスト VRAM (文字+属性の 2 バイト×80×25) をそのまま升目に写す。
+   * ISO 機 (BIOS 経由の起動) の画面はシリアルでなくここ — 文字は CP437 の表で
+   * Unicode に、属性は fg 下位 3bit + 明るさ (bold) / bg 3bit に読み替える。
+   * 出ている間、キーは文字でなく位置 (onKey) でゲストへ行く (画素の顔と同じ) */
+  showVga(cells, row, col, charset) {
+    if (charset) this.vgaCharset = charset;
+    const cs = this.vgaCharset;
+    this._leaveGfx();
+    this.vgaOn = true;
+    this._setRows(25);
+    this.scrollback = [];
+    this.offset = 0;
+    for (let y = 0; y < 25; y++) {
+      const line = this.grid[y];
+      for (let x = 0; x < this.cols; x++) {
+        const i = (y * this.cols + x) * 2;
+        const ch = cells[i];
+        const attr = cells[i + 1];
+        const cell = line[x];
+        cell.ch = ch === 0 || ch === 32 ? ' ' : cs ? cs[ch] ?? ' ' : String.fromCharCode(ch);
+        cell.fg = attr & 7;
+        cell.bold = (attr & 8) !== 0;
+        cell.bg = (attr >> 4) & 7;
+        cell.inv = false;
+      }
+    }
+    this.cx = Math.min(col, this.cols - 1);
+    this.cy = Math.min(row, 24);
+    this.cursorVisible = row < 25;
+    this.dirty = true;
   }
 
   // ---- 端末自体の状態の写し (機械のスナップショットに添える) ----
@@ -628,6 +683,8 @@ export class AnsiTerminal {
       // pixelated を切る — 非整数の最近傍縮小は文字が欠けて読めない
       this.canvas.style.setProperty('--fbw', String(width));
       this.canvas.style.setProperty('--fbh', String(height));
+      // 小さい解像度 (mode 13h の 320×200) は 3 倍まで伸ばす — 1.5 倍だと切手になる
+      this.canvas.style.setProperty('--fbscale', width <= 400 ? '3' : '1.5');
       const fit = () => {
         const shown = this.canvas.getBoundingClientRect().width;
         this.canvas.style.imageRendering = shown + 0.5 < width ? 'auto' : 'pixelated';

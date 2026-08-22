@@ -22,7 +22,7 @@
 //         {type:'dbg-result', id, result}    RPCの返事
 //         {type:'dbg-stop', why}             見張り (ブレークポイント等) が機械を止めた
 
-import init, { Emulator } from './pkg/rustx86_wasm.js';
+import init, { Emulator, cp437_table } from './pkg/rustx86_wasm.js';
 import { setupJit, pumpJit, releaseJit, resetJit } from './jit-runtime.js';
 
 let emu = null;
@@ -42,6 +42,13 @@ let lastTone = 0;
 let lastLfbAt = 0; // リニアFBを最後に送った時刻 (30fpsの刻み)
 let lfbInFlight = false; // メインが描き終えるまで次を送らない (背圧)
 let lfbBuf = null; // 往復させる一枚分のバッファ
+/** ISO (BIOS 経由) で起動した機械か。画面はシリアルでなく VGA — テキスト VRAM を
+    升目で、mode 13h は画素で、どちらもメインへ送る (ワーカー側に canvas は無い) */
+let isoOn = false;
+let lastTextAt = 0;
+let lastCursor = -1;
+let charsetSent = false;
+let paletteRgba = null; // mode 13h の DAC → RGBA (u32) の写し
 // u32 で画素を詰め替えるのは LE のときだけ (wasm は LE 固定だが JS の TypedArray は
 // ホスト依存)。BE のホストは素の並びで送ってメインのバイト経路に任せる
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
@@ -67,6 +74,12 @@ self.onmessage = (e) => {
         // シェルにプロンプトを出させる
         emu = Emulator.from_snapshot(new Uint8Array(msg.snapshot));
         emu.serial_in(new TextEncoder().encode('\n'));
+      } else if (msg.iso) {
+        // ISO (El Torito) から BIOS 経由で起動する。機械は PCI 付き 32bit PC —
+        // NIC は RTL8029 (Tiny Core の ne2k-pci が拾う)
+        emu = Emulator.from_iso(new Uint8Array(msg.iso), msg.ramMb ?? 128);
+        if (msg.mac) emu.net_attach(new Uint8Array(msg.mac));
+        emu.set_rtc_unix(Date.now() / 1000);
       } else {
         emu = Emulator.from_bzimage(
           new Uint8Array(msg.kernel),
@@ -86,6 +99,10 @@ self.onmessage = (e) => {
         emu.set_rtc_unix(Date.now() / 1000);
       }
       // JIT (F1d wasm)。電源投入時の初期値 — 実行中の切替は 'jit' メッセージ
+      isoOn = !!msg.iso && !msg.snapshot;
+      lastTextAt = 0;
+      lastCursor = -1;
+      charsetSent = false;
       resetJit();
       jitOn = false;
       if (msg.jit) jitEnable();
@@ -246,6 +263,46 @@ function wakeNow() {
   loop();
 }
 
+/** ISO 機の画面。テキストは VRAM が汚れたか、カーソルが動いたときだけ升目ごと送る
+    (4000B)。mode 13h は 30fps で画素を RGBA にして送る — 経路は efifb と同じ 'lfb'
+    (背圧つき、バッファ往復) */
+function pumpVga() {
+  const now = performance.now();
+  if (emu.video_mode() === 0x13) {
+    if (lfbInFlight || now - lastLfbAt < 33) return;
+    lastLfbAt = now;
+    const w = 320, h = 200, len = w * h * 4;
+    if (!lfbBuf || lfbBuf.byteLength !== len) lfbBuf = new ArrayBuffer(len);
+    const pal = emu.palette();
+    paletteRgba ??= new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      paletteRgba[i] = LITTLE_ENDIAN
+        ? 0xff000000 | (pal[i * 3 + 2] << 16) | (pal[i * 3 + 1] << 8) | pal[i * 3]
+        : (pal[i * 3] << 24) | (pal[i * 3 + 1] << 16) | (pal[i * 3 + 2] << 8) | 0xff;
+    }
+    const src = new Uint8Array(wasmExports.memory.buffer, emu.fb_ptr(), w * h);
+    const dst = new Uint32Array(lfbBuf);
+    for (let i = 0; i < w * h; i++) dst[i] = paletteRgba[src[i]];
+    lfbInFlight = true;
+    postMessage({ type: 'lfb', bytes: lfbBuf, width: w, height: h, bpp: 32, fmt: 'rgba' }, [lfbBuf]);
+    lfbBuf = null;
+    return;
+  }
+  const cursor = emu.cursor_row() * 256 + emu.cursor_col();
+  const dirty = emu.take_vram_dirty() || cursor !== lastCursor;
+  // 汚れが無くても 500ms に 1 回は送る (mode 13h から文字へ戻った直後の取りこぼし保険)
+  if (!dirty && now - lastTextAt < 500) return;
+  lastTextAt = now;
+  lastCursor = cursor;
+  const cells = new Uint8Array(wasmExports.memory.buffer, emu.text_vram_ptr(), emu.text_vram_len()).slice();
+  const msg = { type: 'text', cells: cells.buffer, row: emu.cursor_row(), col: emu.cursor_col() };
+  if (!charsetSent) {
+    msg.charset = cp437_table();
+    charsetSent = true;
+  }
+  postMessage(msg, [cells.buffer]);
+}
+
 function loop() {
   if (!running || !emu) return;
   const t0 = performance.now();
@@ -327,6 +384,8 @@ function loop() {
       lfbBuf = null; // 所有権はメインへ。ack で戻ってくる
     }
   }
+
+  if (isoOn) pumpVga();
 
   // PCスピーカー。値はスライスごとにポーリングし、**変わったときだけ**報告する
   // (WebAudioはワーカーから触れないのでメインが鳴らす)
