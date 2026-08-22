@@ -192,6 +192,9 @@ pub struct Machine {
     /// ハードディスク (INT 13h のドライブ 0x80)。`hdd_attach` で挿す。
     /// 16bit機のための器で、Linux は virtio-blk を使う (blk_attach)
     pub hdd: Option<Disk>,
+    /// CD-ROM (ISO 9660 の像、2048B セクタ)。INT 13h のドライブ 0xE0 + El Torito 起動。
+    /// 装置 (ATAPI) は 6c の 2 段目 — ここは BIOS の高位エミュレーション
+    pub cd: Option<Vec<u8>>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
     pub first_fault: Option<(u8, u16, u32)>,
@@ -400,6 +403,7 @@ impl Machine {
             console: Vec::new(),
             disk: None,
             hdd: None,
+            cd: None,
             first_fault: None,
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],

@@ -138,6 +138,15 @@ impl Emulator {
         Ok(Emulator::wrap(m))
     }
 
+    /// ISO 9660 の像 (El Torito) から起動する。RAM は 128MB — 中身が Linux の
+    /// ことが多い (isolinux がカーネルを 1MB 以上へ置く) ので 16bit 機より広く取る
+    pub fn from_iso(image: &[u8]) -> Result<Emulator, JsError> {
+        let mut m = Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(128));
+        m.boot_from_iso(image.to_vec())
+            .map_err(|e| JsError::new(&e))?;
+        Ok(Emulator::wrap(m))
+    }
+
     /// カーネルイメージ (+ initramfs) から 32bit Linux を起動する。
     /// bzImage / vmlinux (ELF) は中身で自動判別 — vmlinux なら自己解凍ステブが
     /// 無いぶん起動が4割速い。`ram_mb` はRAMサイズ (MB)。

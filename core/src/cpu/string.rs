@@ -149,11 +149,23 @@ fn bulk_movs(m: &mut Machine, src_seg: usize, width: u32, a32: bool) {
             return;
         }
         let bytes = (n * width) as usize;
-        // src と dest は別ページなので範囲は重ならない。copy_within は使わず
-        // 一時コピーで安全に (重なり得ないが借用を分けるため)
         m.dcache.note_write_range(dpa as u32, bytes); // コードページなら写しを捨てる
         let mem = m.mem_slice_mut();
-        mem.copy_within(spa..spa + bytes, dpa);
+        if dpa > spa && dpa < spa + bytes {
+            // **前向きに重なる** (dest が src の少し先): 実CPUは 1 要素ずつ読んで書くので、
+            // 書いたばかりのバイトを次に読む = 並びの複製になる (LZO の run-length が
+            // `rep movsb` で ESI=EDI-1 をやる)。memmove 風の一括複写は別物を作る —
+            // isolinux の解凍結果が 1 バイト壊れて PM のコードが迷子になった (2026-08-22)
+            let w = width as usize;
+            for i in 0..n as usize {
+                let (s, d) = (spa + i * w, dpa + i * w);
+                for k in 0..w {
+                    mem[d + k] = mem[s + k];
+                }
+            }
+        } else {
+            mem.copy_within(spa..spa + bytes, dpa);
+        }
         m.cpu.set_reg_w(SI, si.wrapping_add(bytes as u32), a32);
         m.cpu.set_reg_w(DI, di.wrapping_add(bytes as u32), a32);
         m.cpu.set_reg_w(CX, cx - n, a32);

@@ -475,6 +475,8 @@ impl Machine {
             None
         };
 
+        // A20 は 8042 の出力ポートの写し (控えには 8042 側だけ入っている)
+        m.cpu.a20 = m.devices.keyboard.a20_enabled();
         *self = m;
         Ok(())
     }

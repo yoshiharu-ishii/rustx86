@@ -1111,7 +1111,7 @@ async function insertMedia(f) {
   if (!isBootable(bytes)) {
     setStatus(
       `${f.name} は起動できる形に見えません ` +
-        '(ブートセクタの印 0x55AA が無く、Linuxカーネルでもスナップショットでもない)',
+        '(ブートセクタの印 0x55AA も ISO 9660 の印 CD001 も無く、Linuxカーネルでもスナップショットでもない)',
       true,
     );
     return;

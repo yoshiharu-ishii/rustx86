@@ -60,6 +60,89 @@ impl Machine {
         Ok(())
     }
 
+    /// ISO 9660 の像から起動する (El Torito)。
+    ///
+    /// 実 BIOS が CD から起動するときの手順そのもの:
+    ///   1. セクタ 17 の Boot Record Volume Descriptor ("CD001"、type 0、
+    ///      "EL TORITO SPECIFICATION") から**ブートカタログ**の LBA を読む
+    ///   2. カタログの Validation Entry (0x01 … 0xAA55) の次、Initial/Default Entry
+    ///      (0x88 = 起動可) から メディア種別・ロードセグメント・セクタ数・RBA を読む
+    ///   3. **no-emulation** (種別 0): ブート像を load_segment:0000 (既定 07C0) へ
+    ///      count×512 バイト置き、DL=0xE0 (CD のドライブ番号) で 0000:7C00 から実行 —
+    ///      isolinux はここから INT 13h AH=42 で CD を読んでカーネルを持ってくる
+    ///      **floppy emulation** (種別 1-3): ISO に埋めたフロッピー像をドライブ A に見せ、
+    ///      その先頭セクタから普通に起動する (既存の INT 13h 経路がそのまま使える)
+    pub fn boot_from_iso(&mut self, image: Vec<u8>) -> Result<(), String> {
+        const SEC: usize = 2048;
+        let sector = |n: usize| -> Result<&[u8], String> {
+            image
+                .get(n * SEC..(n + 1) * SEC)
+                .ok_or_else(|| format!("ISO が短い: セクタ {n} が無い"))
+        };
+        let pvd = sector(16)?;
+        if &pvd[1..6] != b"CD001" {
+            return Err("ISO 9660 ではない (セクタ 16 に CD001 が無い)".into());
+        }
+        let brvd = sector(17)?;
+        if brvd[0] != 0 || &brvd[1..6] != b"CD001" || &brvd[7..30] != b"EL TORITO SPECIFICATION" {
+            return Err("El Torito のブートレコードが無い (起動できない ISO)".into());
+        }
+        let catalog = u32::from_le_bytes(brvd[0x47..0x4B].try_into().unwrap()) as usize;
+        let cat = sector(catalog)?;
+        if cat[0] != 0x01 || cat[0x1E] != 0x55 || cat[0x1F] != 0xAA {
+            return Err("ブートカタログの検証エントリが壊れている".into());
+        }
+        let e = &cat[0x20..0x40];
+        if e[0] != 0x88 {
+            return Err("ブートカタログの既定エントリが起動不可 (0x88 でない)".into());
+        }
+        let media = e[1];
+        let load_seg = u16::from_le_bytes([e[2], e[3]]);
+        let count = u16::from_le_bytes([e[6], e[7]]) as usize;
+        let rba = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
+        self.power_on_self_test();
+        match media {
+            0 => {
+                // no-emulation: 像を指定セグメントへ (count は 512B 単位)
+                let seg = if load_seg == 0 { 0x07C0 } else { load_seg };
+                let dst = (seg as usize) << 4;
+                let len = count * 512;
+                let src = image
+                    .get(rba * SEC..rba * SEC + len)
+                    .ok_or("ブート像が ISO からはみ出している")?;
+                self.mem[dst..dst + len].copy_from_slice(src);
+                self.cd = Some(image);
+                self.cpu.set_cs_ip(seg, 0);
+                self.cpu.regs[cpu::DX] = 0x00E0; // DL = CD
+            }
+            1..=3 => {
+                // floppy emulation: 埋め込んだフロッピー像をドライブ A に
+                let size = match media {
+                    1 => 1_228_800,
+                    2 => 1_474_560,
+                    _ => 2_949_120,
+                };
+                let fd = image
+                    .get(rba * SEC..rba * SEC + size)
+                    .ok_or("フロッピー像が ISO からはみ出している")?
+                    .to_vec();
+                let d = Disk::from_image(fd)?;
+                let boot = d.read_sector(0).ok_or("ブートセクタが読めない")?.to_vec();
+                self.disk = Some(d);
+                self.cd = Some(image);
+                self.mem[0x7C00..0x7E00].copy_from_slice(&boot);
+                self.cpu.set_cs_ip(0x0000, 0x7C00);
+                self.cpu.regs[cpu::DX] = 0x0000;
+            }
+            m => {
+                return Err(format!(
+                    "El Torito のメディア種別 {m} は未対応 (HDD エミュレーション)"
+                ))
+            }
+        }
+        Ok(())
+    }
+
     /// テストROM (test386.asm など) を生で実行する。
     ///
     /// ROMをRAM上端の1MB境界に合わせて置き (64KBなら 0xF0000〜)、リセット直後の
