@@ -152,17 +152,18 @@ jobs:
             exit ${RC:-0}
           } > report-lint.md
 
-      # **大物の門番** (2026-08-22): 1MB 超のファイルが入っていたら落とす。
-      # FreeDOS+DOOM の像 4.5MB が public に commit され、履歴を書き換えて消した事故の再発防止。
+      # **持ち込み物の門番** (2026-08-22): 1MB 超、または著作物になりそうな拡張子で
+      # 隣に同名のソースが無い binary が入っていたら落とす。FreeDOS+DOOM の像 4.5MB が
+      # public に commit され、履歴を書き換えて消した事故の再発防止。
       # .gitignore は約束、これは仕組み。push ruleset は Organization 限定で個人の public には付かない。
       # PR では base からの範囲も見る (入れてすぐ消しても blob は履歴に残るため)
-      - name: 大物検査
+      - name: 持ち込み物検査
         id: bigfile
         continue-on-error: true
         run: |
           set -o pipefail
           {
-            echo '## 大物検査 — `tools/build/check-large-files.sh` (1MB 超を拒む)'
+            echo '## 持ち込み物検査 — `tools/build/check-large-files.sh` (1MB 超・出自不明の binary を拒む)'
             echo '```'
             RANGE=
             if [ -n "${{ github.base_ref }}" ]; then
@@ -189,7 +190,7 @@ jobs:
             echo "| ビルド | wasm | ${{ steps.wasm.outcome == 'success' && '✅' || '❌' }} |"
             echo "| 静的 | 整形 | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |"
             echo "| 静的 | lint | ${{ steps.lint.outcome == 'success' && '✅' || '❌' }} |"
-            echo "| 静的 | 大物検査 (1MB 超) | ${{ steps.bigfile.outcome == 'success' && '✅' || '❌' }} |"
+            echo "| 静的 | 持ち込み物 (1MB 超・出自不明の binary) | ${{ steps.bigfile.outcome == 'success' && '✅' || '❌' }} |"
             echo ''
             echo '上の層は別ジョブが受け持つ: **2 CPU層** (照合・互換) →'
             echo '**3 機械層** (OS起動回帰・wasm起動) → **4 機能層**'
@@ -253,8 +254,8 @@ jobs:
       - uses: ./.github/actions/publish-check
         if: always()
         with:
-          name: 1 土台 — 大物検査 (静的)
-          title: ${{ steps.bigfile.outcome == 'success' && '1MB 超のファイルなし' || '1MB 超のファイルが入っている (像は rustx86-images へ)' }}
+          name: 1 土台 — 持ち込み物 (静的)
+          title: ${{ steps.bigfile.outcome == 'success' && '持ち込み物なし (1MB 超・出自不明の binary)' || '持ち込み物あり — 像は rustx86-images へ、自作なら同名のソースを隣に' }}
           outcome: ${{ steps.bigfile.outcome }}
           report-file: report-bigfile.md
           token: ${{ steps.app.outputs.token || github.token }}

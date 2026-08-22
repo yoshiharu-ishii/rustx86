@@ -178,7 +178,7 @@ wasmビルドのレポートには **`.wasm` のサイズ**も出る (初回 196
 
 検査を足す前に「**その事故は構造で不可能にできないか**」を先に問う。
 
-## 大物の門番 — 1MB 超を入れさせない (2026-08-22)
+## 持ち込み物の門番 — 1MB 超と出自不明の binary を入れさせない (2026-08-22)
 
 FreeDOS + DOOM のディスクイメージ (4.5MB、GPL/シェアウェア) が public のこのリポジトリに
 commit された。`.gitignore` が `disk-x.img.gz` のような**名指し**で、後から増えた
@@ -187,10 +187,17 @@ commit された。`.gitignore` が `disk-x.img.gz` のような**名指し**で
 
 `.gitignore` は「置かない約束」で、これは「置けない仕組み」:
 
-- **CI**: 土台ジョブの `大物検査` (`tools/build/check-large-files.sh`)。HEAD のツリーと、
-  PR なら base からの範囲が到達させる blob (入れてすぐ消しても履歴に残る) を見て、
-  1MB 超があれば赤。`OK (全層)` は main の必須チェックなので merge できない
-- **手元**: `.githooks/pre-commit` が staged の 1MB 超を止める。`git config core.hooksPath .githooks`
+- **CI**: 土台ジョブの `持ち込み物検査` (`tools/build/check-large-files.sh`)。HEAD のツリーと、
+  PR なら base からの範囲が到達させる blob (入れてすぐ消しても履歴に残る) を見る。
+  網は 2 つで、拾うものが違うので両方:
+  1. **容量** 1MB 超 — 名前に関係なく像の類いは全部ここに掛かる
+  2. **拡張子** — 小さくても形から怪しいもの (.COM/.EXE/.ROM/.WAD/音/書庫/フォント/…)。
+     ただし**隣に同名のソース** (.asm/.c/.rs/…) があれば自作物として通す
+     (`asm/hello.bin` ↔ `hello.asm`、`tools/guest/air/AIR.COM` ↔ `air.asm`)。
+     出自がリポジトリの中にある binary だけが住める
+  どちらかに掛かれば赤。`OK (全層)` は main の必須チェックなので merge できない。
+  速さは `git ls-tree` の一覧を舐めるだけなのでミリ秒
+- **手元**: `.githooks/pre-commit` が同じスクリプトを `--staged` で呼ぶ。`git config core.hooksPath .githooks`
   で有効化 (クローンごとの設定なので CI が最後の砦)
 - **サーバ側 (push ruleset の max_file_size)** は Organization 配下のリポジトリ限定で、
   個人所有の public には付けられない (422 "Source public repos cannot have push rules")。
