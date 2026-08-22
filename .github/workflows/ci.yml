@@ -447,7 +447,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/sh/make-test-iso.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -458,6 +458,7 @@ jobs:
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
+          tools/images/sh/make-test-iso.sh
 
       - name: wasm-pack の用意
         run: |
@@ -564,7 +565,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/sh/make-test-iso.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -575,6 +576,7 @@ jobs:
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
+          tools/images/sh/make-test-iso.sh
 
       - name: 保存と復元の検査
         id: snaptest
@@ -642,7 +644,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/sh/make-test-iso.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -653,6 +655,7 @@ jobs:
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
+          tools/images/sh/make-test-iso.sh
 
       - name: 起動回帰 (プロンプト到達 + スクショ + MIPS計測)
         id: regress
@@ -758,7 +761,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: images
-          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
+          key: os-images-v5-${{ hashFiles('tools/images/sh/fetch-images.sh', 'tools/images/sh/extract-vmlinux.sh', 'tools/images/sh/make-mini-initramfs.sh', 'tools/images/sh/make-test-iso.sh', 'tools/images/in-linux.sh', 'tools/images/Dockerfile') }}
 
       - name: イメージの取得と組み立て
         if: steps.img-cache.outputs.cache-hit != 'true'
@@ -769,6 +772,7 @@ jobs:
           tools/images/sh/fetch-images.sh linux
           tools/images/sh/extract-vmlinux.sh
           tools/images/sh/make-mini-initramfs.sh
+          tools/images/sh/make-test-iso.sh
 
       - name: wasm-pack の用意
         run: |
