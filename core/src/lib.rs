@@ -189,6 +189,9 @@ pub struct Machine {
     pub console: Vec<u8>,
     /// ブートしたディスク。INT 13h のHLEが読む
     pub disk: Option<Disk>,
+    /// ハードディスク (INT 13h のドライブ 0x80)。`hdd_attach` で挿す。
+    /// 16bit機のための器で、Linux は virtio-blk を使う (blk_attach)
+    pub hdd: Option<Disk>,
     /// 最初に起きたCPU例外の (ベクタ番号, CS, IP)。
     /// 実OSを動かすと「どこで壊れたか」だけが手がかりになるので控えておく
     pub first_fault: Option<(u8, u16, u32)>,
@@ -396,6 +399,7 @@ impl Machine {
             jit_budget: 0,
             console: Vec::new(),
             disk: None,
+            hdd: None,
             first_fault: None,
             int_counts: vec![0; 256],
             int_first: vec![(0, 0); 256],
@@ -580,7 +584,15 @@ impl Machine {
     /// 従来はpe()で粗く見ていた = 解凍ステブ540Mで払い続けていた)
     #[inline]
     fn guard_needed(&self) -> bool {
-        self.cpu.pe() && (self.cpu.pg() || self.cpu.cpl() == 3 || self.cpu.vm86())
+        // 16bit の保護モード (CS が 16bit のまま PE) は DOS エクステンダの世界 —
+        // DOS/16M (DOOM) はリング0でもセグメント例外 (#GP) を日常的に起こして
+        // 自分の handler で裁く。ここも控えが要る (Linux の解凍ステブは 32bit
+        // なので従来どおり省ける)
+        self.cpu.pe()
+            && (self.cpu.pg()
+                || self.cpu.cpl() == 3
+                || self.cpu.vm86()
+                || !self.cpu.seg_is32(cpu::CS))
     }
 
     /// Boxの器は使い回して確保を避ける
@@ -766,6 +778,19 @@ impl Machine {
             dev::card::virtio_blk::pci_function(dev::card::virtio_blk::IRQ_BLK),
         );
         self.devices.blk = Some(dev::VirtioBlk::new(image));
+    }
+
+    /// BIOS のハードディスク (INT 13h ドライブ 0x80) を挿す。16bit機 (DOS) 用 —
+    /// DOS は BIOS 経由でしかディスクを読まないので、ATA の素子は要らず
+    /// 「像のセクタを写す」だけで C: が生える。フロッピーから起動したまま
+    /// C: が見える (NIC/virtio-blk と同じ入力口の流儀: 呼ばなければ無い)。
+    /// 形状は 16ヘッド×63セクタ固定 ([`Disk::hdd_from_image`])
+    pub fn hdd_attach(&mut self, image: Vec<u8>) -> Result<(), String> {
+        let disk = Disk::hdd_from_image(image)?;
+        self.hdd = Some(disk);
+        // BDA 0x475 = ハードディスクの台数。DOS のカーネルはここも見る
+        self.write8(0x475, 1);
+        Ok(())
     }
 
     /// ディスクの中身を覗く (テスト・検証用)。ゲストが書いた結果を外から確かめる

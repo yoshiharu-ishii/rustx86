@@ -5,7 +5,7 @@
 //! がまず入り、フォーク先ではSSE/AVXやロングモードもこの空間に積まれる。
 //! **伸びる場所を1ファイルに隔離する**のが、この分割の最大の狙い。
 
-use super::operand::{fetch8, modrm, read_op16, Operand};
+use super::operand::{fetch8, modrm, read_op16, write_op16, Operand};
 use super::*;
 use crate::Machine;
 
@@ -160,6 +160,70 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 }
             }
         }
+        // LAR / LSL: セレクタの記述子から「アクセス権」「limit」を読み出す。
+        // 通れば ZF=1 と値、通らなければ ZF=0 でレジスタは不変 (例外にはしない)。
+        // DOS/16M (DOOM の DOS エクステンダ) が自分の記述子を LAR で検分する
+        0x02 | 0x03 => {
+            let (reg, rm) = modrm(m, d);
+            let sel = read_op16(m, &rm);
+            let lar = op2 == 0x02;
+            let result: Option<u32> = 'v: {
+                if sel & !0x3 == 0 {
+                    break 'v None; // ヌル
+                }
+                let (tbase, tlimit) = super::segment::descriptor_table(m, sel);
+                let off = (sel & !0x7) as u32;
+                if off + 7 > tlimit {
+                    break 'v None; // 表の外
+                }
+                let a = tbase.wrapping_add(off);
+                let prev_sys = m.sys_access.replace(true);
+                let lo = m.read32(a);
+                let hi = m.read32(a.wrapping_add(4));
+                m.sys_access.set(prev_sys);
+                let access = ((hi >> 8) & 0xFF) as u8;
+                if access & 0x80 == 0 {
+                    break 'v None; // 不在
+                }
+                let ty = access & 0x1F;
+                if access & 0x10 == 0 {
+                    // システム記述子: LAR は 0/8/A/D を拒み、LSL は TSS/LDT だけ通す
+                    let ok = if lar {
+                        !matches!(ty, 0 | 8 | 0xA | 0xD)
+                    } else {
+                        matches!(ty, 1 | 2 | 3 | 9 | 0xB)
+                    };
+                    if !ok {
+                        break 'v None;
+                    }
+                } else {
+                    // コード/データ: 適合コード以外は DPL >= max(CPL, RPL)
+                    let code = access & 0x08 != 0;
+                    let conforming = code && access & 0x04 != 0;
+                    let dpl = (access >> 5) & 3;
+                    if !conforming && (dpl < m.cpu.cpl() || dpl < (sel & 3) as u8) {
+                        break 'v None;
+                    }
+                }
+                if lar {
+                    // アクセス権: 上位ダブルワードの bit 8-23 (16bit形は bit 8-15 だけ)
+                    Some(if d.opsize32 { hi & 0x00FF_FF00 } else { hi & 0xFF00 })
+                } else {
+                    let mut limit = (lo & 0xFFFF) | (hi & 0x000F_0000);
+                    if hi & 0x0080_0000 != 0 {
+                        limit = (limit << 12) | 0xFFF;
+                    }
+                    Some(limit)
+                }
+            };
+            match result {
+                Some(v) => {
+                    m.cpu.set_reg_w(reg as usize, v, d.opsize32);
+                    m.cpu.set_flag(super::ZF, true);
+                }
+                None => m.cpu.set_flag(super::ZF, false),
+            }
+        }
         // システム表の操作
         0x01 => {
             let (reg, rm) = modrm(m, d);
@@ -177,6 +241,42 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                     m.cpu.idtr_limit = m.read16(*addr);
                     let base = m.read32(addr.wrapping_add(2));
                     m.cpu.idtr_base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
+                }
+                // SGDT / SIDT: 表の在りかを書き出す (limit 2バイト + base 4バイト)。
+                // 16bit形は base の最上位バイトが 0 になる (286互換の名残、LGDTと対)
+                (0 | 1, Operand::Mem { addr, .. }) => {
+                    let (limit, base) = if reg == 0 {
+                        (m.cpu.gdtr_limit, m.cpu.gdtr_base)
+                    } else {
+                        (m.cpu.idtr_limit, m.cpu.idtr_base)
+                    };
+                    m.write16(*addr, limit);
+                    let base = if d.opsize32 { base } else { base & 0x00FF_FFFF };
+                    m.write32(addr.wrapping_add(2), base);
+                }
+                // SMSW: CR0 の下位16bit (286 の MSW)。DOS/16M (DOOM の DOS エクステンダ)
+                // は保護モードへの出入りをこの 286 流儀でやる
+                (4, _) => {
+                    let v = if d.opsize32 && matches!(rm, Operand::Reg(_)) {
+                        // レジスタ形の32bit幅は CR0 全体
+                        m.cpu.cr0
+                    } else {
+                        m.cpu.cr0 & 0xFFFF
+                    };
+                    write_op16(m, &rm, v as u16);
+                }
+                // LMSW: CR0 の下位4bit (PE/MP/EM/TS) だけを書く。**PE は落とせない**
+                // (286 には戻る命令が無かった — 386 でも LMSW で PE を 0 にはできない)。
+                // PE が立つ瞬間の作法は MOV CR0 と同じ
+                (6, _) => {
+                    let v = read_op16(m, &rm) as u32 & 0xF;
+                    let was_pe = m.cpu.pe();
+                    m.cpu.cr0 = (m.cpu.cr0 & !0xE) | v | (m.cpu.cr0 & 1);
+                    if !was_pe && m.cpu.pe() {
+                        for i in 0..6 {
+                            m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
+                        }
+                    }
                 }
                 // INVLPG: TLBの1エントリを無効化する
                 (7, Operand::Mem { addr, .. }) => m.tlb_flush_page(*addr),
@@ -224,6 +324,22 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                         // 初期化する (リアルモードは写しを遅延評価しているため)
                         if !was_pe && m.cpu.pe() {
                             for i in 0..6 {
+                                m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
+                            }
+                        }
+                        // PE が落ちた瞬間 (DOS エクステンダの実モード復帰): 実CPUは
+                        // 隠しレジスタの base を**次のロードまで使い続ける**ので、
+                        // `mov cr0` の直後の far jmp は PM の記述子の base で
+                        // フェッチされる。リアルモードの写しは sel×16 を遅延評価する
+                        // 作法なので、base から逆算した実モードのセレクタを sregs に
+                        // 置いて辻褄を合わせる (DOS/16M は CS=0x18 のまま jmp far を
+                        // 打ち、0x180 からゼロを実行して迷子になった — 2026-08-22)
+                        if was_pe && !m.cpu.pe() {
+                            for i in 0..6 {
+                                let b = m.cpu.hidden[i].base;
+                                if b & 0xF == 0 && b < 0x10_0000 {
+                                    m.cpu.sregs[i] = (b >> 4) as u16;
+                                }
                                 m.cpu.hidden[i] = SegHidden::real(m.cpu.sregs[i]);
                             }
                         }

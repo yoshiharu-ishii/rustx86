@@ -184,7 +184,10 @@ function setPauseFace(paused) {
 /** 最後に起動したイメージの名前。スナップショットに添える */
 let lastLabel = '';
 
-function boot(image, label) {
+/** 最後に挿した HDD 像 (再起動で同じものを挿し直す)。無ければ null */
+let lastHdd = null;
+
+function boot(image, label, hdd = null) {
   lastLabel = label;
   $('welcomePane').hidden = true;
   $('screen').hidden = false;
@@ -207,6 +210,10 @@ function boot(image, label) {
     return;
   }
   lastImage = image;
+  // BIOS のハードディスク (C:)。**1命令も走る前に挿す** — DOS はプロンプトまでに
+  // C: を数えるので、後から挿しても見えない (電源投入時にしかできないのは NIC と同じ)
+  lastHdd = hdd;
+  if (hdd) machine.hddAttach(hdd);
   term.reset();
   machine.onFrame = (cells, row, col, redraw) => {
     term.sample(cells, row, col);
@@ -870,7 +877,7 @@ $('power').addEventListener('click', async () => {
     // 素性 (bootOrigin) は残す — 同じものからもう一度立ち上げるため
     setStatus('電源を切りました。もう一度押すと同じイメージで立ち上がります');
   } else if (lastImage) {
-    boot(lastImage, lastLabel);
+    boot(lastImage, lastLabel, lastHdd);
     startScript(scriptOf(current));
   }
   syncControls();
@@ -908,7 +915,7 @@ $('boot').addEventListener('click', () => {
   // 止まったまま「ネットに繋がらない」ように見える。
   // ラベルも保つ (ここで 'ディスク' に潰すと、左のディスク欄が化ける)
   if (lastImage) {
-    boot(lastImage, lastLabel || 'ディスク');
+    boot(lastImage, lastLabel || 'ディスク', lastHdd);
     startScript(scriptOf(current));
   }
 });
@@ -1323,8 +1330,23 @@ async function bootFromUrl(m = current) {
   try {
     const r = await fetch(m.image);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const image = new Uint8Array(await r.arrayBuffer());
+    // ハードディスク像 (C:) がある項はそれも取ってから電源を入れる。.gz は輸送路の
+    // 圧縮で、ここ (ホスト) で1回だけ解く (Linux のディスクと同じ作法)
+    let hdd = null;
+    if (m.hdd) {
+      setStatus(`${m.label} のハードディスク像を取得中…`);
+      const h = await fetch(m.hdd);
+      if (!h.ok) throw new Error(`${m.hdd}: HTTP ${h.status}`);
+      let bytes = await h.arrayBuffer();
+      if (m.hdd.endsWith('.gz')) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        bytes = await new Response(stream).arrayBuffer();
+      }
+      hdd = new Uint8Array(bytes);
+    }
     term.reset();
-    boot(new Uint8Array(await r.arrayBuffer()), m.image.replace('./', ''));
+    boot(image, m.image.replace('./', ''), hdd);
   } catch (e) {
     setStatus(
       `${m.image.replace('./', '')} が見つからない (${e.message})。イメージをここにドロップしてください`,

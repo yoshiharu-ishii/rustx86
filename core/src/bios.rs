@@ -456,12 +456,33 @@ impl Machine {
             0x13 => self.bios_disk(ah),
 
             // --- INT 15h: システムサービス ---
-            0x15 => {
-                // 未対応の機能は「サポートしていない」と答える。
-                // OSは戻り値を見て別の手段へ回るので、ここで落としてはいけない
-                self.cpu.set_flag_cf(true);
-                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x8600;
-            }
+            0x15 => match ah {
+                // AH=88: 1MB より上の拡張メモリ (KB)。DOS エクステンダ (DOS/4GW 等) は
+                // ここで「32bit で使える RAM」を知る — 答えないと DOOM は
+                // 「メモリが足りない」で起動しない。16bit 機の RAM は 16MB
+                0x88 => {
+                    let ext_kb = (self.mem.len().saturating_sub(0x10_0000) / 1024).min(0xFFFF);
+                    self.cpu.regs[cpu::AX] = ext_kb as u32;
+                    self.cpu.set_flag_cf(false);
+                }
+                // AX=E801: 同じことを 1〜16MB (KB) と 16MB 以上 (64KB 単位) に分けて
+                0xE8 if self.cpu.regs[cpu::AX] & 0xFF == 0x01 => {
+                    let ext = self.mem.len().saturating_sub(0x10_0000);
+                    let low_kb = (ext / 1024).min(0x3C00) as u32; // 15MB まで
+                    let high_blocks = (self.mem.len().saturating_sub(0x100_0000) / 65536) as u32;
+                    self.cpu.regs[cpu::AX] = low_kb;
+                    self.cpu.regs[cpu::CX] = low_kb;
+                    self.cpu.regs[cpu::BX] = high_blocks;
+                    self.cpu.regs[cpu::DX] = high_blocks;
+                    self.cpu.set_flag_cf(false);
+                }
+                _ => {
+                    // 未対応の機能は「サポートしていない」と答える。
+                    // OSは戻り値を見て別の手段へ回るので、ここで落としてはいけない
+                    self.cpu.set_flag_cf(true);
+                    self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x8600;
+                }
+            },
 
             // --- INT 16h: キーボード ---
             //
@@ -562,6 +583,13 @@ impl Machine {
                 }
                 _ => panic!("INT 1Ah AH={ah:#04x} 未実装"),
             },
+
+            // --- INT 67h: EMS / VCPI ---
+            // EMM は積んでいない。実 BIOS にもこの入口は無く、IVT の既定 (IRET だけ)
+            // へ落ちる — つまり**何もせず戻る**のが正解。DOS/16M (DOOM の DOS
+            // エクステンダ) は AH=DE で VCPI の有無を聞き、AH が DE のまま戻れば
+            // 「無い」と判断して素の 386 切替へ進む
+            0x67 => {}
 
             _ => panic!(
                 "INT {n:#04x} AH={ah:#04x} 未実装 (CS:IP={:04x}:{:04x})",
@@ -804,11 +832,26 @@ impl Machine {
         }
     }
 
-    /// INT 13h。ディスクイメージの該当セクタをメモリへ写す
+    /// INT 13h。ディスクイメージの該当セクタをメモリへ写す。
+    ///
+    /// ドライブは DL で選ぶ: 0x00 = フロッピー A: (起動した像)、0x80 = ハードディスク C:
+    /// (`hdd_attach` で挿した像)。それ以外は「無い」(タイムアウト)
     fn bios_disk(&mut self, ah: u8) {
-        let Some(disk) = &self.disk else {
+        let dl = (self.cpu.regs[cpu::DX] & 0xFF) as u8;
+        let hdd = dl & 0x80 != 0;
+        let present = if hdd {
+            dl == 0x80 && self.hdd.is_some()
+        } else {
+            dl == 0 && self.disk.is_some()
+        };
+        if !present {
             self.disk_error(0x80); // タイムアウト = ドライブ無し
             return;
+        }
+        let disk = if hdd {
+            self.hdd.as_ref().unwrap()
+        } else {
+            self.disk.as_ref().unwrap()
         };
         match ah {
             // AH=00: リセット。何もせず成功
@@ -853,7 +896,11 @@ impl Machine {
                     for (i, b) in buf.iter_mut().enumerate() {
                         *b = self.read8(addr.wrapping_add(i as u32));
                     }
-                    let d = self.disk.as_mut().unwrap();
+                    let d = if hdd {
+                        self.hdd.as_mut().unwrap()
+                    } else {
+                        self.disk.as_mut().unwrap()
+                    };
                     for i in 0..count {
                         let s = &buf[i * disk::SECTOR_SIZE..(i + 1) * disk::SECTOR_SIZE];
                         if !d.write_sector(lba + i, s) {
@@ -870,12 +917,23 @@ impl Machine {
                 self.cpu.regs[cpu::CX] =
                     ((((c - 1) & 0xFF) << 8) | (((c - 1) >> 2) & 0xC0) | s as u16) as u32;
                 self.cpu.regs[cpu::DX] = (((h - 1) as u32) << 8) | 1; // DL = ドライブ台数
-                self.cpu.regs[cpu::BX] = (self.cpu.regs[cpu::BX] & 0xFF00) | 0x04; // 1.44MB
+                if !hdd {
+                    self.cpu.regs[cpu::BX] = (self.cpu.regs[cpu::BX] & 0xFF00) | 0x04;
+                    // 1.44MB
+                }
                 self.disk_ok(0);
             }
-            // AH=15: ドライブの種類
+            // AH=15: ドライブの種類。フロッピー = 1 (交換検知なし)、
+            // ハードディスク = 3 + CX:DX にセクタ総数
             0x15 => {
-                self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x0100;
+                if hdd {
+                    let total = disk.total_sectors() as u32;
+                    self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x0300;
+                    self.cpu.regs[cpu::CX] = total >> 16;
+                    self.cpu.regs[cpu::DX] = total & 0xFFFF;
+                } else {
+                    self.cpu.regs[cpu::AX] = (self.cpu.regs[cpu::AX] & 0x00FF) | 0x0100;
+                }
                 self.cpu.set_flag_cf(false);
             }
             // AH=16: メディア交換の有無 / AH=17,18: フォーマット準備。
