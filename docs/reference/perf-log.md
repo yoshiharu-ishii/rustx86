@@ -1218,3 +1218,23 @@ gcc窓 -5〜11%で、全体も5組中4勝。命令数が厳密に減る変更 (�
 emits_valid_module_skeletonが据え付けバッチ化 (f838391) の export
 "b"→"b0" 改名以降ずっと割れていた (CIがwasm単体テストを回していない穴。
 別タスク化済み)。針を"b0"+index非依存に修理。
+
+## 2026-08-22: G1〜G3 — 画素の配管から 3MB×3 回の仕事を消す
+
+第6ラウンド調査 ([gfx-roadmap](gfx-roadmap.md)) の最初の玉。LFB の一枚は
+Worker で 3MB を写し、main でバイト単位に [pad,R,G,B]→[R,G,B,255] へ詰め替え
+(node 実測 3.7ms/枚)、**誰も参照しないオフスクリーン canvas** と表示 canvas の
+2回 putImageData していた。
+
+直し: (1) オフスクリーン canvas を撤去 (G1)、(2) 詰め替えを u32 1 演算に
+(`(s>>>8)|0xff000000`、G2)、(3) それを Worker 側で写すついでに行い、main は
+届いたバッファに ImageData を被せて putImageData 1回だけ (G3)。バッファは
+従来どおり ack で往復・再利用。BE ホストの保険として fmt='raw' 経路は残す。
+
+判定 (ブラウザ実走、Linux (フレームバッファ) + bounce): main の
+`putImageData` 平均 **0.08ms/枚・最大 0.5ms** (640×480)、bounce の8色が
+ソースの pix(R,G,B) と完全一致 (BGR 入れ替え無し)。ゲストの遷移には
+触れていないので指紋の門番は無傷。
+
+副産物: `Lfb::bpp` は 32 固定で、24bpp のコメント (「24bpp、赤が先頭」) は
+死んだ記述だった — 書き換えた。次は G4/G5 (Worker 側の行比較で送信スキップ)。
