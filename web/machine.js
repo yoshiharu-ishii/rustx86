@@ -90,6 +90,12 @@ export class Machine {
     this.onFrame = null;
   }
 
+  /** BIOS のハードディスク (INT 13h ドライブ 0x80 = C:) を挿す。起動直後に呼ぶ —
+      DOS はプロンプトまでに C: を数えるので、後から挿しても見えない */
+  hddAttach(image) {
+    this.emu.hdd_attach(image);
+  }
+
   /** テキストVRAMをそのまま見る (コピーしない) */
   vram() {
     return new Uint8Array(

@@ -165,6 +165,14 @@ impl Emulator {
         self.m.blk_attach(image.to_vec());
     }
 
+    /// BIOS のハードディスク (INT 13h ドライブ 0x80 = C:) を挿す。16bit機 (DOS) 用。
+    /// 大きさは 512 の倍数、CHS の上限 504MB まで
+    pub fn hdd_attach(&mut self, image: &[u8]) -> Result<(), JsError> {
+        self.m
+            .hdd_attach(image.to_vec())
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// 起動済みスナップショットから機械を丸ごと復元する。
     ///
     /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を

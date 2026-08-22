@@ -87,6 +87,29 @@ export const MACHINES = [
   },
   {
     group: 'OSライブラリ',
+    id: 'freedos-doom',
+    label: 'FreeDOS + DOOM',
+    sub: 'DOS — C: に DOOM (shareware 1.9)',
+    image: './fd14boot.img',
+    // BIOS INT 13h のドライブ 0x80。フロッピーから起動したまま C: が見える
+    hdd: './doom-hdd.img.gz',
+    status: 'ok',
+    note:
+      'FreeDOS のフロッピーで起動し、BIOS のハードディスク (C:、16MB の FAT16) に ' +
+      'DOOM shareware 1.9 が入っている。プロンプトまで自動で進み C:\\DOOM に移るので、' +
+      '**DOOM** と打つ。mode 13h の画面にタイトルが出て、PC スピーカーは無音 ' +
+      '(音楽は OPL2 = 6t 待ち)。tools/images/sh/make-doom-hdd.sh で作る',
+    script: [
+      { when: 'FreeDOS kernel', send: { scancodes: [0x3f, 0xbf] } }, // F5
+      { when: 'full shell command line', send: '\\FREEDOS\\BIN\\COMMAND.COM\n' },
+      { when: 'A:\\>', send: 'C:\nCD \\DOOM\n' },
+    ],
+    source: 'https://www.gamers.org/pub/idgames/idstuff/doom/doom19s.zip',
+    sourceLabel: 'DOOM shareware 1.9 (idgames)',
+    file: 'doom-hdd.img.gz (make-doom-hdd.sh の産物) + fd14boot.img',
+  },
+  {
+    group: 'OSライブラリ',
     id: 'linux',
     label: 'Linux (コンソール)',
     sub: '画面はシリアル端末 (ttyS0) — カーネルの文字出力をブラウザの端末が描く',
