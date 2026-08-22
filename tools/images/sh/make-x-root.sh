@@ -194,6 +194,33 @@ ListBoxFontNameXft="IPAexGothic:size=10"
 LabelFontNameXft="IPAexGothic:size=10"
 ClockFontNameXft="IPAexGothic:size=10"
 PREFS
+# dillo (FLTK/Xft) は書体を**名指し**で開き、fontconfig の字形単位のフォールバックは
+# 効かない — 日本語のページが四角 (tofu) になった (2026-08-22)。dillorc で IPAex を
+# 指定しても通らない: Dillo は FLTK の font 一覧と名前を突き合わせるが、FLTK は
+# FcNameUnparse の「:」の手前 = **家族名の並び "IPAexGothic,IPAexゴシック"** を
+# 名前にするので "IPAexGothic" は一覧に無く、並びそのものを書いても not found。
+# そこで fontconfig 側で「DejaVu を頼まれたら IPAex を返す」— Xft を使う全員
+# (dillo / icewm / xterm -fa) に効き、Latin も IPAex に入っているので困らない
+mkdir -p etc/fonts
+cat > etc/fonts/local.conf <<'FONTS'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <!-- rustx86: 日本語が出る書体へ (font-ipaex)。dillo の既定は DejaVu 名指し -->
+  <match target="pattern">
+    <test name="family"><string>DejaVu Sans</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>IPAexGothic</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>DejaVu Serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>IPAexMincho</string></edit>
+  </match>
+  <match target="pattern">
+    <test name="family"><string>DejaVu Sans Mono</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>IPAexGothic</string></edit>
+  </match>
+</fontconfig>
+FONTS
 # root の行 — xterm は SHELL の他に /etc/passwd も引き、無いと
 # "No absolute path found for shell" と警告する (動きはする)。whoami 等にも効く
 mkdir -p etc
