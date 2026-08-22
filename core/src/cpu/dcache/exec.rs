@@ -4,10 +4,11 @@
 //! (alu8/alu_w/shift_rot/condition/push_w/pop_w、string::exec) を呼ぶ。
 //! ここにあるのは「オペランドの取り回し」だけである。
 
-use super::super::alu::{alu8, alu_w, condition, inc_dec_w};
+use super::super::alu::{alu8, alu_w, condition, inc_dec_w, set_szp_w};
 use super::super::operand::{pop_w, push_w};
 use super::super::shift::shift_rot;
-use super::super::{sp_write, string, Decoder, AX, BP, CF, OF, SP, SS};
+use super::super::twobyte;
+use super::super::{sp_write, string, Decoder, AX, BP, CF, DX, OF, SP, SS};
 use super::{MemRef, Rm, Uop};
 use crate::Machine;
 
@@ -31,6 +32,25 @@ pub(super) fn is_control(u: &Uop) -> bool {
     )
 }
 
+/// JIT の語彙に無い uop のうち、従来は従来経路落ち = チェーン切断で次命令が
+/// JIT の受け口になっていたもの (C16 で語彙入りした家系)。実行後に再プローブ
+/// させて、JIT で走れる後続ブロックを interp に取り残さない
+pub(super) fn reprobe_after(u: &Uop) -> bool {
+    matches!(
+        u,
+        Uop::MovsxB { .. }
+            | Uop::MovsxW { .. }
+            | Uop::Cmov { .. }
+            | Uop::TestAImm { .. }
+            | Uop::Test8AImm { .. }
+            | Uop::ImulRRmI { .. }
+            | Uop::Cdq
+            | Uop::BitScan { .. }
+            | Uop::ShxdImm { .. }
+            | Uop::ShxdCl { .. }
+    )
+}
+
 pub(super) fn may_touch_memory(u: &Uop) -> bool {
     let mem = |rm: &Rm| matches!(rm, Rm::Mem(_));
     match u {
@@ -43,7 +63,10 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::DecR { .. }
         | Uop::XchgAR { .. }
         | Uop::AluAImm { .. }
-        | Uop::Alu8AImm { .. } => false,
+        | Uop::Alu8AImm { .. }
+        | Uop::TestAImm { .. }
+        | Uop::Test8AImm { .. }
+        | Uop::Cdq => false,
         // translate-first済み (F1c-d5): 低速路に落ちるときだけ自前で控える
         Uop::MovRmR { .. }
         | Uop::MovRRm { .. }
@@ -51,6 +74,7 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::TestRmR { .. }
         | Uop::MovRmImm { .. }
         | Uop::MovzxB { .. }
+        | Uop::MovsxB { .. }
         | Uop::MovzxW { .. }
         | Uop::PushR { .. }
         | Uop::PopR { .. }
@@ -74,6 +98,12 @@ pub(super) fn may_touch_memory(u: &Uop) -> bool {
         | Uop::Grp3w { rm, .. }
         | Uop::SetCC { rm, .. }
         | Uop::ImulRRm { rm, .. }
+        | Uop::ImulRRmI { rm, .. }
+        | Uop::MovsxW { rm, .. }
+        | Uop::Cmov { rm, .. }
+        | Uop::BitScan { rm, .. }
+        | Uop::ShxdImm { rm, .. }
+        | Uop::ShxdCl { rm, .. }
         | Uop::ShiftRmImm { rm, .. }
         | Uop::ShiftRmCl { rm, .. } => mem(rm),
         // スタック・moffs・ストリング・grp5 (push/call間接等) は常にメモリ
@@ -296,6 +326,84 @@ fn cold_imul(m: &mut Machine, reg: u8, rm: Rm) {
     let ext = (r as i32 as i64) != r;
     m.cpu.set_flag(CF, ext);
     m.cpu.set_flag(OF, ext);
+}
+
+#[cold]
+#[inline(never)]
+fn cold_movsx8(m: &mut Machine, reg: u8, rm: Rm, prev_ip: u32) {
+    let v = match rm {
+        Rm::Reg(r) => m.cpu.reg8(r as usize),
+        Rm::Mem(mr) => {
+            let off = off_of(m, &mr);
+            match m.fast_read8(mr.seg as usize, off) {
+                Some(v) => v,
+                None => slow_read8(m, &mr, prev_ip),
+            }
+        }
+    };
+    m.cpu.regs[reg as usize] = v as i8 as i32 as u32;
+}
+
+#[cold]
+#[inline(never)]
+fn cold_cmov(m: &mut Machine, cc: u8, reg: u8, rm: Rm) {
+    // 読みは条件に関わらず行う (偽でもメモリオペランドのフォールトは起きる)
+    let v = read_rm32(m, rm);
+    if condition(&m.cpu, cc) {
+        m.cpu.regs[reg as usize] = v;
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_movsx16(m: &mut Machine, reg: u8, rm: Rm) {
+    let v = match rm {
+        Rm::Reg(r) => m.cpu.regs[r as usize] as u16,
+        Rm::Mem(mr) => m.read16(addr_of(m, &mr, 2, false)),
+    };
+    m.cpu.regs[reg as usize] = v as i16 as i32 as u32;
+}
+
+#[cold]
+#[inline(never)]
+fn cold_imul3(m: &mut Machine, reg: u8, rm: Rm, imm: u32) {
+    // IMUL r32, r/m32, imm (従来経路 onebyte 0x69/0x6B の32bit形の写し —
+    // cold_imul と同じフラグ規則: CF/OFは幅に収まらなかったかだけ)
+    let a = read_rm32(m, rm) as i32 as i64;
+    let r = a * (imm as i32 as i64);
+    m.cpu.regs[reg as usize] = r as u32;
+    let ext = (r as i32 as i64) != r;
+    m.cpu.set_flag(CF, ext);
+    m.cpu.set_flag(OF, ext);
+}
+
+#[cold]
+#[inline(never)]
+fn cold_bit_scan(m: &mut Machine, reg: u8, rm: Rm, reverse: bool) {
+    let v = read_rm32(m, rm);
+    if let Some(pos) = twobyte::bit_scan(&mut m.cpu, v, reverse) {
+        m.cpu.regs[reg as usize] = pos;
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cold_shxd(m: &mut Machine, rm: Rm, reg: u8, count: u8, left: bool) {
+    // SHLD/SHRD r/m32, r32, count。本体は twobyte::shxd (原本1つ)。
+    // count==0 は何もしない (フラグも不変) — 従来経路の早期returnと同じ
+    let count = (count & 0x1F) as u32;
+    if count == 0 {
+        return;
+    }
+    let (dst, addr) = read_rm32_addr(m, rm);
+    let src = m.cpu.regs[reg as usize];
+    let (r, cf) = twobyte::shxd(dst, src, count, left, true);
+    match addr {
+        Some(a) => m.write32(a, r),
+        None => write_rm32(m, rm, r),
+    }
+    m.cpu.set_flag(CF, cf);
+    set_szp_w(&mut m.cpu, r, true);
 }
 
 #[cold]
@@ -772,6 +880,36 @@ pub(super) fn exec(m: &mut Machine, u: Uop, prev_ip: u32) {
             m.cpu.regs[reg as usize] = v as u32;
         }
         Uop::ImulRRm { reg, rm } => cold_imul(m, reg, rm),
+        // C16 (ADR-0028): X窓の従来経路落ちを語彙へ。意味論は従来経路と同じ
+        // ヘルパ (alu_w / condition / twobyte::shxd / bit_scan) を呼ぶ
+        Uop::TestAImm { imm } => {
+            let a = m.cpu.regs[AX];
+            alu_w(&mut m.cpu, 4, a, imm, true);
+        }
+        Uop::Test8AImm { imm } => {
+            let a = m.cpu.reg8(0);
+            alu8(&mut m.cpu, 4, a, imm);
+        }
+        Uop::Cdq => {
+            let v = if m.cpu.regs[AX] & 0x8000_0000 != 0 {
+                0xFFFF_FFFF
+            } else {
+                0
+            };
+            m.cpu.regs[DX] = v;
+        }
+        // 稀uopは arm を太らせない (C11 の教訓: 嵩は I-cache の税 — ブートで
+        // 測って -2% だったので cold へ)
+        Uop::MovsxB { reg, rm } => cold_movsx8(m, reg, rm, prev_ip),
+        Uop::MovsxW { reg, rm } => cold_movsx16(m, reg, rm),
+        Uop::Cmov { cc, reg, rm } => cold_cmov(m, cc, reg, rm),
+        Uop::ImulRRmI { reg, rm, imm } => cold_imul3(m, reg, rm, imm),
+        Uop::BitScan { reg, rm, reverse } => cold_bit_scan(m, reg, rm, reverse),
+        Uop::ShxdImm { rm, reg, imm, left } => cold_shxd(m, rm, reg, imm, left),
+        Uop::ShxdCl { rm, reg, left } => {
+            let count = m.cpu.reg8(1); // CL
+            cold_shxd(m, rm, reg, count, left)
+        }
         Uop::StrOne { op, seg, o16 } => cold_strone(m, op, seg, o16),
         Uop::StrRep { op, seg, rep, o16 } => cold_strrep(m, op, seg, rep, o16),
     }
