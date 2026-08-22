@@ -282,8 +282,23 @@ setInterval(() => {
   if (linux) {
     // 起動の定規 (時間で統一、2026-08-13)。headless.mjs と同じ定義の秒数
     const boot = linux.bootSecs != null ? `起動 ${linux.bootSecs.toFixed(1)}s` : '';
+    // **電源オフ → 起動中 → 走っている速さ** の順に遷移する。機械を選んだだけの
+    // 状態を「起動中」と言うと、電源を入れたのかどうかが画面から分からない
+    // (VGA機の側は最初から電源オフと言っていた)。
     // アイドル中の数字は「時計を流しただけ」なので MIPS とは呼ばない
-    const run = linux.idle ? 'アイドル' : linux.mips ? `${linux.mips.toFixed(0)} MIPS` : '起動中';
+    const run = linux.paused
+      ? '停止中'
+      : !linux.booted
+        ? linux.busy
+          ? '起動中'
+          : '電源オフ'
+        : linux.idle
+          // シェルに着く前の休みは「アイドル」ではなく「起動中」— isolinux の
+          // boot: 待ちも HLT で休むので、着いたように見えてしまう
+          ? (linux.bootSecs == null ? '起動中' : 'アイドル')
+          : linux.mips
+            ? `${linux.mips.toFixed(0)} MIPS`
+            : '起動中';
     showState(
       run,
       boot || '—',
