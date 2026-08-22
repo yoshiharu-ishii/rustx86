@@ -86,6 +86,9 @@ fn bulk_stos(m: &mut Machine, width: u32, a32: bool) {
         {
             return;
         }
+        if m.devices.vga.planar && m.in_gfx_window(pa, page_remain) {
+            return; // Mode Y の窓はバイトごとの道
+        }
         // このページで埋められる要素数 (CXと残りバイトの小さい方)
         let n = cx.min((page_remain as u32) / width);
         if n == 0 {
@@ -134,6 +137,9 @@ fn bulk_movs(m: &mut Machine, src_seg: usize, width: u32, a32: bool) {
         if (dpa as u32) <= crate::bus::VRAM_TEXT_END
             && (dpa as u32 + d_remain as u32) > crate::bus::VRAM_TEXT_BASE
         {
+            return;
+        }
+        if m.devices.vga.planar && m.in_gfx_window(dpa, d_remain) {
             return;
         }
         let n = cx

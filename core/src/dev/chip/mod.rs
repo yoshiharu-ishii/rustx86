@@ -31,6 +31,7 @@ pub mod mouse;
 pub mod pic;
 pub mod pit;
 pub mod uart;
+pub mod vga;
 pub mod virtio;
 
 pub use cmos::Cmos;
@@ -42,4 +43,5 @@ pub use mouse::Mouse;
 pub use pic::Pic8259;
 pub use pit::Pit8254;
 pub use uart::Uart16550;
+pub use vga::Vga;
 pub use virtio::VirtioPci;

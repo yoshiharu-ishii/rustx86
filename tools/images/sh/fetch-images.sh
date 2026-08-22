@@ -276,14 +276,29 @@ build_test386() {
   cp "$WORK/test386-src/test386-EE-reference.txt" "$IMAGES/test386-EE-reference.txt"
 }
 
+# DOS 版 DOOM (shareware 1.9、再配布自由) を BIOS のハードディスク像 (C:) に。
+# idgames の doom19s.zip は DEICE の分割 (DOOMS_19.1/.2) で、結合すると PKZIP の
+# 自己解凍書庫 — unzip で開ける。DOOM.EXE は DOS/4GW 同梱、DOOM1.WAD は 4.2MB
+DOOM_URL=https://www.gamers.org/pub/idgames/idstuff/doom/doom19s.zip
+build_doom() {
+  say "DOOM shareware 1.9 (DOS 版) → C: の像"
+  mkdir -p "$WORK/doom"
+  fetch "$DOOM_URL" "$WORK/doom/doom19s.zip"
+  ( cd "$WORK/doom" && unzip -oq doom19s.zip \
+    && cat DOOMS_19.1 DOOMS_19.2 > DOOMS_19.EXE \
+    && mkdir -p unpacked && cd unpacked && unzip -oq ../DOOMS_19.EXE )
+  sh tools/images/sh/make-doom-hdd.sh "$WORK/doom/unpacked"
+}
+
 case "${1:-all}" in
   elks) build_elks ;;
+  doom) build_doom ;;
   freedos) build_freedos ;;
   freedos-boot) build_freedos_boot ;;
   linux) build_linux ;;
   test386) build_test386 ;;
   all) build_elks; build_freedos; build_linux ;;
-  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux|test386]" >&2; exit 1 ;;
+  *) echo "使い方: $0 [all|elks|freedos|freedos-boot|linux|test386|doom]" >&2; exit 1 ;;
 esac
 publish_to_web
 
