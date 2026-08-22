@@ -35,6 +35,11 @@ test('落とされたものを中身で見分ける', () => {
   assert.ok(isBootable(disk()), '0x55AAがあれば起動できる');
   assert.ok(!isBootable(new Uint8Array([1, 2, 3])), '短すぎるものは起動できない');
   assert.ok(!isBootable(new Uint8Array(512)), '印が無ければ起動できない');
+  // ISO 9660: セクタ 16 (0x8000) の 1 バイト目から "CD001"。El Torito で起動する
+  const iso = new Uint8Array(0x8800);
+  iso.set([0x01, 0x43, 0x44, 0x30, 0x30, 0x31], 0x8000);
+  assert.ok(isBootable(iso), 'CD001 があれば ISO として起動できる');
+  assert.ok(!isKernel(iso), 'ISO をカーネルと間違えない');
   // **ELFの中に偶然0x55AAが居ても、カーネル判定が先に効く**ことを担保する
   const elfWithSig = new Uint8Array(0x300);
   elfWithSig.set([0x7f, 0x45, 0x4c, 0x46]);

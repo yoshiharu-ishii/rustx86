@@ -277,3 +277,41 @@ fn iso_lockstep() {
         }
     }
 }
+
+/// **実物**: Tiny Core Linux の ISO (isolinux 4.05) から Linux が上がり、tc@box: に着く。
+/// isolinux は `boot:` を出した直後にキーの待ち行列を捨てるので、Enter は少し間を
+/// 空けて 2 回打つ。像は fetch-images.sh tinycore (無ければ飛ばす)
+#[test]
+fn tinycore_boots_from_iso_to_shell() {
+    const TC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/Core-current.iso");
+    let Ok(iso) = std::fs::read(TC) else {
+        eprintln!("skip: {TC} が無い (tools/images/sh/fetch-images.sh tinycore)");
+        return;
+    };
+    let mut m = Machine::with_profile(MachineProfile::pc_floppy(128));
+    m.boot_from_iso(iso).expect("El Torito");
+    let run_until = |m: &mut Machine, needle: &str, budget: u64| -> bool {
+        let mut i = 0u64;
+        while i < budget {
+            m.run(1_000_000);
+            i += 1_000_000;
+            if m.text_screen_string().contains(needle) {
+                return true;
+            }
+        }
+        false
+    };
+    assert!(
+        run_until(&mut m, "boot:", 100_000_000),
+        "isolinux の boot: が出ない"
+    );
+    for _ in 0..2 {
+        m.run(2_000_000);
+        m.devices.keyboard.type_ascii("\n");
+    }
+    assert!(
+        run_until(&mut m, "tc@box", 3_000_000_000),
+        "Tiny Core のシェルに届かない。画面:\n{}",
+        m.text_screen_string()
+    );
+}

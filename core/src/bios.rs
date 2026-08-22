@@ -1039,7 +1039,9 @@ impl Machine {
                 let count = self.read16(dap + 2) as usize;
                 let off = self.read16(dap + 4);
                 let seg = self.read16(dap + 6);
-                let lba = self.read32(dap + 8) as usize | ((self.read32(dap + 12) as usize) << 32);
+                // LBA は u64 で受ける (wasm32 の usize は 32bit — << 32 は溢れる)
+                let lba64 = self.read32(dap + 8) as u64 | ((self.read32(dap + 12) as u64) << 32);
+                let lba = lba64 as usize;
                 let dst = cpu::operand::linear(seg, off);
                 let cd = self.cd.as_ref().unwrap();
                 let Some(src) = cd.get(lba * SEC..(lba + count) * SEC) else {
