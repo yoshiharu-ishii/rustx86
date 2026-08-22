@@ -222,7 +222,7 @@
        1024×768 は等倍 (枠が 1024 より狭ければ縮む — そのときは JS がぼかしに切替) */
     aspect-ratio: var(--fbw) / var(--fbh);
     width: 100%;
-    max-width: min(calc(var(--fbw) * 1.5px), 1024px);
+    max-width: min(calc(var(--fbw) * var(--fbscale, 1.5) * 1px), 1024px);
     /* ホストのカーソルは隠す — ゲストのカーソルが同じ位置に居る (絶対位置風)。
        二重に見えるのは、ズレたときだけ分かればよい情報ではなく単に煩い */
     cursor: none;
@@ -248,7 +248,7 @@
   }
   .foot .spacer { flex: 1 }
   .foot svg { width: .95rem; height: .95rem; }
-  #status { margin: 0; color: var(--dim); }
+  #status { margin: 0; color: var(--dim); flex: 1; }
   #status.warn { color: var(--amber); }
 
   /* --- オープニング --- */
@@ -475,6 +475,9 @@
       <!-- Linuxの機械だけに出る。中身は machines.js の ROOTFS から作る -->
       <span class="lbl" id="rootLbl" hidden>ルートFS</span>
       <select id="rootSel" hidden></select>
+      <!-- ISO (El Torito) から起動する。ルートFSと排他 — どちらかを選ぶと他方が「—」になる -->
+      <span class="lbl" id="isoLbl" hidden>ISO</span>
+      <select id="isoSel" hidden></select>
       <span class="lbl" id="ramLbl" hidden>RAM</span>
       <select id="ramSel" hidden>
         <option value="auto">自動</option>
@@ -490,9 +493,6 @@
       </select>
       <label for="volume" title="マスター音量 (OPL2 の音楽と PC スピーカー)">🔊</label>
       <input id="volume" type="range" min="0" max="100" value="70" style="width:90px;vertical-align:middle" title="マスター音量 (OPL2 の音楽と PC スピーカー)">
-      <span class="spacer"></span>
-      <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>
-      <span class="pill" id="pillHist">履歴 0 行</span>
     </div>
 
 
@@ -553,6 +553,9 @@
         <svg id="footDisk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
              aria-hidden="true" hidden><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 4v6h8V4"/></svg>
         <p id="status">読み込み中…</p>
+        <!-- 状態のピル (MIPS/アイドル・履歴) は右下 — ツールバーに置くと ISO や音量で折り返す -->
+        <span class="pill"><span class="dot ok" id="pillDot"></span><span id="pillState">—</span></span>
+        <span class="pill" id="pillHist">履歴 0 行</span>
       </div>
     </section>
 

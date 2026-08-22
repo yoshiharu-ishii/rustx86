@@ -191,7 +191,7 @@ export function mountLinux(canvas, opts = {}) {
    *   vmlinux / bzImage)。指定があれば取りに行かず、これを起動する
    * @param {string} [o.kernelName] 画面に出す名前
    */
-  async function boot({ snapshot: given = null, kernel: givenKernel = null, kernelName = '' } = {}) {
+  async function boot({ snapshot: given = null, kernel: givenKernel = null, kernelName = '', iso: givenIso = null, isoName = '' } = {}) {
     if (busy) return;
     const gen = bootGen; // この起動が属する世代 (電源OFFで古くなる)
     busy = true;
@@ -218,7 +218,32 @@ export function mountLinux(canvas, opts = {}) {
     // RAMの確定は initrd を読んだ後 (自動のときは中身の大きさが要る)
     let ramMb = want.ramMb || 0;
 
-    if (!snapshot && givenKernel) {
+    // **ISO (El Torito) から起動する道** — ルートFSと排他 (画面のつまみがそうしている)。
+    // カーネルも initramfs も ISO の中にあり、BIOS 経由で isolinux が上げる。
+    // 持ち込みの ISO (ドロップ) はファイルそのもの、ライブラリの ISO は名前で取る
+    let iso = givenIso;
+    const isoFile = givenIso ? isoName || 'ISO' : want.iso || '';
+    if (!snapshot && !iso && isoFile) {
+      imageName = isoFile;
+      try {
+        iso = await fetchWithProgress(`./${isoFile}`, isoFile);
+      } catch (e) {
+        status(`${isoFile} が読めない: ${e.message} (tools/images/sh/fetch-images.sh tinycore で web/ に置く)`, true);
+        busy = false;
+        opts.onState?.();
+        return;
+      }
+    }
+    if (iso) {
+      imageName = isoFile;
+      usedInitrd = '';
+      usedDisk = '';
+      status(`${isoFile} を起動します (BIOS 経由)`);
+    }
+
+    if (iso) {
+      // ISO 起動にカーネルの取り寄せは無い
+    } else if (!snapshot && givenKernel) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
       // カーネルだけ落とされても、ルートFSが無ければシェルに着けないので
       kernel = givenKernel;
@@ -270,7 +295,7 @@ export function mountLinux(canvas, opts = {}) {
     // ディスク型ならイメージも取る。**無ければディスク無しで進む** —
     // ミニのシェルには落ちるので、真っ暗になるよりは説明して動かす
     let disk = null;
-    if (!snapshot && usedDisk) {
+    if (!snapshot && usedDisk && !iso) {
       try {
         disk = await fetchWithProgress(`./${usedDisk}`, usedDisk);
         // .gz は輸送路の圧縮。**ここ (ホスト) で1回だけ解く** — ゲストの
@@ -294,12 +319,15 @@ export function mountLinux(canvas, opts = {}) {
     // ディスク型はinitrdがミニなので自然に128MBになる — ディスクの中身は
     // 読んだ分しかページキャッシュに載らず、RAMの頭数に入れなくてよい
     if (!ramMb) ramMb = initrd ? autoRam(initrd) : 128;
+    if (iso && ramMb < 128) ramMb = 128; // Tiny Core はカーネル + initrd 展開で 64MB では足りない
     usedRam = ramMb;
 
     status(
       snapshot
         ? '起動済みの機械を復元中…'
-        : 'ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)',
+        : iso
+          ? 'ワーカーを起動し、ISO から起動中… (isolinux → Linux、シェルまで 1〜2 分)'
+          : 'ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)',
     );
 
     // 前のワーカーがあれば止める (覗き見の待ちも流す)
@@ -323,7 +351,9 @@ export function mountLinux(canvas, opts = {}) {
             worker.postMessage(
               {
                 type: 'boot',
-                kernel: kernel.buffer,
+                // ISO なら kernel/initrd/disk は無い (BIOS が CD から上げる)
+                iso: iso?.buffer,
+                kernel: kernel?.buffer,
                 initrd: initrd?.buffer,
                 disk: disk?.buffer,
                 // フレームバッファを申告するときは tty0 を**最後の** console= にする。
@@ -342,7 +372,7 @@ export function mountLinux(canvas, opts = {}) {
                 // setJit() でon/offできる (決定性はJIT on/offで不変が門番)
                 jit: opts.jit?.() ?? false,
               },
-              [kernel.buffer, initrd?.buffer, disk?.buffer].filter(Boolean),
+              [iso?.buffer, kernel?.buffer, initrd?.buffer, disk?.buffer].filter(Boolean),
             );
           }
           booted = true;
@@ -368,6 +398,11 @@ export function mountLinux(canvas, opts = {}) {
               bannerTail = '';
             }
           }
+          break;
+        }
+        case 'text': {
+          // ISO 機のテキスト VRAM (80×25、文字+属性)。描き手は端末と同じ canvas
+          term.showVga(new Uint8Array(msg.cells), msg.row, msg.col, msg.charset);
           break;
         }
         case 'lfb': {
