@@ -2,6 +2,7 @@
 /web/pkg
 /images
 /web/*.img
+/web/*.iso
 *.lst
 # webに置いたLinuxイメージ (配布物なのでコミットしない。tools/images/fetch-images.sh で取得)
 web/vmlinuz-lts
