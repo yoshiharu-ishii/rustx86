@@ -626,3 +626,81 @@ fn freedos_doom_lockstep() {
     }
     eprintln!("ズレなし ({total} 歩)");
 }
+
+/// **音付き**: タイトル曲 (D_INTRO) が OPL2 に流れ、合成した音が無音でない。
+/// DOOM は起動時に Adlib をタイマで検出してから DMX が MUS をレジスタ書きに直す
+#[test]
+fn freedos_doom_plays_music_on_opl2() {
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/freedos-hdd.img");
+    let Ok(hdd) = std::fs::read(HDD) else {
+        eprintln!("skip: {HDD} が無い");
+        return;
+    };
+    let image = std::fs::read(FREEDOS_IMAGE).expect("fd14games.img");
+    let mut m = Machine::with_profile(MachineProfile::pc_floppy(16));
+    m.boot_from_disk(image).expect("boot");
+    m.hdd_attach(hdd).expect("hdd");
+    assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000));
+    m.devices.keyboard.feed(&[0x3F, 0xBF]);
+    assert!(run_until(&mut m, "full shell command line", 400_000_000));
+    type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+    assert!(run_until(&mut m, "A:\\>", 400_000_000));
+    type_slowly(&mut m, "C:\nCD \\DOOM\nDOOM\n");
+    for _ in 0..3_000_000_000u64 {
+        m.step();
+        if m.video_mode == 0x13 {
+            break;
+        }
+    }
+    assert_eq!(m.video_mode, 0x13);
+    // 曲は 140Hz の DMX タイマで流れる。1 秒ぶん (76M 命令) 進めて key-on を数える
+    for _ in 0..80_000_000u64 {
+        m.step();
+    }
+    let key_ons = m.devices.opl.key_ons;
+    eprintln!(
+        "opl writes={} key_ons={key_ons}\n起動時の画面:\n{}",
+        m.devices.opl.writes,
+        m.text_screen_string()
+    );
+    assert!(
+        key_ons > 5,
+        "OPL2 に key-on が来ていない ({key_ons}) — Adlib の検出か DMX の書き込み"
+    );
+    let s = m.opl_render(44100, 44100);
+    let rms = (s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+    assert!(rms > 100.0, "合成した音が無音 (rms={rms})");
+    eprintln!(
+        "key_ons={key_ons} writes={} rms={rms:.0}",
+        m.devices.opl.writes
+    );
+    // DOOM_WAV=path: 続きを 10 秒ぶん、50Hz で歩みと合成を交互に進めて WAV に落とす (耳で聴く用)
+    if let Ok(path) = std::env::var("DOOM_WAV") {
+        let rate = 44100u32;
+        let mut pcm: Vec<i16> = Vec::new();
+        for _ in 0..500 {
+            for _ in 0..(76_364_000 / 50) {
+                m.step();
+            }
+            pcm.extend(m.opl_render(rate, (rate / 50) as usize));
+        }
+        let mut w = Vec::new();
+        let data_len = (pcm.len() * 2) as u32;
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&(36 + data_len).to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&rate.to_le_bytes());
+        w.extend_from_slice(&(rate * 2).to_le_bytes());
+        w.extend_from_slice(&2u16.to_le_bytes());
+        w.extend_from_slice(&16u16.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&data_len.to_le_bytes());
+        for v in pcm {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&path, w).expect("write wav");
+    }
+}

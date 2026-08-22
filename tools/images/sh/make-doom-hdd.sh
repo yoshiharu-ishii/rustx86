@@ -49,6 +49,13 @@ off=$((START * 512))
 mformat -i "$out@@$off" -t $CYL -h $HEADS -s $SPT -H $START -v DOOM ::
 mmd -i "$out@@$off" ::/DOOM
 mcopy -i "$out@@$off" "$src"/DOOM.EXE "$src"/DOOM1.WAD "$src"/SETUP.EXE "$src"/README.TXT ::/DOOM/
+# DEFAULT.CFG: 音の装置を決めておく (SETUP.EXE を通さずに鳴るように)。
+# 効果音 = PC スピーカー (1、6s で実装済み)、音楽 = Adlib/OPL2 (2、6t)。
+# DOOM 既定は両方 0 (無音) で、DMX は装置が無ければポートに触りもしない
+cfg=$(mktemp)
+printf 'snd_sfxdevice\t\t1\r\nsnd_musicdevice\t\t2\r\nsnd_channels\t\t3\r\nsnd_musicvolume\t\t12\r\nsnd_sfxvolume\t\t12\r\nmouse_sensitivity\t5\r\nusemouse\t\t0\r\nusejoystick\t\t0\r\nscreenblocks\t\t10\r\ndetaillevel\t\t0\r\n' > "$cfg"
+mcopy -i "$out@@$off" "$cfg" ::/DOOM/DEFAULT.CFG
+rm -f "$cfg"
 # 自作ゲーム・DEBUG・mTCP はフロッピー (fd14games.img) から写す — A: と同じ物が C: にも居て、
 # プロンプトを C:\> に置けるように。フロッピーが無ければ DOOM だけ
 fd=images/fd14games.img

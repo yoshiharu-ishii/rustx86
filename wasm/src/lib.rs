@@ -204,6 +204,17 @@ impl Emulator {
         self.m.speaker_tone().unwrap_or(0.0)
     }
 
+    /// OPL2 (Adlib) の音を n サンプル (i16 モノラル) 合成して返す。JS が実時間で
+    /// 経った分だけ呼び、AudioWorklet へ流す。rate は AudioContext のサンプルレート
+    pub fn opl_render(&mut self, rate: u32, n: usize) -> Vec<i16> {
+        self.m.opl_render(rate, n)
+    }
+
+    /// OPL2 の key-on の累計 (診断: 曲が鳴っているか)
+    pub fn opl_key_ons(&self) -> f64 {
+        self.m.devices.opl.key_ons as f64
+    }
+
     /// NE2000を挿す (mac は6バイト)。呼ばなければNICは無く、起動はビット同一のまま
     pub fn net_attach(&mut self, mac: &[u8]) -> Result<(), JsError> {
         let mac: [u8; 6] = mac
