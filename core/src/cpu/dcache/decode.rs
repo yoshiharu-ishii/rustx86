@@ -316,6 +316,30 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
             Uop::MovRmImm { rm, imm }
         }
         0xC9 => Uop::Leave,
+        // C16 (ADR-0028): 1バイト側の落ち — test eAX,imm / imul 3オペランド / cdq
+        0xA8 => {
+            let imm = *b.get(i)?;
+            i += 1;
+            Uop::Test8AImm { imm }
+        }
+        0xA9 => {
+            let imm = u32le(b, i)?;
+            i += 4;
+            Uop::TestAImm { imm }
+        }
+        0x69 => {
+            let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+            let imm = u32le(b, i)?;
+            i += 4;
+            Uop::ImulRRmI { reg, rm, imm }
+        }
+        0x6B => {
+            let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+            let imm = *b.get(i)? as i8 as i32 as u32;
+            i += 1;
+            Uop::ImulRRmI { reg, rm, imm }
+        }
+        0x99 => Uop::Cdq,
         0xF6 | 0xF7 => {
             let (kind, rm) = dec_modrm(b, &mut i, seg_override)?;
             if kind > 3 {
@@ -379,6 +403,52 @@ pub(super) fn decode_at(m: &Machine, pa: u32) -> Option<(u8, Uop)> {
                 0xAF => {
                     let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
                     Uop::ImulRRm { reg, rm }
+                }
+                // C16 (ADR-0028): X窓の従来経路落ちの正体 — movsx / cmov /
+                // bsf/bsr / shld/shrd。bt系 (メモリ形のビットオフセット) と
+                // cmpxchg (LOCK付きが常) は従来経路のまま
+                0x40..=0x4F => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::Cmov {
+                        cc: op2 & 0xF,
+                        reg,
+                        rm,
+                    }
+                }
+                0xBE => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::MovsxB { reg, rm }
+                }
+                0xBF => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::MovsxW { reg, rm }
+                }
+                0xBC | 0xBD => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::BitScan {
+                        reg,
+                        rm,
+                        reverse: op2 == 0xBD,
+                    }
+                }
+                0xA4 | 0xAC => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    let imm = *b.get(i)?;
+                    i += 1;
+                    Uop::ShxdImm {
+                        rm,
+                        reg,
+                        imm,
+                        left: op2 == 0xA4,
+                    }
+                }
+                0xA5 | 0xAD => {
+                    let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;
+                    Uop::ShxdCl {
+                        rm,
+                        reg,
+                        left: op2 == 0xA5,
+                    }
                 }
                 0xB6 => {
                     let (reg, rm) = dec_modrm(b, &mut i, seg_override)?;

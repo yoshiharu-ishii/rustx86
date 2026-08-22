@@ -39,12 +39,28 @@ fn main() {
         let need = initrd_ram_needed(&initrd);
         ((need + need / 4).div_ceil(64 << 20) as usize * 64).max(128)
     };
+    // X窓 (ADR-0028 の第3の定規) 用の口: RAM_MB / CMDLINE / LFB=WxH / LFB_DUMP=path。
+    // 既定のまま (無指定) なら gcc窓と同じ機械
+    let mb: usize = std::env::var("RAM_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(mb);
+    let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| "console=ttyS0".into());
 
     let mut m = Box::new(Machine::with_profile(MachineProfile::pc_32bit(mb)));
     if let Some(img) = disk {
         m.blk_attach(img);
     }
-    if let Err(e) = m.boot_linux_with_initrd(&data, "console=ttyS0", Some(&initrd)) {
+    if let Ok(v) = std::env::var("LFB") {
+        let wh = v
+            .split_once('x')
+            .and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)));
+        match wh {
+            Some((w, h)) => m.lfb_enable_sized(w, h),
+            None => m.lfb_enable(),
+        }
+    }
+    if let Err(e) = m.boot_linux_with_initrd(&data, &cmdline, Some(&initrd)) {
         eprintln!("起動できない: {e}");
         std::process::exit(1);
     }
@@ -61,6 +77,8 @@ fn main() {
     #[allow(unused_mut, unused_variables)]
     let mut win_ops: Vec<u64> = Vec::new();
     let (mut fed, mut done_at) = (false, None::<usize>);
+    // dcache の窓内センサス (ヒット/新規/従来経路落ち) — 語彙の穴の定規
+    let mut dc0 = (0u64, 0u64, 0u64);
     let mut spent: u64 = 0;
     // コマンド窓の計測 (feed時点からDONEMARKまで)
     let mut win_start: Option<(u64, std::time::Instant, u64, u64)> = None; // (spent, wall, jit_instrs, jit_entries)
@@ -79,6 +97,7 @@ fn main() {
                 m.jit_instrs,
                 m.jit_entries,
             ));
+            dc0 = (m.dcache.hits, m.dcache.fills, m.dcache.fallbacks);
             if cfg!(feature = "opstats") {
                 win_ops = m.op_counts.clone();
             }
@@ -123,6 +142,30 @@ fn main() {
         win_instr,
         fnv(&m.devices.uart.tx)
     );
+    {
+        let d = &m.dcache;
+        let (h, f, fb) = (d.hits - dc0.0, d.fills - dc0.1, d.fallbacks - dc0.2);
+        let seen = (h + f + fb).max(1);
+        println!(
+            "[jcmd] dcache窓: ヒット{}M + 新規{}M / 従来経路落ち{}M ({:.2}%)",
+            h / 1_000_000,
+            f / 1_000_000,
+            fb / 1_000_000,
+            fb as f64 * 100.0 / seen as f64
+        );
+    }
+    // 画面の証跡 (X窓): LFB_DUMP=path で最終フレームを PPM に書く
+    if let (Ok(path), Some(l)) = (std::env::var("LFB_DUMP"), m.lfb) {
+        let fb = m.lfb_frame();
+        let mut out = format!("P6\n{} {}\n255\n", l.width, l.height).into_bytes();
+        for px in fb.chunks(4) {
+            out.extend_from_slice(&[px[1], px[2], px[3]]);
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => eprintln!("[jcmd] LFB {}x{} → {path}", l.width, l.height),
+            Err(e) => eprintln!("[jcmd] LFB_DUMP {path}: {e}"),
+        }
+    }
     if cfg!(feature = "opstats") && !win_ops.is_empty() {
         let delta: Vec<u64> = m
             .op_counts
