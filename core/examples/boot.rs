@@ -59,6 +59,10 @@ fn main() {
         let img = std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"));
         m.hdd_attach(img).expect("hdd");
     }
+    // NET=1 で NIC を挿す (PCI 機なら RTL8029、16bit 機なら ISA の NE2000)。ブラウザと同じ MAC
+    if std::env::var("NET").is_ok() {
+        m.net_attach([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+    }
 
     // 画面に文字列が出るまで走らせ、出たらキーを打つ。
     //
