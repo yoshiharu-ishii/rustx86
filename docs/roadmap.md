@@ -55,7 +55,7 @@ RTL8029をLinuxに見せるには設定空間の列挙が要ったからであ�
 | 5 | **そのLinuxから本物のホストにpingが届く** | ✅ ping・http・**https** まで到達 (2026-08-14)。5d 本測定が半分残り |
 | — | **CPU第3ラウンド (F1d)** — 税なしJITで200 MIPS圏へ | ✅ **完結** (2026-08-18) — テンプレートJIT a〜h + tick=256 ([ADR-0025](adr/0025-tick-256.md)) で**ブート133 MIPS・gcc窓でもJIT優位・総合-17%**。chainingは不採用の学び ([ADR-0024](adr/0024-f1d-i-chaining.md))。残り鉱脈は [jit-roadmap3](reference/jit-roadmap3.md) |
 | — | **F2: fastmem** — ホストMMUでゲストメモリを写像 | **段2+PGEまで実装検証の上で不採用・寝かせ** (2026-08-18、[ADR-0026](adr/0026-fastmem.md)追記) — 正しさ全緑・G保持も設計どおり動いたが、検査前置き×全ロード > ヒット利得 (macOS 16KiB制約でユーザー空間が張れない)。再訪条件はADR。段1 (GuestRam抽象) はマージ済みのまま無害。**次の10%級はレジスタ/cc常駐化バンドル** ([jit-roadmap3](reference/jit-roadmap3.md)) |
-| — | **最適化 Part 3** — 画面が出たら定規が変わる: X窓 (第3の定規)・dcache語彙の穴 (C16-C18)・画素の配管 (G1-G5)・wasm JITの枠 (W1) | 📋 **調査完了・裁定待ち** (2026-08-22、[ADR-0028](adr/0028-part3-cpu-and-gfx.md))。X窓は gcc窓より-30% (off 56.5 / on 64 MIPS)、原因は命令ミックス。台帳は [gfx-roadmap](reference/gfx-roadmap.md) |
+| — | **最適化 Part 3** — 画面が出たら定規が変わる: X窓 (第3の定規)・dcache語彙の穴 (C16-C18)・画素の配管 (G1-G5)・wasm JITの枠 (W1) | 📋 **調査完了・裁定待ち** (2026-08-22、[ADR-0028](adr/0028-part3-cpu-and-gfx.md))。X窓は gcc窓より-5〜-8%で JIT の上積みが消える (off ~69 / on ~69-71 MIPS、静かな機体)、原因は命令ミックス。台帳は [gfx-roadmap](reference/gfx-roadmap.md) |
 | 6 | **GUIと音** — DOOMが音付きで遊べる → その先にX・古典デスクトップ | F1dの後 |
 | 7 | **ネイティブ化** — M1 Mac / Windows 10、ヘッドレスランナー | |
 | 8 | **マイクロVM** — snapshot-fork、自作LB + Locustで50〜100台 | |
