@@ -23,7 +23,7 @@
 //         {type:'dbg-stop', why}             見張り (ブレークポイント等) が機械を止めた
 
 import init, { Emulator } from './pkg/rustx86_wasm.js';
-import { setupJit, pumpJit, resetJit } from './jit-runtime.js';
+import { setupJit, pumpJit, releaseJit, resetJit } from './jit-runtime.js';
 
 let emu = null;
 let running = false;
@@ -142,6 +142,7 @@ self.onmessage = (e) => {
       if (msg.on && !jitOn) jitEnable();
       if (!msg.on && jitOn) {
         emu.jit_disable();
+        releaseJit(emu); // 捨てたブロックの添字を null に (モジュールを GC へ)
         jitOn = false;
       }
       postMessage({ type: 'jit', on: jitOn });

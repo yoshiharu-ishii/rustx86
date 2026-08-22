@@ -1012,10 +1012,32 @@ struct Slot {
     table_slot: u32,
     n: u16,
     state: SlotState,
+    /// 据わっているモジュール (= バッチ) の番号。モジュール単位の引退に使う
+    module: u32,
+}
+
+const SLOT_FREE: Slot = Slot {
+    tag: TAG_FREE,
+    gen: 0,
+    table_slot: 0,
+    n: 0,
+    state: SlotState::Free,
+    module: 0,
+};
+
+/// 1バッチ = 1 wasmモジュール。V8 はモジュールを丸ごとしか解放できないので、
+/// 生き残りが僅かになったら残りも退去させて (焼き直しは次の来訪で)、
+/// モジュールを GC に渡す — 1ブロックが 4095 個の死んだ Code を道連れにしない
+#[derive(Clone, Copy)]
+struct Module {
+    size: u32,
+    live: u32,
 }
 
 const JSLOTS: usize = 64 * 1024;
 const TAG_FREE: u32 = 0xFFFF_FFFF;
+/// assign_slots が返す「新しく伸ばせ」の印 (JS 側と同じ値)
+pub const FRESH: u32 = 0xFFFF_FFFF;
 
 /// JITランタイムの台帳。Emulatorが1個持つ (Boxで番地固定)
 pub struct JitRt {
@@ -1024,6 +1046,26 @@ pub struct JitRt {
     machine: *mut Machine,
     pub installed: usize,
     pub baked: u64,
+    /// 退去したブロックが返した関数テーブルの添字。次の据え付けで使い回す。
+    ///
+    /// **テーブルは伸びる一方だった** — 退去 (衝突・世代落ち) はこの台帳から
+    /// 消すだけで、`__indirect_function_table` の添字は返していなかった。
+    /// 添字が関数を掴んでいる限りモジュール (4096ブロック分の Code) は
+    /// GC されず、X + dillo のように焼き直しが続く負荷では 6〜8 分で
+    /// V8 の ExternalEntityTable が尽きてレンダラが落ちた (Chrome の
+    /// エラーコード 5、2026-08-22)。添字を使い回せば古いモジュールは
+    /// 全 export が上書きされた時点で GC の手に渡る
+    free_slots: Vec<u32>,
+    /// 退去したが JS がまだ null にしていない添字。添字に関数が据わった
+    /// ままだと (使い回されるまで) モジュールが掴まれ続けるので、pump の
+    /// 頭で JS が `table.set(s, null)` する (take_freed)
+    freed: Vec<u32>,
+    /// バッチごとの帳簿 (モジュール引退の判断用)
+    modules: Vec<Module>,
+    /// 使い回した添字の累計 (診断)
+    pub recycled: u64,
+    /// 早期引退させたモジュール数 (診断)
+    pub retired: u64,
 }
 
 thread_local! {
@@ -1047,23 +1089,87 @@ impl Default for JitRt {
 
 impl JitRt {
     pub fn new() -> Self {
-        let mut slots = Vec::with_capacity(JSLOTS);
-        slots.resize(
-            JSLOTS,
-            Slot {
-                tag: TAG_FREE,
-                gen: 0,
-                table_slot: 0,
-                n: 0,
-                state: SlotState::Free,
-            },
-        );
         JitRt {
-            slots,
+            slots: vec![SLOT_FREE; JSLOTS],
             jobs: Vec::new(),
             machine: core::ptr::null_mut(),
             installed: 0,
             baked: 0,
+            free_slots: Vec::new(),
+            freed: Vec::new(),
+            modules: Vec::new(),
+            recycled: 0,
+            retired: 0,
+        }
+    }
+
+    /// バッチ (= モジュール) の帳簿を1つ起こし、番号を返す
+    pub fn new_module(&mut self, size: usize) -> u32 {
+        self.modules.push(Module {
+            size: size as u32,
+            live: 0,
+        });
+        (self.modules.len() - 1) as u32
+    }
+
+    /// JS が null にすべき添字 (退去済み) を引き取る
+    pub fn take_freed(&mut self) -> Vec<u32> {
+        core::mem::take(&mut self.freed)
+    }
+
+    /// 据え付け先の添字を `n` 個決める。返した添字のうち `FRESH` は
+    /// 「テーブルを伸ばして新しく取れ」の印で、JS が grow した番号に置き換える
+    pub fn assign_slots(&mut self, n: usize) -> Vec<u32> {
+        (0..n)
+            .map(|_| match self.free_slots.pop() {
+                Some(s) => {
+                    self.recycled += 1;
+                    s
+                }
+                None => FRESH,
+            })
+            .collect()
+    }
+
+    /// 据え付けに至らなかった添字を返す (instantiate 失敗など)
+    pub fn release_slots(&mut self, slots: &[u32]) {
+        self.free_slots
+            .extend(slots.iter().copied().filter(|&s| s != FRESH));
+    }
+
+    /// 据え付け済みブロックを台帳から外し、添字を回収する (モジュール引退の判断なし)
+    fn evict_raw(&mut self, si: usize) {
+        let s = self.slots[si];
+        if s.state == SlotState::Installed {
+            self.installed -= 1;
+            self.free_slots.push(s.table_slot);
+            self.freed.push(s.table_slot);
+            if let Some(m) = self.modules.get_mut(s.module as usize) {
+                m.live -= 1;
+            }
+        }
+        self.slots[si] = SLOT_FREE;
+    }
+
+    /// 退去 + そのモジュールの生き残りが 1/8 を切ったら残りも引退させる
+    fn evict(&mut self, si: usize) {
+        let module = self.slots[si].module;
+        let was_installed = self.slots[si].state == SlotState::Installed;
+        self.evict_raw(si);
+        if !was_installed {
+            return;
+        }
+        let Some(m) = self.modules.get(module as usize).copied() else {
+            return;
+        };
+        if m.live > 0 && m.live * 8 <= m.size {
+            for i in 0..JSLOTS {
+                let s = self.slots[i];
+                if s.state == SlotState::Installed && s.module == module {
+                    self.evict_raw(i);
+                }
+            }
+            self.retired += 1;
         }
     }
 
@@ -1085,7 +1191,7 @@ impl JitRt {
     /// JSが table.set したスロット番号を受けて据え付ける。
     /// 焼いた後に世代が動いていても構わず据える — try_enterの世代照合が
     /// 初回ヒットで捨てて焼き直す (自己回復)
-    pub fn install(&mut self, pa: u32, gen: u32, n: u32, table_slot: u32) {
+    pub fn install(&mut self, pa: u32, gen: u32, n: u32, table_slot: u32, module: u32) {
         let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
         let slot = &mut self.slots[si];
         if slot.tag == pa && slot.state == SlotState::Baking {
@@ -1093,23 +1199,26 @@ impl JitRt {
             slot.table_slot = table_slot;
             slot.n = n as u16;
             slot.state = SlotState::Installed;
+            slot.module = module;
             self.installed += 1;
+            if let Some(m) = self.modules.get_mut(module as usize) {
+                m.live += 1;
+            }
+        } else {
+            // tagが変わっていたら (衝突退去)、据え付け先を失った孤児 — 添字だけ回収
+            self.free_slots.push(table_slot);
+            self.freed.push(table_slot);
         }
-        // tagが変わっていたら (衝突退去)、据え付け先を失った孤児 — 捨てるだけ
     }
 
-    /// スナップショット復元・OS入れ替えで全部捨てる
+    /// スナップショット復元・OS入れ替えで全部捨てる。**添字は全部回収する**
+    /// (JS は take_freed で null にする)
     pub fn flush(&mut self) {
-        for s in &mut self.slots {
-            *s = Slot {
-                tag: TAG_FREE,
-                gen: 0,
-                table_slot: 0,
-                n: 0,
-                state: SlotState::Free,
-            };
+        for i in 0..JSLOTS {
+            self.evict_raw(i);
         }
         self.jobs.clear();
+        self.modules.clear();
         self.installed = 0;
     }
 }
@@ -1136,10 +1245,8 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
                     return 0; // 焼き+据え付けまでの税 (ブロック実行なし)
                 }
                 if slot.gen != gen {
-                    // 世代落ち (自己書き換え)。捨てて次の来訪で焼き直す
-                    rt.slots[si].state = SlotState::Free;
-                    rt.slots[si].tag = TAG_FREE;
-                    rt.installed -= 1;
+                    // 世代落ち (自己書き換え)。捨てて次の来訪で焼き直す (添字は回収)
+                    rt.evict(si);
                     return 0;
                 }
                 if slot.n as u32 > budget {
@@ -1163,25 +1270,24 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     // fillと同じ義務: このページに「コードあり」を立てる (立て忘れは
     // SMC/DMA検出網の穴 — jit-a64で実証済みの事故)
     rustx86_core::jit::mark_code_page(m, pa);
+    // 語彙外・短すぎの負の印。**据わっている同居人は退去させてから上書きする** —
+    // 退去なしで上書きすると添字が行方不明になり、テーブルが伸びる一方だった
+    // (installed が 64K 枠を超えて 80 万まで数えられた — 2026-08-22)
+    let rejected = Slot {
+        tag: pa,
+        gen,
+        state: SlotState::Rejected,
+        ..SLOT_FREE
+    };
     let Some(blk) = rustx86_core::jit::collect_block_caps(m, pa, 32, rustx86_core::jit::CAP_F1B)
     else {
-        rt.slots[si] = Slot {
-            tag: pa,
-            gen,
-            table_slot: 0,
-            n: 0,
-            state: SlotState::Rejected,
-        };
+        rt.evict(si);
+        rt.slots[si] = rejected;
         return 0;
     };
     if blk.ops.len() < 2 {
-        rt.slots[si] = Slot {
-            tag: pa,
-            gen,
-            table_slot: 0,
-            n: 0,
-            state: SlotState::Rejected,
-        };
+        rt.evict(si);
+        rt.slots[si] = rejected;
         return 0;
     }
     let lay = rustx86_core::jit::layout(m);
@@ -1190,14 +1296,14 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     let body = compile_body(&blk, &lay, maddr);
     rt.baked += 1;
     if rt.slots[si].state == SlotState::Installed {
-        rt.installed -= 1; // 衝突退去
+        rt.evict(si); // 衝突退去 (添字は回収)
     }
     rt.slots[si] = Slot {
         tag: pa,
         gen,
-        table_slot: 0,
         n: n as u16,
         state: SlotState::Baking,
+        ..SLOT_FREE
     };
     rt.jobs.push(Job { pa, gen, n, body });
     0
@@ -1238,6 +1344,74 @@ mod tests {
         let blk = jit::collect_block(&m, 0x10000, 32).expect("block");
         let lay = jit::layout(&m);
         (m, blk, lay)
+    }
+
+    /// 関数テーブルの添字は退去で返り、次の据え付けで使い回される
+    /// (伸びる一方だと退去済みモジュールが GC されず、X で 6〜8 分後に
+    /// レンダラが落ちた — 2026-08-22)
+    #[test]
+    fn table_slots_are_recycled() {
+        let mut rt = JitRt::new();
+        assert_eq!(rt.assign_slots(2), vec![FRESH, FRESH]);
+        let pa = 0x1000u32;
+        let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        let baking = Slot {
+            tag: pa,
+            gen: 1,
+            n: 3,
+            state: SlotState::Baking,
+            ..SLOT_FREE
+        };
+        let m0 = rt.new_module(1);
+        rt.slots[si] = baking;
+        rt.install(pa, 1, 3, 7, m0);
+        assert_eq!(rt.installed, 1);
+        rt.evict(si);
+        assert_eq!(rt.installed, 0);
+        assert_eq!(rt.take_freed(), vec![7]); // JS が null にする
+        assert_eq!(rt.assign_slots(2), vec![7, FRESH]);
+        assert_eq!(rt.recycled, 1);
+        // 孤児 (据え付け前に tag が変わっていた) も添字だけは返す
+        rt.install(0x2000, 1, 3, 9, m0);
+        assert_eq!(rt.installed, 0);
+        assert_eq!(rt.assign_slots(1), vec![9]);
+        assert_eq!(rt.take_freed(), vec![9]);
+        // flush は据え付け済み全員の添字を返す
+        rt.slots[si] = baking;
+        rt.install(pa, 1, 3, 11, m0);
+        rt.flush();
+        assert_eq!(rt.assign_slots(1), vec![11]);
+        assert_eq!(rt.take_freed(), vec![11]);
+        // instantiate 失敗で返された添字 (FRESH は返さない)
+        rt.release_slots(&[11, FRESH]);
+        assert_eq!(rt.assign_slots(2), vec![11, FRESH]);
+    }
+
+    /// 生き残りが 1/8 を切ったモジュールは残りも引退する (GC に渡すため)
+    #[test]
+    fn sparse_modules_retire() {
+        let mut rt = JitRt::new();
+        let m = rt.new_module(16);
+        let si_of = |pa: u32| ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        for i in 0..16u32 {
+            let pa = 0x1000 * (i + 1);
+            rt.slots[si_of(pa)] = Slot {
+                tag: pa,
+                gen: 1,
+                n: 2,
+                state: SlotState::Baking,
+                ..SLOT_FREE
+            };
+            rt.install(pa, 1, 2, 100 + i, m);
+        }
+        assert_eq!(rt.installed, 16);
+        // 14 個退去 → 残り 2 = 16/8 で引退発動、残りも退去して installed=0
+        for i in 0..14u32 {
+            rt.evict(si_of(0x1000 * (i + 1)));
+        }
+        assert_eq!(rt.installed, 0);
+        assert_eq!(rt.retired, 1);
+        assert_eq!(rt.take_freed().len(), 16);
     }
 
     /// 生成モジュールが**本物のwasm検証** (型・スタック規律・LEB) を通るか。
