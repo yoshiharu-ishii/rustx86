@@ -798,6 +798,13 @@ impl Machine {
         self.devices.blk.as_ref().map(|b| b.image.as_slice())
     }
 
+    /// OPL2 (Adlib) の音を n サンプル合成して返す (i16 モノラル)。ゲストの状態には
+    /// 触らない — 描き手が実時間で経った分だけ引き出す。`rate` は合成のサンプルレート
+    pub fn opl_render(&mut self, rate: u32, n: usize) -> Vec<i16> {
+        self.devices.opl.set_rate(rate);
+        self.devices.opl.render(n)
+    }
+
     /// RTCの時計をUNIX時刻 (UTC秒) に合わせる。net_attachと同じ入力口の
     /// 流儀 — 呼ばなければ既定の固定時刻のままで、起動はビット同一
     /// (CIのgolden traceは不変)。ブラウザは電源投入時に実時刻を渡し、
