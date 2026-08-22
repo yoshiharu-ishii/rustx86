@@ -382,3 +382,247 @@ fn freedos_doom_reaches_mode13_title() {
         std::fs::write(&path, out).expect("write shot");
     }
 }
+
+/// タイトルの先へ: Esc でメニュー、Enter ×3 で New Game → Episode 1 → skill →
+/// E1M1 が描かれ、前に歩くと絵が変わる (= 遊べる)。DOOM は INT 9 を乗っ取って
+/// 8042 を直接読み、PIT を 35Hz に組み直す — その経路の総合試験。
+/// 時間がかかる (数分) ので普段は ignore。DOOM_SHOT_DIR=dir で各段を PPM に落とす
+#[test]
+#[ignore]
+fn freedos_doom_plays() {
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
+    let hdd = std::fs::read(HDD).expect("doom-hdd.img");
+    let image = std::fs::read(FREEDOS_IMAGE).expect("fd14games.img");
+    let mut m = Machine::with_profile(MachineProfile::pc_floppy(16));
+    m.boot_from_disk(image).expect("boot");
+    m.hdd_attach(hdd).expect("hdd");
+    assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000));
+    m.devices.keyboard.feed(&[0x3F, 0xBF]);
+    assert!(run_until(&mut m, "full shell command line", 400_000_000));
+    type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+    assert!(run_until(&mut m, "A:\\>", 400_000_000));
+    type_slowly(&mut m, "C:\nCD \\DOOM\nDOOM\n");
+    let mut entered = false;
+    for _ in 0..3_000_000_000u64 {
+        m.step();
+        if m.video_mode == 0x13 {
+            entered = true;
+            break;
+        }
+    }
+    assert!(entered);
+    // DOOM_NODC=1: デコード済みキャッシュを外して従来経路で (自己書き換え検出の切り分け)
+    if std::env::var("DOOM_NODC").is_ok() {
+        m.dbg.on = true;
+    }
+    let run = |m: &mut Machine, n: u64| {
+        for _ in 0..n {
+            m.step();
+        }
+    };
+    let shot = |m: &Machine, name: &str| {
+        if let Ok(dir) = std::env::var("DOOM_SHOT_DIR") {
+            let pal = m.devices.dac.palette();
+            let fb = m.framebuffer();
+            let mut out = format!("P6\n{GFX_COLS} {} 255\n", GFX_LEN / GFX_COLS).into_bytes();
+            for &p in fb.iter() {
+                for c in 0..3 {
+                    out.push(pal[p as usize * 3 + c] << 2);
+                }
+            }
+            std::fs::write(format!("{dir}/{name}.ppm"), out).unwrap();
+        }
+    };
+    // 押して離す (make/break)。DOOM は INT 9 で 0x60 を読む
+    let key = |m: &mut Machine, sc: u8| {
+        m.devices.keyboard.feed(&[sc]);
+        for _ in 0..3_000_000 {
+            m.step();
+        }
+        m.devices.keyboard.feed(&[sc | 0x80]);
+        for _ in 0..3_000_000 {
+            m.step();
+        }
+    };
+    run(&mut m, 300_000_000);
+    shot(&m, "1-title");
+    key(&mut m, 0x01); // Esc → メニュー
+    run(&mut m, 100_000_000);
+    shot(&m, "2-menu");
+    let menu = m.framebuffer().into_owned();
+    key(&mut m, 0x1C); // Enter → New Game
+    run(&mut m, 100_000_000);
+    shot(&m, "3-episode");
+    key(&mut m, 0x1C); // Enter → Episode 1
+    run(&mut m, 100_000_000);
+    shot(&m, "4-skill");
+    key(&mut m, 0x1C); // Enter → skill (Hurt me plenty) → レベル開始
+    run(&mut m, 600_000_000);
+    shot(&m, "5-e1m1");
+    let level = m.framebuffer().into_owned();
+    assert_ne!(menu, level, "メニューから先へ進んでいない");
+    // 前へ歩く (↑ 0x48) と絵が変わる
+    m.devices.keyboard.feed(&[0x48]);
+    run(&mut m, 400_000_000);
+    m.devices.keyboard.feed(&[0xC8]);
+    run(&mut m, 50_000_000);
+    shot(&m, "6-walked");
+    let walked = m.framebuffer().into_owned();
+    let diff = level
+        .iter()
+        .zip(walked.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    eprintln!("歩いて変わった画素: {diff}/{}", level.len());
+    assert!(diff > 2000, "前へ歩いても絵が変わらない ({diff})");
+}
+
+/// dcache 経路 (A) と従来経路 (B、dbg.on) を同じ入力で一歩ずつ並走させ、最初にズレた命令を出す
+#[test]
+#[ignore]
+fn freedos_doom_lockstep() {
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
+    let hdd = std::fs::read(HDD).expect("doom-hdd.img");
+    let image = std::fs::read(FREEDOS_IMAGE).expect("fd14games.img");
+    let boot = |dbg: bool| {
+        let mut m = Machine::with_profile(MachineProfile::pc_floppy(16));
+        m.boot_from_disk(image.clone()).expect("boot");
+        m.hdd_attach(hdd.clone()).expect("hdd");
+        assert!(run_until(&mut m, "FreeDOS kernel", 200_000_000));
+        m.devices.keyboard.feed(&[0x3F, 0xBF]);
+        assert!(run_until(&mut m, "full shell command line", 400_000_000));
+        type_slowly(&mut m, "\\FREEDOS\\BIN\\COMMAND.COM\n");
+        assert!(run_until(&mut m, "A:\\>", 400_000_000));
+        type_slowly(&mut m, "C:\nCD \\DOOM\nDOOM\n");
+        for _ in 0..3_000_000_000u64 {
+            m.step();
+            if m.video_mode == 0x13 {
+                break;
+            }
+        }
+        assert_eq!(m.video_mode, 0x13);
+        m.dbg.on = dbg;
+        m
+    };
+    let mut a = boot(false);
+    let mut b = boot(true);
+    assert_eq!(a.cpu.tsc, b.cpu.tsc, "起動の命令数が違う");
+    // 同じ鍵を同じ歩数で: Esc, Enter×3、↑
+    let script: &[(u64, u8)] = &[
+        (300_000_000, 0x01),
+        (3_000_000, 0x81),
+        (103_000_000, 0x1C),
+        (3_000_000, 0x9C),
+        (103_000_000, 0x1C),
+        (3_000_000, 0x9C),
+        (103_000_000, 0x1C),
+        (3_000_000, 0x9C),
+        (600_000_000, 0x48),
+        (400_000_000, 0xC8),
+        (100_000_000, 0),
+    ];
+    let mut total = 0u64;
+    let mut prev: (u32, u32);
+    for &(n, sc) in script {
+        for _ in 0..n {
+            prev = (
+                a.cpu.lin(rustx86_core::cpu::CS, a.cpu.ip),
+                b.cpu.lin(rustx86_core::cpu::CS, b.cpu.ip),
+            );
+            a.step();
+            b.step();
+            total += 1;
+            if total > 600_000 {
+                // 窓 (0xA0000-0xAFFFF) とシーケンサの状態は毎歩比べる (安い)
+                let (wa, wb): (&[u8], &[u8]) = (&a.mem[0xA0000..0xB0000], &b.mem[0xA0000..0xB0000]);
+                let vga_same = a.devices.vga.map_mask() == b.devices.vga.map_mask()
+                    && a.devices.vga.read_map() == b.devices.vga.read_map();
+                if wa != wb || !vga_same {
+                    let i = (0..wa.len()).find(|&i| wa[i] != wb[i]).unwrap_or(0);
+                    let bytes = |m: &Machine, at: u32| -> String {
+                        (0..10)
+                            .map(|k| format!("{:02x}", m.read8(at + k)))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    eprintln!("窓がズレた: {total} 歩目 @{:#x} A={:02x} B={:02x} mask A={:#x} B={:#x} rmap A={} B={}", 0xA0000 + i, wa[i], wb[i], a.devices.vga.map_mask(), b.devices.vga.map_mask(), a.devices.vga.read_map(), b.devices.vga.read_map());
+                    eprintln!(
+                        "  直前の命令 A @{:#x}: {}  | B @{:#x}: {}",
+                        prev.0,
+                        bytes(&a, prev.0),
+                        prev.1,
+                        bytes(&b, prev.1)
+                    );
+                    eprintln!("  A regs={:08x?}\n  B regs={:08x?}", a.cpu.regs, b.cpu.regs);
+                    panic!("window divergence");
+                }
+            }
+            if total.is_multiple_of(20_000) {
+                let (ma, mb): (&[u8], &[u8]) = (&a.mem, &b.mem);
+                if ma != mb {
+                    let diffs: Vec<usize> =
+                        (0..ma.len()).filter(|&i| ma[i] != mb[i]).take(12).collect();
+                    let n = (0..ma.len()).filter(|&i| ma[i] != mb[i]).count();
+                    eprintln!(
+                        "RAM がズレた: {total} 歩目までに {n} バイト。最初の番地: {diffs:#x?}"
+                    );
+                    for &i in diffs.iter().take(4) {
+                        eprintln!("  {i:#x}: A={:02x} B={:02x}", ma[i], mb[i]);
+                    }
+                    panic!("RAM divergence");
+                }
+            }
+            let same = a.cpu.regs == b.cpu.regs
+                && a.cpu.ip == b.cpu.ip
+                && a.cpu.sregs == b.cpu.sregs
+                && a.cpu.eflags() == b.cpu.eflags();
+            if !same {
+                let lin = |m: &Machine| m.cpu.lin(rustx86_core::cpu::CS, m.cpu.ip);
+                let bytes = |m: &Machine, at: u32| -> String {
+                    (0..10)
+                        .map(|i| format!("{:02x}", m.read8(at + i)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                eprintln!("ズレ: {total} 歩目 (tsc A={} B={})", a.cpu.tsc, b.cpu.tsc);
+                eprintln!(
+                    "  A cs:ip={:04x}:{:08x} regs={:08x?} fl={:#x}",
+                    a.cpu.sregs[1],
+                    a.cpu.ip,
+                    a.cpu.regs,
+                    a.cpu.eflags()
+                );
+                eprintln!(
+                    "  B cs:ip={:04x}:{:08x} regs={:08x?} fl={:#x}",
+                    b.cpu.sregs[1],
+                    b.cpu.ip,
+                    b.cpu.regs,
+                    b.cpu.eflags()
+                );
+                eprintln!("  A 次の命令 @{:#x}: {}", lin(&a), bytes(&a, lin(&a)));
+                eprintln!("  B 次の命令 @{:#x}: {}", lin(&b), bytes(&b, lin(&b)));
+                eprintln!(
+                    "  直前の命令 A @{:#x}: {}  B @{:#x}",
+                    prev.0,
+                    bytes(&a, prev.0),
+                    prev.1
+                );
+                let ctx: Vec<String> = (0..96u32)
+                    .map(|i| format!("{:02x}", a.read8(prev.0 - 48 + i)))
+                    .collect();
+                eprintln!(
+                    "  前後 96 バイト (先頭 = {:#x}): {}",
+                    prev.0 - 48,
+                    ctx.join("")
+                );
+                // 直前の命令 (B の歩みを 1 つ巻き戻せないので、A/B の前 IP は記録から)
+                panic!("dcache と従来経路がズレた");
+            }
+        }
+        if sc != 0 {
+            a.devices.keyboard.feed(&[sc]);
+            b.devices.keyboard.feed(&[sc]);
+        }
+    }
+    eprintln!("ズレなし ({total} 歩)");
+}

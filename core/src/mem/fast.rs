@@ -149,13 +149,13 @@ impl Machine {
         if a >= self.mem.len() {
             return Some(()); // write8と同じ捨て
         }
+        if self.devices.vga.planar && self.in_gfx_window(a, 1) {
+            return None; // Mode Y の窓は遅い道 (プレーンへ) — **書く前に**抜ける
+        }
         self.mem[a] = v;
         self.dcache.note_write(pa); // 自己書き換え: コードページなら写しを捨てる
         if (bus::VRAM_TEXT_BASE as usize..=bus::VRAM_TEXT_END as usize).contains(&a) {
             self.vram_dirty = true;
-        }
-        if self.devices.vga.planar && self.in_gfx_window(a, 1) {
-            self.vram_dirty = true; // Mode Y の窓は遅い道 (プレーンへ)
         }
         Some(())
     }
