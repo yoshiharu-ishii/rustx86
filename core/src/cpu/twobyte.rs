@@ -405,15 +405,7 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             let w = d.opsize32;
             let (reg, rm) = modrm(m, d);
             let v = read_op_w(m, &rm, w);
-            if v == 0 {
-                m.cpu.set_flag(super::ZF, true);
-            } else {
-                m.cpu.set_flag(super::ZF, false);
-                let pos = if op2 == 0xBC {
-                    v.trailing_zeros()
-                } else {
-                    31 - v.leading_zeros()
-                };
+            if let Some(pos) = bit_scan(&mut m.cpu, v, op2 == 0xBD) {
                 m.cpu.set_reg_w(reg, pos, w);
             }
         }
@@ -517,33 +509,9 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
             if count == 0 {
                 return;
             }
-            let bits: u32 = if d.opsize32 { 32 } else { 16 };
             let dst = read_op_w(m, &rm, d.opsize32);
             let src = m.cpu.reg_w(reg, d.opsize32);
-            let count = count as u32;
-            let (r, cf) = if bits == 16 {
-                // 16bit形の実386挙動 (test386のEE照合が要求): dst:src (SHLDは
-                // dstが上位、SHRDは逆) の**32bit連結**を count ぶんずらした続き。
-                // count>=16 でも count%16 に畳まず、srcのビットが流れ込み続ける
-                // (shld ax,dx,16 → ax=dx)
-                if op2 & 0x08 == 0 {
-                    let t = ((dst as u64) << 16) | src as u64;
-                    let r = ((t << count) >> 16) as u32 & 0xFFFF;
-                    (r, (t >> (32 - count)) & 1 != 0)
-                } else {
-                    let t = ((src as u64) << 16) | dst as u64;
-                    let r = (t >> count) as u32 & 0xFFFF;
-                    (r, (t >> (count - 1)) & 1 != 0)
-                }
-            } else if op2 & 0x08 == 0 {
-                // SHLD: 左へ。srcの上位ビットが右から入る
-                let r = (dst << count) | (src >> (bits - count));
-                (r, (dst >> (bits - count)) & 1 != 0)
-            } else {
-                // SHRD: 右へ。srcの下位ビットが左から入る
-                let r = (dst >> count) | (src << (bits - count));
-                (r, (dst >> (count - 1)) & 1 != 0)
-            };
+            let (r, cf) = shxd(dst, src, count as u32, op2 & 0x08 == 0, d.opsize32);
             super::operand::write_op_w(m, &rm, r, d.opsize32);
             m.cpu.set_flag(super::CF, cf);
             super::alu::set_szp_w(&mut m.cpu, r, d.opsize32);
@@ -595,5 +563,48 @@ pub(crate) fn step_0f(m: &mut Machine, d: &Decoder, start_ip: u32) {
                 m.trap(format!("unimplemented opcode 0f {op2:#04x}"));
             }
         }
+    }
+}
+
+/// SHLD/SHRD の本体 (意味論の原本 — 従来経路と dcache の両方がここを呼ぶ)。
+/// `count` は 1..=31 に丸めた後の値。返り値は (結果, CF)。
+/// 16bit形は実386挙動 (test386のEE照合が要求): dst:src (SHLDはdstが上位、
+/// SHRDは逆) の**32bit連結**を count ぶんずらした続き。count>=16 でも
+/// count%16 に畳まず、srcのビットが流れ込み続ける (shld ax,dx,16 → ax=dx)
+pub(crate) fn shxd(dst: u32, src: u32, count: u32, left: bool, wide: bool) -> (u32, bool) {
+    if !wide {
+        if left {
+            let t = ((dst as u64) << 16) | src as u64;
+            let r = ((t << count) >> 16) as u32 & 0xFFFF;
+            (r, (t >> (32 - count)) & 1 != 0)
+        } else {
+            let t = ((src as u64) << 16) | dst as u64;
+            let r = (t >> count) as u32 & 0xFFFF;
+            (r, (t >> (count - 1)) & 1 != 0)
+        }
+    } else if left {
+        // SHLD: 左へ。srcの上位ビットが右から入る
+        let r = (dst << count) | (src >> (32 - count));
+        (r, (dst >> (32 - count)) & 1 != 0)
+    } else {
+        // SHRD: 右へ。srcの下位ビットが左から入る
+        let r = (dst >> count) | (src << (32 - count));
+        (r, (dst >> (count - 1)) & 1 != 0)
+    }
+}
+
+/// BSF/BSR の本体 (原本)。ソースが0ならZF=1で None (結果は未定義 — 実機は
+/// 保存が多いが、書かない)。立っていれば ZF=0 でビット位置を返す
+pub(crate) fn bit_scan(c: &mut Cpu, v: u32, reverse: bool) -> Option<u32> {
+    if v == 0 {
+        c.set_flag(super::ZF, true);
+        None
+    } else {
+        c.set_flag(super::ZF, false);
+        Some(if reverse {
+            31 - v.leading_zeros()
+        } else {
+            v.trailing_zeros()
+        })
     }
 }

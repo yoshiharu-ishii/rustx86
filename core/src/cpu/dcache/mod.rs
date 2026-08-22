@@ -262,6 +262,54 @@ pub(crate) enum Uop {
         reg: u8,
         rm: Rm,
     },
+    /// 0F BE / 0F BF: movsx r32, r/m8 / r/m16 (C16 — X窓の従来経路落ち首位)
+    MovsxB {
+        reg: u8,
+        rm: Rm,
+    },
+    MovsxW {
+        reg: u8,
+        rm: Rm,
+    },
+    /// 0F 40-4F: cmovcc r32, r/m32。**読みは条件に関わらず行う** (従来経路と同じ)
+    Cmov {
+        cc: u8,
+        reg: u8,
+        rm: Rm,
+    },
+    /// A9 / A8: test eAX, imm32 / AL, imm8
+    TestAImm {
+        imm: u32,
+    },
+    Test8AImm {
+        imm: u8,
+    },
+    /// 69 / 6B: imul r32, r/m32, imm (6Bの符号拡張はデコード時に済み)
+    ImulRRmI {
+        reg: u8,
+        rm: Rm,
+        imm: u32,
+    },
+    /// 99: cdq (32bit形のみ — 0x66付きは従来経路)
+    Cdq,
+    /// 0F BC / 0F BD: bsf / bsr r32, r/m32
+    BitScan {
+        reg: u8,
+        rm: Rm,
+        reverse: bool,
+    },
+    /// 0F A4/AC (imm8) / 0F A5/AD (CL): shld / shrd r/m32, r32, count
+    ShxdImm {
+        rm: Rm,
+        reg: u8,
+        imm: u8,
+        left: bool,
+    },
+    ShxdCl {
+        rm: Rm,
+        reg: u8,
+        left: bool,
+    },
     /// 0F AF: imul r32, r/m32
     ImulRRm {
         reg: u8,
@@ -292,6 +340,12 @@ pub(crate) enum Uop {
 const LEN_MASK: u8 = 0x0F;
 const F_MEM: u8 = 0x10;
 const F_CTL: u8 = 0x20;
+/// 実行後に JIT へ再プローブする uop (C16、ADR-0028)。語彙に入れた命令は
+/// JIT が運べないので、従来経路落ちと同じく「次の命令がブロック頭」扱いに
+/// しないと、それまで JIT で走っていた後続が interp に取り残される
+/// (X窓で +30% 悪化して発覚)。チェーン自体は切らない — 切るのは JIT の
+/// 受け口へ戻ることだけ
+const F_REPROBE: u8 = 0x40;
 
 // 表4MiBの根拠 (SLOTSコメント参照)。痩せたらここも更新する (D4)
 const _: () = assert!(std::mem::size_of::<Entry>() == 32);
@@ -460,6 +514,13 @@ fn uop_name(u: &Uop) -> &'static str {
         Uop::Grp5 { .. } => "grp5 (inc/call/jmp/push rm)",
         Uop::SetCC { .. } => "setcc",
         Uop::ImulRRm { .. } => "imul",
+        Uop::ImulRRmI { .. } => "imul imm",
+        Uop::MovsxB { .. } | Uop::MovsxW { .. } => "movsx",
+        Uop::Cmov { .. } => "cmov",
+        Uop::TestAImm { .. } | Uop::Test8AImm { .. } => "test a,imm",
+        Uop::Cdq => "cdq",
+        Uop::BitScan { .. } => "bsf/bsr",
+        Uop::ShxdImm { .. } | Uop::ShxdCl { .. } => "shld/shrd",
         Uop::StrOne { .. } => "string単発",
         Uop::StrRep { .. } => "string REP",
         Uop::CallRel { .. } => "call rel (対象内のはず)",
@@ -551,6 +612,9 @@ fn fill_or_fallback(m: &mut Machine, pa: u32, page: usize, slot: usize) -> Optio
             }
             if exec::is_control(&uop) {
                 lf |= F_CTL;
+            }
+            if exec::reprobe_after(&uop) {
+                lf |= F_REPROBE;
             }
             m.dcache.entries[slot] = Entry {
                 tag: pa,
@@ -760,7 +824,9 @@ pub(crate) fn step_cached(m: &mut Machine, chain_extra: u64) {
             }
             // taken分岐の着地はブロック頭 — JITに再プローブさせる (F1d-b)。
             // 時計は上で前払い済みなので、JITループの契約 (先頭前払い) と合う
-            if took_branch && m.jit.is_some() {
+            // JIT が運べない語彙 (F_REPROBE) の後も同じ — 後続のブロックを
+            // interp に取り残さない
+            if (took_branch || lf & F_REPROBE != 0) && m.jit.is_some() {
                 continue 'outer;
             }
         }
