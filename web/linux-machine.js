@@ -373,6 +373,8 @@ export function mountLinux(canvas, opts = {}) {
         case 'lfb': {
           // efifb が描いた一枚 (24bpp、赤が先頭)。描き手は端末と同じcanvas
           term.drawRgb(new Uint8Array(msg.bytes), msg.width, msg.height, msg.bpp ?? 24);
+          // 描いたらバッファを返す (背圧 — ワーカーはこれが戻るまで次を送らない)
+          worker?.postMessage({ type: 'lfb-ack', bytes: msg.bytes }, [msg.bytes]);
           break;
         }
         case 'state': {
