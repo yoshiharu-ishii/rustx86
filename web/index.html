@@ -223,8 +223,11 @@
     aspect-ratio: var(--fbw) / var(--fbh);
     width: 100%;
     max-width: min(calc(var(--fbw) * 1.5px), 1024px);
+    /* ホストのカーソルは隠す — ゲストのカーソルが同じ位置に居る (絶対位置風)。
+       二重に見えるのは、ズレたときだけ分かればよい情報ではなく単に煩い */
+    cursor: none;
   }
-  /* マウス捕獲中: 枠を光らせて「いま入力は全部ゲストへ行く」と言う */
+  /* (互換) 枠を光らせて「いま入力は全部ゲストへ行く」と言う */
   #linuxScreen.captured { box-shadow: 0 0 0 3px var(--green); }
   #screen:focus, #linuxScreen:focus { outline: none; }
   /* ドラッグ中の合図。**受け皿がどれかを言う** —
