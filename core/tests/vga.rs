@@ -263,17 +263,17 @@ fn freedos_bounce_ball_moves_and_exits_on_key() {
     // 8色のボールが全部画面に居る (パレット 32..39)
     for c in 32..40u8 {
         assert!(
-            centroid(m.framebuffer(), c).is_some(),
+            centroid(&m.framebuffer(), c).is_some(),
             "色{c}のボールが居ない"
         );
     }
-    let p1 = centroid(m.framebuffer(), 32).expect("ボールが居ない");
+    let p1 = centroid(&m.framebuffer(), 32).expect("ボールが居ない");
 
     // 約10フレーム (1フレーム ≒ 109万命令) 進めると、ボールは別の場所に居る
     for _ in 0..11_000_000 {
         m.step();
     }
-    let p2 = centroid(m.framebuffer(), 32).expect("ボールが消えた");
+    let p2 = centroid(&m.framebuffer(), 32).expect("ボールが消えた");
     assert_ne!(p1, p2, "ボールが動いていない (帰線待ちで止まっている?)");
     let moved = p1.0.abs_diff(p2.0) + p1.1.abs_diff(p2.1);
     assert!(
@@ -300,8 +300,10 @@ fn freedos_bounce_ball_moves_and_exits_on_key() {
 
 /// **DOOM が動く** — フロッピーの FreeDOS + BIOS のハードディスク (C:) に入れた
 /// DOOM shareware 1.9。`DOOM` と打つと DOS/4GW が保護モードへ上がり、mode 13h に
-/// タイトル画面 (パレットを積んだ絵) が出る。像は make-doom-hdd.sh の産物で、
-/// 無ければ飛ばす (CI は rustx86-images から取る)
+/// タイトル画面 (パレットを積んだ絵) が出る。DOS 版 DOOM は Mode Y (チェーン4 off、
+/// 4 プレーン) で描くので、合成した一枚が**横に 4 枚並んでいない**ことも見る。
+/// 像は make-doom-hdd.sh の産物で、無ければ飛ばす (CI は rustx86-images から取る)。
+/// DOOM_SHOT=path で画面を PPM に落とす
 #[test]
 fn freedos_doom_reaches_mode13_title() {
     const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
@@ -327,68 +329,14 @@ fn freedos_doom_reaches_mode13_title() {
         "C: に降りられない:\n{}",
         m.text_screen_string()
     );
-    type_slowly(&mut m, "DOOM");
-    m.devices.keyboard.type_ascii("\n");
+    type_slowly(&mut m, "DOOM\n");
     // mode 13h に入るまで回す (DOS/4GW の起動 + WAD の読み込み)
     let mut entered = false;
-    let mut ring: std::collections::VecDeque<(u16, u32, [u8; 6])> = std::collections::VecDeque::new();
-    let mut was_pe = false;
-    let mut switches = 0;
     for _ in 0..3_000_000_000u64 {
-        let pe = m.cpu.pe();
-        if was_pe && !pe && switches < 3 {
-            switches += 1;
-            eprintln!("--- PE 1→0 #{switches}: idt={:#x}/{:#x} cs:ip={:04x}:{:x} sregs={:x?}", m.cpu.idtr_base, m.cpu.idtr_limit, m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip, &m.cpu.sregs[..6]);
-            for (cs, ip, b) in ring.iter() { eprintln!("    {cs:04x}:{ip:05x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}", b[0], b[1], b[2], b[3], b[4], b[5]); }
-            // 落ちた後の 80 命令 (実行順、重複畳み)
-            let mut last = (0u16, 0u32);
-            let mut shown = 0;
-            while shown < 80 {
-                let k = (m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip);
-                if k != last {
-                    last = k;
-                    let lin = m.cpu.lin(rustx86_core::cpu::CS, m.cpu.ip);
-                    let b: Vec<String> = (0..6).map(|i| format!("{:02x}", m.read8(lin + i))).collect();
-                    eprintln!("  > {:04x}:{:05x} {} ax={:x} bx={:x} cx={:x} dx={:x} sp={:x} ds={:x} ss={:x} pe={} idt={:#x}/{:#x}", k.0, k.1, b.join(" "), m.cpu.regs[0], m.cpu.regs[3], m.cpu.regs[1], m.cpu.regs[2], m.cpu.regs[4], m.cpu.sregs[3], m.cpu.sregs[2], m.cpu.pe(), m.cpu.idtr_base, m.cpu.idtr_limit);
-                    shown += 1;
-                }
-                m.step();
-            }
-        }
-        was_pe = pe;
-        if switches < 3 {
-            let lin = m.cpu.lin(rustx86_core::cpu::CS, m.cpu.ip);
-            let mut b = [0u8; 6];
-            for (i, x) in b.iter_mut().enumerate() { *x = m.read8(lin + i as u32); }
-            let k = (m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip, b);
-            if ring.back().map(|e| (e.0, e.1)) != Some((k.0, k.1)) { ring.push_back(k); if ring.len() > 24 { ring.pop_front(); } }
-        }
         m.step();
         if m.video_mode == 0x13 {
             entered = true;
             break;
-        }
-        if m.first_fault.is_some() && m.halted {
-            break;
-        }
-    }
-    if !entered {
-        eprintln!("止まった場所: cr0={:#x} cs:ip={:04x}:{:08x} halted={} IF={} regs={:x?} sregs={:x?} idt={:#x}/{:#x} gdt={:#x}/{:#x} int_counts(8,9,13,0x21,0x31)={:?}",
-            m.cpu.cr0, m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip, m.halted, m.cpu.flag(rustx86_core::cpu::IF), &m.cpu.regs[..8], &m.cpu.sregs[..6], m.cpu.idtr_base, m.cpu.idtr_limit, m.cpu.gdtr_base, m.cpu.gdtr_limit,
-            [m.int_counts[8], m.int_counts[9], m.int_counts[13], m.int_counts[0x21], m.int_counts[0x31]]);
-        let mut seen = std::collections::BTreeMap::new();
-        for _ in 0..20_000 { let k = (m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip); *seen.entry(k).or_insert(0u32) += 1; m.step(); }
-        let mut v: Vec<_> = seen.into_iter().collect(); v.sort_by(|a, b| b.1.cmp(&a.1));
-        for ((cs, ip), n) in v.iter().take(12) {
-            let lin = m.cpu.lin(rustx86_core::cpu::CS, *ip); let _ = cs;
-            let bytes: Vec<String> = (0..8).map(|i| format!("{:02x}", m.read8(lin + i))).collect();
-            eprintln!("  {cs:04x}:{ip:08x} x{n} {}", bytes.join(" "));
-        }
-        if let Some((v, cs, ip)) = m.first_fault {
-            let lin = (cs as u32) << 4 | ip;
-            let bytes: Vec<String> = (0..16).map(|i| format!("{:02x}", m.read8(lin + i))).collect();
-            eprintln!("fault vec={v} at {cs:04x}:{ip:04x} bytes={} regs={:x?} sregs={:x?} cr0={:#x} ip_now={:04x}:{:04x} halted={}",
-                bytes.join(" "), &m.cpu.regs[..8], &m.cpu.sregs[..6], m.cpu.cr0, m.cpu.sregs[rustx86_core::cpu::CS], m.cpu.ip, m.halted);
         }
     }
     assert!(
@@ -401,11 +349,36 @@ fn freedos_doom_reaches_mode13_title() {
     for _ in 0..300_000_000u64 {
         m.step();
     }
+    assert!(
+        m.devices.vga.planar,
+        "DOOM は Mode Y (チェーン4 off) で描くはず"
+    );
     let fb = m.framebuffer();
     let mut hist = [0usize; 256];
-    for &p in fb {
+    for &p in fb.iter() {
         hist[p as usize] += 1;
     }
     let colors = hist.iter().filter(|&&n| n > 0).count();
     assert!(colors >= 32, "画素が絵になっていない (色数 {colors})");
+    // 横に 4 枚並んでいない: 行 100 が周期 80 で繰り返していたらプレーンが線形に落ちている
+    let row = &fb[100 * GFX_COLS..101 * GFX_COLS];
+    let periodic = (0..GFX_COLS - 80)
+        .filter(|&x| row[x] == row[x + 80])
+        .count();
+    assert!(
+        periodic < (GFX_COLS - 80) / 2,
+        "行 100 が周期 80 で繰り返している ({periodic}/{}): Mode Y が線形に落ちている",
+        GFX_COLS - 80
+    );
+    // DOOM_SHOT=path で画面を PPM に落とす (ブログ・目視用)
+    if let Ok(path) = std::env::var("DOOM_SHOT") {
+        let pal = m.devices.dac.palette();
+        let mut out = format!("P6\n{GFX_COLS} {} 255\n", GFX_LEN / GFX_COLS).into_bytes();
+        for &p in fb.iter() {
+            for c in 0..3 {
+                out.push(pal[p as usize * 3 + c] << 2);
+            }
+        }
+        std::fs::write(&path, out).expect("write shot");
+    }
 }

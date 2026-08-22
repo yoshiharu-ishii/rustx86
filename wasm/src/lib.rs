@@ -55,6 +55,8 @@ pub struct Emulator {
     pending_batch: Vec<(u32, u32, u32)>,
     /// 今 instantiate 待ちのバッチのモジュール番号
     pending_module: u32,
+    /// Mode Y の合成画面の置き場 (fb_ptr が指す)
+    frame: Vec<u8>,
 }
 
 impl Emulator {
@@ -65,6 +67,7 @@ impl Emulator {
             jit_rt: Box::new(jit::JitRt::new()),
             pending_batch: Vec::new(),
             pending_module: 0,
+            frame: Vec::new(),
         }
     }
 }
@@ -411,8 +414,15 @@ impl Emulator {
     /// mode 13h フレームバッファ (320×200、1バイト=色番号) の先頭ポインタ。
     /// text_vram_ptr と同じゼロコピーの窓。**ビューは毎フレーム作り直すこと**
     /// (wasmメモリがgrowで移動すると古いビューは死ぬ)
-    pub fn fb_ptr(&self) -> *const u8 {
-        self.m.framebuffer().as_ptr()
+    pub fn fb_ptr(&mut self) -> *const u8 {
+        // Mode Y (DOOM) はプレーンから合成した一枚を返す (持ち物に置いてポインタを渡す)
+        match self.m.framebuffer() {
+            std::borrow::Cow::Borrowed(s) => s.as_ptr(),
+            std::borrow::Cow::Owned(v) => {
+                self.frame = v;
+                self.frame.as_ptr()
+            }
+        }
     }
 
     pub fn fb_len(&self) -> usize {

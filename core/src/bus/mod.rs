@@ -50,6 +50,10 @@ pub enum IoTarget {
     Crtc,
     /// 0x3C6-0x3C9: RAMDAC (256色パレット)
     Dac,
+    /// 0x3C4 / 0x3C5: VGA シーケンサ (マップマスク、チェーン4 — Mode Y の入口)
+    VgaSeq,
+    /// 0x3CE / 0x3CF: VGA グラフィックスコントローラ (読み出しマップ等)
+    VgaGc,
     /// 0x3DA: 入力状態レジスタ1 (垂直帰線・表示ブランク)。
     /// レジスタの実体は無く、機械の時計から合成する — ゲームはここを
     /// ポーリングしてテンポを取る (ティアリング無しの描き換えの合図)
@@ -102,6 +106,8 @@ pub struct Devices {
     pub crtc: crate::dev::Crtc,
     /// RAMDAC (0x3C6-0x3C9)。mode 13h の256色パレット
     pub dac: crate::dev::Dac,
+    /// VGA シーケンサ/GC (0x3C4/5, 0x3CE/F)。Mode Y (unchained) のプレーン
+    pub vga: crate::dev::Vga,
     /// システム制御ポート (0x61)。bit4がDRAMリフレッシュの矩形波で、
     /// OSはこれを数えて時間を測ることがある
     pub sysctl: u8,
@@ -132,6 +138,7 @@ impl Devices {
             cmos: crate::dev::Cmos::new(),
             crtc: crate::dev::Crtc::new(),
             dac: crate::dev::Dac::new(),
+            vga: crate::dev::Vga::new(),
             sysctl: 0,
             net: None,
             pci: None,

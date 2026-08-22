@@ -1043,7 +1043,9 @@ pub fn layout(m: &Machine) -> JitLayout {
         mem_len: m.mem.len(),
         hidden: m.cpu.hidden.as_ptr() as usize,
         sregs: m.cpu.sregs.as_ptr() as usize,
-        vram_lo: crate::bus::VRAM_TEXT_BASE,
+        // 生成コードの脱出窓は 0xA0000-0xBFFFF 丸ごと: Mode Y (DOOM) の画素の窓も
+        // ヘルパ側の判定 (fast_write) に落ちる。Linux はここに書かないので税は無い
+        vram_lo: crate::bus::VRAM_GFX_BASE,
         vram_hi: crate::bus::VRAM_TEXT_END,
         jit_budget: &m.jit_budget as *const u32 as usize,
         cr0: &m.cpu.cr0 as *const u32 as usize,

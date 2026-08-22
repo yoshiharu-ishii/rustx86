@@ -90,6 +90,13 @@ impl Machine {
             });
         }
         self.mem[a] = val;
+        // Mode Y (チェーン4 off) の間だけ、0xA0000 の窓は装置 — マップマスクの
+        // プレーンへ書き、窓には読み出しマップのプレーンの値を残す (dev/chip/vga.rs)
+        if self.devices.vga.planar
+            && (bus::VRAM_GFX_BASE as usize..bus::VRAM_GFX_BASE as usize + 0x1_0000).contains(&a)
+        {
+            self.mem[a] = self.devices.vga.write(a - bus::VRAM_GFX_BASE as usize, val);
+        }
         // コードを控えたページへの書き込みは写しを無効化 (自己書き換え対策)。
         // データページなら has_code の1判定で素通り (ADR-0007の許容コスト)
         self.dcache.note_write(a as u32);
@@ -134,6 +141,9 @@ impl Machine {
         if self.dbg.on || (bus::VRAM_TEXT_BASE..=bus::VRAM_TEXT_END).contains(&(a as u32)) {
             return false;
         }
+        if self.devices.vga.planar && self.in_gfx_window(a, width as usize) {
+            return false; // Mode Y の窓はバイトごとの道 (プレーンへ)
+        }
         for i in 0..width as usize {
             self.mem[a + i] = (val >> (i * 8)) as u8;
         }
@@ -162,9 +172,53 @@ impl Machine {
     /// **ただのRAMの窓**である。書き込みフックもdirtyも無く、表示側が
     /// 毎フレーム全読みして描く (64KB。設計原則は docs/roadmap.md の 6a —
     /// フック式にするとゲストの画素ストアが全部JITの高速路から弾かれる)
-    pub fn framebuffer(&self) -> &[u8] {
+    /// 合成済みの 320×200 (1バイト=色番号)。チェーン4 (普段) なら RAM の窓をそのまま、
+    /// Mode Y (DOOM) ならプレーンから CRTC の開始番地で合成した一枚
+    pub fn framebuffer(&self) -> std::borrow::Cow<'_, [u8]> {
+        if self.devices.vga.planar {
+            let mut out = vec![0u8; bus::GFX_LEN];
+            self.devices
+                .vga
+                .compose(self.devices.crtc.start_offset() as usize, &mut out);
+            return std::borrow::Cow::Owned(out);
+        }
         let b = bus::VRAM_GFX_BASE as usize;
-        &self.mem[b..b + bus::GFX_LEN]
+        std::borrow::Cow::Borrowed(&self.mem[b..b + bus::GFX_LEN])
+    }
+
+    /// 物理番地 a から width バイトが mode 13h の窓 (0xA0000-0xAFFFF) に掛かるか
+    #[inline]
+    pub(crate) fn in_gfx_window(&self, a: usize, width: usize) -> bool {
+        let lo = bus::VRAM_GFX_BASE as usize;
+        a + width > lo && a < lo + 0x1_0000
+    }
+
+    /// シーケンサ/GC の書き込みが起こした、RAM の窓との同期 (dev/chip/vga.rs の約束)
+    pub(crate) fn vga_event(&mut self, ev: crate::dev::chip::vga::VgaEvent) {
+        use crate::dev::chip::vga::VgaEvent;
+        let lo = bus::VRAM_GFX_BASE as usize;
+        match ev {
+            VgaEvent::None => {}
+            VgaEvent::EnteredPlanar => {
+                let win = self.mem[lo..lo + 0x1_0000].to_vec();
+                self.devices.vga.unchain(&win);
+                let p = self.devices.vga.read_map();
+                self.mem[lo..lo + 0x1_0000].copy_from_slice(self.devices.vga.plane(p));
+            }
+            VgaEvent::LeftPlanar => {
+                let mut win = vec![0u8; 0x1_0000];
+                self.devices.vga.rechain(&mut win);
+                self.mem[lo..lo + 0x1_0000].copy_from_slice(&win);
+            }
+            VgaEvent::ReadMapChanged => {
+                if self.devices.vga.planar {
+                    let p = self.devices.vga.read_map();
+                    self.mem[lo..lo + 0x1_0000].copy_from_slice(self.devices.vga.plane(p));
+                }
+            }
+        }
+        // 窓を丸ごと書き換えた: 自己書き換え検出 (コードを控えたページ) の申告
+        self.dcache.note_write_range(lo as u32, 0x1_0000);
     }
 
     pub fn text_vram(&self) -> &[u8] {
