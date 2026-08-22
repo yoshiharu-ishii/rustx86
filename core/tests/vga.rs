@@ -306,7 +306,7 @@ fn freedos_bounce_ball_moves_and_exits_on_key() {
 /// DOOM_SHOT=path で画面を PPM に落とす
 #[test]
 fn freedos_doom_reaches_mode13_title() {
-    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/freedos-hdd.img");
     let Ok(hdd) = std::fs::read(HDD) else {
         eprintln!("skip: {HDD} が無い");
         return;
@@ -390,7 +390,7 @@ fn freedos_doom_reaches_mode13_title() {
 #[test]
 #[ignore]
 fn freedos_doom_plays() {
-    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/freedos-hdd.img");
     let hdd = std::fs::read(HDD).expect("doom-hdd.img");
     let image = std::fs::read(FREEDOS_IMAGE).expect("fd14games.img");
     let mut m = Machine::with_profile(MachineProfile::pc_floppy(16));
@@ -481,7 +481,7 @@ fn freedos_doom_plays() {
 #[test]
 #[ignore]
 fn freedos_doom_lockstep() {
-    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/doom-hdd.img");
+    const HDD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../images/freedos-hdd.img");
     let hdd = std::fs::read(HDD).expect("doom-hdd.img");
     let image = std::fs::read(FREEDOS_IMAGE).expect("fd14games.img");
     let boot = |dbg: bool| {
