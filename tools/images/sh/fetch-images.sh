@@ -243,6 +243,8 @@ publish_to_web() {
   [ -f "$IMAGES/fd14games.img" ] && cp "$IMAGES/fd14games.img" "$WEB/fd14boot.img"
   [ -f "$IMAGES/vmlinuz-lts" ] && cp "$IMAGES/vmlinuz-lts" "$WEB/vmlinuz-lts"
   [ -f "$IMAGES/initramfs-lts" ] && cp "$IMAGES/initramfs-lts" "$WEB/initramfs-lts"
+  # ISO 起動の実物 (Tiny Core)。ライブラリは居れば並べる (probe)
+  [ -f "$IMAGES/Core-current.iso" ] && cp "$IMAGES/Core-current.iso" "$WEB/Core-current.iso"
   say "web/ へ複製した"
 }
 
