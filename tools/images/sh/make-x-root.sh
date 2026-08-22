@@ -101,6 +101,10 @@ Section "InputDevice"
     Identifier "mouse"
     Driver "evdev"
     Option "Device" "/dev/input/event1"
+    # 加速を切る: ブラウザが送った差分 = 動く画素。ブラウザは枠に入るたびに
+    # 左上へ押し込んで位置を合わせ直すので、相対デバイスのまま絶対位置に見える
+    Option "AccelerationScheme" "none"
+    Option "AccelerationProfile" "-1"
 EndSection
 
 Section "Device"
