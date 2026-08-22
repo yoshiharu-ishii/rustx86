@@ -248,6 +248,8 @@ export class Machine {
 
     // PCスピーカー (画面と同じポーリングの分業。鳴らすのは main.js)
     this.onTone?.(this.emu.speaker_tone());
+    // OPL2: 描き手が実時間ぶんのサンプルを引き出す (core の合成器)
+    this.onOpl?.((rate, n) => this.emu.opl_render(rate, n));
 
     // NIC。フレームの送り出しと注入はスライス境界でまとめて行う
     this.netlink?.pump(this.emu);

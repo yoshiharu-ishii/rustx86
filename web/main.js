@@ -15,6 +15,7 @@ import { Debugger } from './debugger.js';
 import { mountLinux } from './linux-machine.js';
 import { packSnapshot, unpackSnapshot, isSnapshotFile, SNAP_EXT } from './snapfile.js';
 import { Speaker } from './speaker.js';
+import { Opl } from './opl.js';
 import { NetLink } from './netlink.js';
 // 画面の**判断**は decide.js に集めてある (node --test で押さえられる)。
 // ここは配線に徹する — どの要素をどう出すか、いつ機械を回すか
@@ -28,8 +29,9 @@ const term = new Terminal($('screen'), { scrollback: 1000 });
 // PCスピーカー。全機械で1個 — 実機にもスピーカーは1個しか付いていない。
 // ブラウザの自動再生ポリシーがあるので、最初のキー/クリックで unlock する
 const speaker = new Speaker();
+const opl = new Opl();
 for (const ev of ['keydown', 'pointerdown']) {
-  document.addEventListener(ev, () => speaker.unlock(), { once: false, capture: true });
+  document.addEventListener(ev, () => { speaker.unlock(); opl.unlock(); }, { once: false, capture: true });
 }
 
 let machine = null;
@@ -229,6 +231,8 @@ function boot(image, label, hdd = null) {
     syncControls();
   };
   machine.onTone = hz => speaker.update(hz);
+  // Adlib (OPL2): 実時間で経った分のサンプルを core から引き出して鳴らす
+  machine.onOpl = render => opl.pump(n => render(opl.rate, n));
   // **NICを挿すのは電源を入れるこの瞬間だけ。** 起動時にしか装置を探さない
   // ゲスト (ELKSのカーネル) が居るので、後から挿しても見えない — 実機と同じ
   if (link) attachNet(machine);
