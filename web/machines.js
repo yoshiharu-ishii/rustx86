@@ -54,15 +54,18 @@ export const MACHINES = [
     sub: 'DOS',
     image: './fd14boot.img',
     status: 'ok',
+    // BIOS INT 13h のハードディスク (C:)。フロッピー (A:) から起動したまま C: が見える
+    hdd: './freedos-hdd.img.gz',
     note:
-      'DOSプロンプト (A:\\>) まで自動で進む。ELKSと違って画面もキーもディスクも' +
-      'BIOS経由なので、BIOS層の検証になっている。' +
-      'ELIZA / ZMIY / ROW4T が動く。ZMIY は50行の盤面を描いて、見える25行の窓を' +
-      'CRTCで蛇に追従させる (ハードウェアスクロール)。' +
-      'HANGMAN だけは CGAグラフィックスを要求するので Tier 6 待ち — ' +
-      '画面が白いのは「描いていない」のではなく「描く先が無い」ためで、要求は記録に残る。' +
-      'AIR はPCスピーカーでバッハ (G線上のアリア) を演奏するデモ (キーで停止)。' +
-      'DEBUG (lDebug) も入っているので、DEBUG AIR.COM → u 100 で中身を逆アセンブルできる。',
+      'DOS プロンプトまで自動で進み、**C:\\>** で止まる。A: は FreeDOS 1.4 のフロッピー、' +
+      'C: は BIOS のハードディスク (16MB FAT16): **C:\\DOOM に DOOM shareware 1.9 (DOS 版)**、' +
+      'C:\\GAMES に ELIZA / ZMIY / ROW4T / AIR / BOUNCE / DEBUG。`CD DOOM` → `DOOM` で ' +
+      'mode 13h にタイトルが出て遊べる (矢印で移動、Ctrl で撃つ、Esc でメニュー。音は OPL2 待ち)。' +
+      'ZMIY は50行の盤面を描いて、見える25行の窓をCRTCで蛇に追従させる (ハードウェアスクロール)。' +
+      'HANGMAN だけは CGAグラフィックスを要求するので動かない。' +
+      'AIR はPCスピーカーでバッハ (G線上のアリア) を演奏するデモ、BOUNCE は mode 13h で跳ねる8色のボール。' +
+      'DEBUG (lDebug) で AIR.COM → u 100 と打てば中身を逆アセンブルできる。' +
+      '画面もキーもディスクもBIOS経由なので、BIOS層の検証になっている。',
     // **選んだらプロンプトまで自動で進む。**
     //
     // このフロッピーは本来インストーラを起動する。素のプロンプトに降りるには
@@ -72,41 +75,19 @@ export const MACHINES = [
     script: [
       { when: 'FreeDOS kernel', send: { scancodes: [0x3f, 0xbf] } }, // F5
       { when: 'full shell command line', send: '\\FREEDOS\\BIN\\COMMAND.COM\n' },
+      { when: 'A:\\>', send: 'C:\n' },
     ],
     // ネットワーク有効時 (?net=) だけ script の続きとして流す:
     // パケットドライバ常駐 → mTCP設定 → DHCP でアドレス取得まで。
     // PING は自分で打つ楽しみに残す (\ が要らないのでどのキーボードでも打てる)
     netScript: [
-      { when: 'A:\\>', send: 'NE2000 0x60 3 0x300\n' },
-      { when: 'My Ethernet address', send: 'SET MTCPCFG=A:\\MTCP.CFG\nDHCP\n' },
+      { when: 'C:\\>', send: 'NE2000 0x60 3 0x300\n' },
+      { when: 'My Ethernet address', send: 'SET MTCPCFG=C:\\MTCP.CFG\nDHCP\n' },
     ],
     source: 'https://download.freedos.org/1.4/FD14-FloppyEdition.zip',
     sourceLabel: 'FreeDOS 1.4 Floppy Edition',
     // 配布物の 144m/x86BOOT.img を fd14boot.img として置く
-    file: 'fd14boot.img (配布zipの 144m/x86BOOT.img)',
-  },
-  {
-    group: 'OSライブラリ',
-    id: 'freedos-doom',
-    label: 'FreeDOS + DOOM',
-    sub: 'DOS — C: に DOOM (shareware 1.9)',
-    image: './fd14boot.img',
-    // BIOS INT 13h のドライブ 0x80。フロッピーから起動したまま C: が見える
-    hdd: './doom-hdd.img.gz',
-    status: 'ok',
-    note:
-      'FreeDOS のフロッピーで起動し、BIOS のハードディスク (C:、16MB の FAT16) に ' +
-      'DOOM shareware 1.9 が入っている。プロンプトまで自動で進み C:\\DOOM に移るので、' +
-      '**DOOM** と打つ。mode 13h の画面にタイトルが出て、PC スピーカーは無音 ' +
-      '(音楽は OPL2 = 6t 待ち)。tools/images/sh/make-doom-hdd.sh で作る',
-    script: [
-      { when: 'FreeDOS kernel', send: { scancodes: [0x3f, 0xbf] } }, // F5
-      { when: 'full shell command line', send: '\\FREEDOS\\BIN\\COMMAND.COM\n' },
-      { when: 'A:\\>', send: 'C:\nCD \\DOOM\n' },
-    ],
-    source: 'https://www.gamers.org/pub/idgames/idstuff/doom/doom19s.zip',
-    sourceLabel: 'DOOM shareware 1.9 (idgames)',
-    file: 'doom-hdd.img.gz (make-doom-hdd.sh の産物) + fd14boot.img',
+    file: 'fd14boot.img (配布zipの 144m/x86BOOT.img) + freedos-hdd.img.gz (make-doom-hdd.sh の産物)',
   },
   {
     group: 'OSライブラリ',

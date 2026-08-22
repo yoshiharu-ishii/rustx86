@@ -1,8 +1,9 @@
 #!/bin/sh
-# DOS 版 DOOM (shareware 1.9) 入りのハードディスク像 — BIOS INT 13h のドライブ 0x80 (C:)。
+# FreeDOS の C: (BIOS INT 13h のドライブ 0x80) — DOS 版 DOOM (shareware 1.9) + 自作ゲーム + mTCP。
+# フロッピー (A:) で起動して、C:\DOOM と C:\GAMES を使う。
 #
 #   tools/images/sh/make-doom-hdd.sh            # images/doom/unpacked/ から焼く
-#   HDD=images/doom-hdd.img cargo run --release --example boot -- images/fd14boot.img
+#   HDD=images/freedos-hdd.img cargo run --release --example boot -- images/fd14boot.img
 #
 # 素材: idgames の doom19s.zip (shareware、再配布自由)。中の DOOMS_19.1/.2 を結合すると
 # PKZIP の自己解凍書庫なので unzip で開く (DOOM.EXE は DOS/4GW 同梱、DOOM1.WAD 4.2MB):
@@ -18,7 +19,7 @@ set -e
 cd "$(dirname "$0")/../../.."
 [ -f /.dockerenv ] || exec tools/images/in-linux.sh sh "$0" "$@"
 src=${1:-images/doom/unpacked}
-out=images/doom-hdd.img
+out=images/freedos-hdd.img
 [ -f "$src/DOOM.EXE" ] && [ -f "$src/DOOM1.WAD" ] || { echo "$src に DOOM.EXE / DOOM1.WAD が無い (上のコメントの手順で展開)" >&2; exit 1; }
 
 MB=${MB:-16}
@@ -48,10 +49,24 @@ off=$((START * 512))
 mformat -i "$out@@$off" -t $CYL -h $HEADS -s $SPT -H $START -v DOOM ::
 mmd -i "$out@@$off" ::/DOOM
 mcopy -i "$out@@$off" "$src"/DOOM.EXE "$src"/DOOM1.WAD "$src"/SETUP.EXE "$src"/README.TXT ::/DOOM/
+# 自作ゲーム・DEBUG・mTCP はフロッピー (fd14games.img) から写す — A: と同じ物が C: にも居て、
+# プロンプトを C:\> に置けるように。フロッピーが無ければ DOOM だけ
+fd=images/fd14games.img
+if [ -f "$fd" ]; then
+  mmd -i "$out@@$off" ::/GAMES
+  tmp=$(mktemp -d)
+  for f in ELIZA.EXE RESPONSE.DAT BOUNCE.COM ZMIY.EXE ROW4T.COM HANGMAN.EXE AIR.COM DEBUG.COM; do
+    mcopy -i "$fd" "::/$f" "$tmp/" 2>/dev/null && mcopy -i "$out@@$off" "$tmp/$f" "::/GAMES/" || true
+  done
+  for f in NE2000.COM PING.EXE DHCP.EXE HTGET.EXE MTCP.CFG; do
+    mcopy -i "$fd" "::/$f" "$tmp/" 2>/dev/null && mcopy -i "$out@@$off" "$tmp/$f" "::/" || true
+  done
+  rm -rf "$tmp"
+fi
 # 小さな案内 (DOS の CR+LF)
-printf 'C:\\DOOM> DOOM\r\n  -nomouse -nosound などは DOOM.EXE の引数\r\n' > "$out.readme.txt"
+printf 'C:\\DOOM> DOOM        (DOS 版 DOOM shareware 1.9)\r\nC:\\GAMES> BOUNCE    (mode 13h のボール)  AIR (PC スピーカー)  ZMIY / ELIZA / ROW4T\r\nC:\\> NE2000 0x60 3 0x300   SET MTCPCFG=C:\\MTCP.CFG   DHCP   PING 1.1.1.1\r\n' > "$out.readme.txt"
 mcopy -i "$out@@$off" "$out.readme.txt" ::/README.TXT
 rm -f "$out.readme.txt"
-mdir -i "$out@@$off" ::/DOOM
-gzip -9 -c "$out" > web/doom-hdd.img.gz
-echo "$out: $(du -h "$out" | cut -f1) / web/doom-hdd.img.gz: $(du -h web/doom-hdd.img.gz | cut -f1)"
+mdir -i "$out@@$off" ::/DOOM; mdir -i "$out@@$off" ::/GAMES 2>/dev/null || true
+gzip -9 -c "$out" > web/freedos-hdd.img.gz
+echo "$out: $(du -h "$out" | cut -f1) / web/freedos-hdd.img.gz: $(du -h web/freedos-hdd.img.gz | cut -f1)"
