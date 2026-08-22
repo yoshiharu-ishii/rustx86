@@ -1,6 +1,6 @@
 # 0026: fastmem — ホストMMUでゲストメモリを写像する (F2)
 
-日付: 2026-08-18 / 状態: 採用 (ユーザー裁定「互換を壊さないなら」) / 関係: [jit-roadmap3](../reference/jit-roadmap3.md), [0020](0020-external-review3.md), [0025](0025-tick-256.md)
+日付: 2026-08-18 / 状態: 採用 (ユーザー裁定「互換を壊さないなら」) / 関係: [jit-roadmap3](../reference/jit-roadmap3.md), [0020](0020-external-review-round3.md), [0025](0025-tick-256.md)
 
 ## 背景
 
