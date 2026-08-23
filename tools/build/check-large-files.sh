@@ -23,7 +23,7 @@ set -eu
 LIMIT=${LIMIT:-1000000}
 MODE=${1:-}
 # 著作物が入りやすい拡張子 (小文字で比べる)。テキスト・画像 (png/svg) は対象外
-EXT_RE='\.(img|ima|iso|bin|rom|com|exe|wad|dll|sys|drv|ovl|zip|gz|tgz|xz|bz2|7z|rar|lha|lzh|cab|arj|mp3|wav|ogg|flac|mid|mod|xm|s3m|pdf|dat|snap|a|so|o|ko|elf|efi|dmg|vhd|vmdk|qcow2|flp|dsk|d64|t64|nes|sfc|smc|gba|gb|gbc|z80|tap|tzx|adf|hdf|ipf|ttf|otf|fon|pcf)$'
+EXT_RE='\.(img|ima|iso|bin|rom|com|exe|wad|dll|sys|drv|ovl|zip|gz|tgz|xz|bz2|7z|rar|lha|lzh|cab|arj|mp3|wav|ogg|flac|mid|mod|xm|s3m|pdf|dat|snap|a|so|o|ko|elf|efi|dmg|vhd|vmdk|qcow2|flp|dsk|d64|t64|nes|sfc|smc|gba|gb|gbc|z80|tap|tzx|adf|hdf|ipf|ttf|otf|fon|pcf|pyc|pyo|class|jar)$'
 SRC_RE='\.(asm|s|c|cc|cpp|rs|go|py|ly|nasm)$'
 
 # 候補を「<size> <path>」で集める (case を $( ) の中に書くと sh が ")" で迷うので関数に)
