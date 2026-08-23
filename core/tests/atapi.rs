@@ -57,13 +57,26 @@ fn linux_mounts_iso_via_atapi() {
         "init が CD を掛けていない。dmesg:\n{out}"
     );
     // 中身を読む: ISO の /vmlinuz は images/vmlinuz-lts そのもの
-    type_serial(&mut m, "ls -l /mnt/cdrom; wc -c /mnt/cdrom/vmlinuz; printf 'DONE%s\\n' MARK\n");
-    assert!(wait_serial(&mut m, "DONEMARK", 2_000_000_000), "コマンドが終わらない:\n{}", serial(&m));
+    type_serial(
+        &mut m,
+        "ls -l /mnt/cdrom; wc -c /mnt/cdrom/vmlinuz; printf 'DONE%s\\n' MARK\n",
+    );
+    assert!(
+        wait_serial(&mut m, "DONEMARK", 2_000_000_000),
+        "コマンドが終わらない:\n{}",
+        serial(&m)
+    );
     let out = serial(&m);
     let tail = &out[out.rfind("ls -l /mnt/cdrom").unwrap_or(0)..];
-    assert!(tail.contains("vmlinuz") && tail.contains("initramfs"), "ISO の中身が見えない:\n{tail}");
+    assert!(
+        tail.contains("vmlinuz") && tail.contains("initramfs"),
+        "ISO の中身が見えない:\n{tail}"
+    );
     let want = format!("{} /mnt/cdrom/vmlinuz", kernel.len());
-    assert!(tail.contains(&want), "vmlinuz の大きさが合わない (期待 {want}):\n{tail}");
+    assert!(
+        tail.contains(&want),
+        "vmlinuz の大きさが合わない (期待 {want}):\n{tail}"
+    );
     let ide = m.devices.ide.as_ref().unwrap();
     eprintln!("ATA コマンド数: {}", ide.commands);
 }
@@ -94,11 +107,32 @@ fn tinycore_sees_its_own_cd() {
         m.run(2_000_000);
         m.devices.keyboard.type_ascii("\n");
     }
-    assert!(run_until(&mut m, "tc@box", 3_000_000_000), "シェルに届かない");
+    assert!(
+        run_until(&mut m, "tc@box", 3_000_000_000),
+        "シェルに届かない"
+    );
     m.run(5_000_000);
-    m.devices.keyboard.type_ascii("clear; ls -l /dev/sr0; dmesg | grep -iE 'ata2|sr0|pata|scsi' | tail -5; echo ENDMARK\n");
-    assert!(run_until(&mut m, "ENDMARK", 1_000_000_000), "コマンドが終わらない");
+    // 目印は打った行に現れない形で (END""MARK はシェルが連結して初めて ENDMARK になる)
+    // Tiny Core は pata_legacy + sr を組み込みで持ち、/mnt/sr0 の fstab も自分で作る
+    m.devices.keyboard.type_ascii(
+        "ls -l /dev/sr0; mount /mnt/sr0 && ls /mnt/sr0 /mnt/sr0/boot | head -8; echo END\"\"MARK\n",
+    );
+    assert!(
+        run_until(&mut m, "ENDMARK", 1_000_000_000),
+        "コマンドが終わらない"
+    );
     let screen = m.text_screen_string();
     eprintln!("--- Tiny Core の画面 ---\n{screen}");
-    eprintln!("ATA コマンド数: {}", m.devices.ide.as_ref().map(|d| d.commands).unwrap_or(0));
+    assert!(
+        screen.contains("/dev/sr0") && !screen.contains("No such file"),
+        "/dev/sr0 が無い:\n{screen}"
+    );
+    assert!(
+        screen.contains("vmlinuz") && screen.contains("core.gz"),
+        "ISO の中身 (boot/vmlinuz, core.gz) が見えない:\n{screen}"
+    );
+    eprintln!(
+        "ATA コマンド数: {}",
+        m.devices.ide.as_ref().map(|d| d.commands).unwrap_or(0)
+    );
 }
