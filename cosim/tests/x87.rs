@@ -242,6 +242,15 @@ fn x87_load_store_and_convert() {
             if name.starts_with("fprem") && v.is_subnormal() {
                 continue;
             }
+            // (台帳) Unicorn の版で答えが割れるもの: FSQRT(負) の NaN の符号 (実機は負の不定値、
+            // CI の Unicorn は正)、|x|<1 の非整数の FPREM の下位 bit (実機は x そのもの、CI の
+            // Unicorn は a - q*b の丸め)。手元 (arm64) と CI (x86_64) で違ったので比べない
+            if name.starts_with("fsqrt") && v < 0.0 {
+                continue;
+            }
+            if name.starts_with("fprem") && v.fract() != 0.0 && v.abs() < 1.0 {
+                continue;
+            }
             let (mut d, s) = with_double(v);
             d[8..16].copy_from_slice(&0.8f64.to_le_bytes());
             // 先頭に fninit: Unicorn の初期 FPU 状態は実機のリセットと違う (CW=0)
