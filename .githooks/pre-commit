@@ -1,0 +1,5 @@
+#!/bin/sh
+# 手元の門番: 1MB 超、または出自不明の binary 拡張子を commit させない (CI と同じ判定)。
+# 有効化: git config core.hooksPath .githooks
+# CI (tools/build/check-large-files.sh) が最後の砦で、こちらは push 前に気づくため
+exec sh "$(git rev-parse --show-toplevel)/tools/build/check-large-files.sh" --staged
