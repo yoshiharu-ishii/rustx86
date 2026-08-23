@@ -5,7 +5,8 @@
 // 60fpsで更新でき、キー入力も届く。wasm はここで初期化して抱える。
 //
 // メインとの約束 (postMessage):
-//   受信: {type:'boot', kernel, initrd, cmdline, ramMb, mac?, disk?}  カーネルから起動する
+//   受信: {type:'boot', kernel, initrd, cmdline, ramMb, mac?, disk?, cd?}  カーネルから起動する (cd = ATAPI の CD-ROM)
+//         {type:'boot', iso, ramMb, mac?}                CD (El Torito) から BIOS 経由で起動する
 //                                     (macがあればRTL8029、diskがあればvirtio-blkを挿す)
 //         {type:'boot', snapshot}                        起動済み控えから復元する
 //         {type:'save'}                                  今の状態を丸ごと控えて返す
@@ -94,6 +95,8 @@ self.onmessage = (e) => {
         if (msg.mac) emu.net_attach(new Uint8Array(msg.mac));
         // ディスクも同じ瞬間。initramfs-miniのinitがvdaを見つけて移り住む
         if (msg.disk) emu.blk_attach(new Uint8Array(msg.disk));
+        // CD-ROM (ATAPI、IDE secondary) も同じ瞬間。init が rustx86.ide で /mnt/cdrom に掛ける
+        if (msg.cd) emu.cd_attach(new Uint8Array(msg.cd));
         // RTCを実時刻に合わせる (TLSの証明書検証は正しい時計が前提)。
         // スナップショット復元はカーネルがもう時計を読んだ後なので合わせない
         emu.set_rtc_unix(Date.now() / 1000);

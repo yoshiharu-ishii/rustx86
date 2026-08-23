@@ -167,9 +167,9 @@ export function byGroup(machines = MACHINES) {
  *
  * `ram` は空なら自動 (initrdの展開後の大きさから決める。linux-machine.js)。
  */
-/** ISO (El Torito) の棚。Linux の機械の「ISO」つまみに並ぶ — ルートFSと排他で、
- *  選ぶと BIOS 経由 (isolinux) で起動する。中身の Linux がシリアルでなく VGA に
- *  出るので、画面はテキスト VRAM を升目で写す (linux-worker.js → ansi.js showVga) */
+/** CD-ROM の棚。Linux の機械の「CD-ROM」つまみに並ぶ。ルートFSが「—」なら CD から起動
+ *  (El Torito、BIOS 経由 — 中身の Linux が VGA に出るので画面はテキスト VRAM を升目で写す)、
+ *  ルートFSがあればカーネル起動して CD を挿した状態 (ATAPI、init が /mnt/cdrom に掛ける) */
 export const ISOS = [
   {
     name: 'Core-current.iso',
