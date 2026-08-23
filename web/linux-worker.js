@@ -378,7 +378,15 @@ function loop() {
       if (bpp === 32 && LITTLE_ENDIAN && (emu.lfb_ptr() & 3) === 0) {
         const src = new Uint32Array(wasmExports.memory.buffer, emu.lfb_ptr(), len >>> 2);
         const dst = new Uint32Array(lfbBuf);
-        for (let i = 0, n = src.length; i < n; i++) dst[i] = (src[i] >>> 8) | 0xff000000;
+        if (emu.lfb_xrgb()) {
+          // Bochs VGA (bochs-drm) の XRGB8888: u32 = 0x00RRGGBB → RGBA のメモリ並び 0xAABBGGRR
+          for (let i = 0, n = src.length; i < n; i++) {
+            const v = src[i];
+            dst[i] = 0xff000000 | ((v & 0xff) << 16) | (v & 0xff00) | ((v >>> 16) & 0xff);
+          }
+        } else {
+          for (let i = 0, n = src.length; i < n; i++) dst[i] = (src[i] >>> 8) | 0xff000000;
+        }
         fmt = 'rgba';
       } else {
         new Uint8Array(lfbBuf).set(new Uint8Array(wasmExports.memory.buffer, emu.lfb_ptr(), len));
@@ -392,7 +400,8 @@ function loop() {
     }
   }
 
-  if (isoOn) pumpVga();
+  // CD 起動の VGA (文字/mode 13h)。bochs-drm が LFB を開いたら、そちらの一枚が顔になる
+  if (isoOn && !emu.lfb_on()) pumpVga();
 
   // PCスピーカー。値はスライスごとにポーリングし、**変わったときだけ**報告する
   // (WebAudioはワーカーから触れないのでメインが鳴らす)

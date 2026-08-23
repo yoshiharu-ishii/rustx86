@@ -316,6 +316,24 @@ fn main() {
             c.reload,
             m.devices.pit.irq0_hz()
         );
+        // LFB_DUMP=path: 画面の画素 (efifb / Bochs VGA) を PPM に落とす (X の目視確認用)
+        if let (Ok(path), Some(l)) = (std::env::var("LFB_DUMP"), m.lfb) {
+            let fb = m.lfb_frame();
+            let mut ppm = format!("P6\n{} {}\n255\n", l.width, l.height).into_bytes();
+            if l.bpp == 32 {
+                if m.lfb_xrgb {
+                    ppm.extend(fb.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
+                } else {
+                    ppm.extend(fb.chunks_exact(4).flat_map(|p| [p[1], p[2], p[3]]));
+                }
+            } else {
+                ppm.extend_from_slice(fb);
+            }
+            match std::fs::write(&path, &ppm) {
+                Ok(()) => eprintln!("[boot] LFB {}x{} → {path}", l.width, l.height),
+                Err(e) => eprintln!("[boot] LFB を書けない: {e}"),
+            }
+        }
         eprintln!(
         "--- PIC0 imr={:#04x} irr={:#04x} isr={:#04x} / PIC1 imr={:#04x} irr={:#04x} isr={:#04x} / pending_irq={:?} ---",
         m.devices.pic[0].imr, m.devices.pic[0].irr, m.devices.pic[0].isr,

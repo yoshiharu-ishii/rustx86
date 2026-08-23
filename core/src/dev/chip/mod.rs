@@ -25,6 +25,7 @@
 pub mod cmos;
 pub mod crtc;
 pub mod dac;
+pub mod dispi;
 pub mod dp8390;
 pub mod ide;
 pub mod kbd;
@@ -39,6 +40,7 @@ pub mod virtio;
 pub use cmos::Cmos;
 pub use crtc::Crtc;
 pub use dac::Dac;
+pub use dispi::Dispi;
 pub use dp8390::Dp8390;
 pub use ide::Ide;
 pub use kbd::Kbd8042;

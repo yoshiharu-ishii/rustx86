@@ -58,6 +58,8 @@ pub enum IoTarget {
     VgaGc,
     /// 0x388 / 0x389: Adlib (OPL2、YM3812)。DOOM の音楽
     Opl,
+    /// 0x1CE / 0x1CF: Bochs VGA の DISPI (モード設定、16bit)。データは io_read16/io_write16 が直接
+    Dispi,
     /// 0x170-0x177 / 0x376: IDE の secondary チャネル (ATAPI の CD-ROM、IRQ15)。
     /// データポート (0x170) の 16bit 読み書きは Machine の io_read16/io_write16 が
     /// 直接素子へ渡す (8bit × 2 に割ると 1 ワードが 2 レジスタに化ける)
@@ -133,6 +135,9 @@ pub struct Devices {
     /// IDE secondary の ATAPI CD-ROM。`cd_attach` / `boot_from_iso` で挿す。
     /// 像は Machine.cd (BIOS の CD と共有) — 素子は大きさしか知らない
     pub ide: Option<crate::dev::Ide>,
+    /// Bochs VGA (PCI 1234:1111) の DISPI レジスタ。`vga_attach` / `boot_from_iso` で挿す。
+    /// VRAM は RAM 末尾 16MB (Machine.vram_base)
+    pub dispi: Option<crate::dev::Dispi>,
 }
 
 impl Default for Devices {
@@ -158,6 +163,7 @@ impl Devices {
             pci: None,
             blk: None,
             ide: None,
+            dispi: None,
         }
     }
 }

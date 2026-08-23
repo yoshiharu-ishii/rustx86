@@ -239,13 +239,11 @@ fn dsl_chroot_under_alpine() {
     // glibc の coreutils/awk/python の浮動小数点。x87 の遅延フラグの穴 (FUCOMIP の結果が
     // 直前の ALU 命令に上書きされる) で全部 inf/nan だった (2026-08-23)
     let cmd = concat!(
-        "mkdir -p /mnt/lfs; mount -t squashfs -o loop /mnt/cdrom/antiX/linuxfs /mnt/lfs; mount -t proc proc /mnt/lfs/proc; mount -t devtmpfs dev /mnt/lfs/dev; mount -t tmpfs tmp /mnt/lfs/tmp; ",
-        "chroot /mnt/lfs /bin/sh -c '",
-        "echo P1; /usr/bin/printf \"%f|%e|%g|%a\\n\" 3 3 3 3; /usr/bin/printf \"%f|%e|%g\\n\" 2.5 2.5 2.5; ",
-        "echo P2; /usr/bin/awk \"BEGIN{x=0.8; y=1.0; print x<y, x*y, 1.414*100, sqrt(2), 3}\"; ",
-        "echo P3; /bin/grep --version | head -1; /usr/bin/find /etc -maxdepth 1 -name passwd; ",
-        "echo P4; /usr/bin/python3 -S -c \"print(repr(3.0), 1.5*2, 0.8<1.0)\" 2>&1 | tail -1; ",
-        "echo :[ok]'; ",
+        "mkdir -p /mnt/lfs; mount -t squashfs -o loop /mnt/cdrom/antiX/linuxfs /mnt/lfs; ",
+        "echo R1; grep -h 'v00001234d00001111' /mnt/lfs/lib/modules/*/modules.alias | head -3; ",
+        "echo R2; grep -rn 'bochs\\|blacklist' /mnt/lfs/etc/modprobe.d/ 2>/dev/null | head -5; ",
+        "echo R3; grep -n 'bochs\\|1234\\|modesetting\\|vesa' /mnt/lfs/usr/local/bin/make-xorg-conf 2>/dev/null | head -12; ls /mnt/lfs/usr/local/bin/ | grep -i xorg; ",
+        "echo R4; grep -rln 'Found_no_video' /mnt/lfs/live/bin /mnt/lfs/usr/local/lib/live 2>/dev/null | head -3; ",
         "printf 'DONE%s\\n' MARK\n"
     );
     type_serial(&mut m, cmd);

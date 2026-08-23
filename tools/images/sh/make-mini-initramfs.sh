@@ -75,7 +75,12 @@ if [ -f images/modloop-lts ]; then
     'modules/*/kernel/drivers/cdrom/cdrom.ko' \
     'modules/*/kernel/drivers/scsi/sr_mod.ko' \
     'modules/*/kernel/fs/isofs/isofs.ko' \
-    'modules/*/kernel/drivers/block/loop.ko' >/dev/null 2>&1 || true
+    'modules/*/kernel/drivers/block/loop.ko' \
+    'modules/*/kernel/drivers/gpu/drm/drm.ko' \
+    'modules/*/kernel/drivers/gpu/drm/drm_kms_helper.ko' \
+    'modules/*/kernel/drivers/gpu/drm/drm_shmem_helper.ko' \
+    'modules/*/kernel/drivers/gpu/drm/clients/drm_client_lib.ko' \
+    'modules/*/kernel/drivers/gpu/drm/tiny/bochs.ko' >/dev/null 2>&1 || true
   find "$mlo" -name "*.ko" -exec cp {} "$work/root/lib/modules/" \;
   rm -rf "$mlo"
 fi
@@ -167,6 +172,16 @@ if /bin/busybox grep -q 'rustx86\.ide' /proc/cmdline 2>/dev/null; then
   done
   /bin/busybox mkdir -p /mnt/cdrom
   /bin/busybox mount -t iso9660 -o ro /dev/sr0 /mnt/cdrom 2>/dev/null && echo "cdrom: /dev/sr0 を /mnt/cdrom に掛けた"
+fi
+# Bochs VGA (6f)。**cmdline に rustx86.vga があるときだけ** DRM の一式を挿す — bochs (tiny) が
+# PCI 1234:1111 を掴んで /dev/dri/card0 と /dev/fb0 (fbdev エミュレーション) を生やす。
+# 依存の順 (.ko の depends= の実測、6.18): drm (i2c-core の上) → kms_helper → shmem_helper →
+# client_lib → bochs。ttm/vram_helper は 6.18 の bochs (tiny) には要らない
+if /bin/busybox grep -q 'rustx86\.vga' /proc/cmdline 2>/dev/null; then
+  for mod in drm drm_kms_helper drm_shmem_helper drm_client_lib bochs; do
+    /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
+  done
+  [ -e /dev/fb0 ] && echo "vga: bochs-drm が /dev/fb0 を生やした"
 fi
 #
 # --- ディスクがあれば、そちらを根にして移り住む ---

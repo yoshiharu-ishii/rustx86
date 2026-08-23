@@ -492,6 +492,16 @@ impl Emulator {
         self.m.lfb.map(|l| l.height).unwrap_or(0)
     }
 
+    /// LFB の画素の並びが XRGB (B,G,R,X = Bochs VGA) か。false なら [pad,R,G,B] (efifb)
+    pub fn lfb_xrgb(&self) -> bool {
+        self.m.lfb_xrgb
+    }
+
+    /// Bochs VGA (PCI) を挿す (カーネル直ロードの Linux 機で bochs-drm を使いたいとき)
+    pub fn vga_attach(&mut self) {
+        self.m.vga_attach();
+    }
+
     /// 1画素のビット数 (24 = R,G,B が1バイトずつ、赤が先頭)
     pub fn lfb_bpp(&self) -> u16 {
         self.m.lfb.map(|l| l.bpp).unwrap_or(0)
