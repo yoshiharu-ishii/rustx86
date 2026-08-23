@@ -59,6 +59,23 @@ if [ -f images/modloop-lts ]; then
     'modules/*/kernel/drivers/input/mouse/psmouse.ko' \
     'modules/*/kernel/drivers/input/mousedev.ko' \
     'modules/*/kernel/drivers/input/evdev.ko' >/dev/null 2>&1 || true
+  # CD-ROM (6c 2段目、ATAPI)。IDE secondary (0x170、IRQ15) の CD を /dev/sr0 に。
+  # 同じ modloop から 7 つ借りる。**挿すのは cmdline に rustx86.ide があるときだけ**
+  # (init を参照) — 素の起動の命令数を変えない
+  #   scsi_common + scsi_mod  SCSI の土台 (ATAPI は SCSI のパケットを ATA に乗せたもの)
+  #   libata + pata_legacy    ISA の古典 IDE ポートを叩くドライバ
+  #   cdrom + sr_mod          CD-ROM の共通層と /dev/sr0
+  #   isofs                   ISO 9660
+  #   loop                    CD の中の像 (squashfs 等) を mount -o loop で開く
+  unsquashfs -q -f -d "$mlo" images/modloop-lts \
+    'modules/*/kernel/drivers/scsi/scsi_common.ko' \
+    'modules/*/kernel/drivers/scsi/scsi_mod.ko' \
+    'modules/*/kernel/drivers/ata/libata.ko' \
+    'modules/*/kernel/drivers/ata/pata_legacy.ko' \
+    'modules/*/kernel/drivers/cdrom/cdrom.ko' \
+    'modules/*/kernel/drivers/scsi/sr_mod.ko' \
+    'modules/*/kernel/fs/isofs/isofs.ko' \
+    'modules/*/kernel/drivers/block/loop.ko' >/dev/null 2>&1 || true
   find "$mlo" -name "*.ko" -exec cp {} "$work/root/lib/modules/" \;
   rm -rf "$mlo"
 fi
@@ -141,6 +158,16 @@ done
 /bin/busybox insmod /lib/modules/psmouse.ko proto=bare 2>/dev/null
 /bin/busybox insmod /lib/modules/mousedev.ko 2>/dev/null
 /bin/busybox insmod /lib/modules/evdev.ko 2>/dev/null
+# CD-ROM (ATAPI、IDE secondary)。**cmdline に rustx86.ide があるときだけ**挿す —
+# 7 つの insmod と IDE のプローブで起動の命令数が変わるので、素の起動には持ち込まない。
+# 挿さったら /dev/sr0 を /mnt/cdrom に読み取り専用で掛ける (無ければ黙って進む)
+if /bin/busybox grep -q 'rustx86\.ide' /proc/cmdline 2>/dev/null; then
+  for mod in scsi_common scsi_mod libata pata_legacy cdrom sr_mod isofs loop; do
+    /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
+  done
+  /bin/busybox mkdir -p /mnt/cdrom
+  /bin/busybox mount -t iso9660 -o ro /dev/sr0 /mnt/cdrom 2>/dev/null && echo "cdrom: /dev/sr0 を /mnt/cdrom に掛けた"
+fi
 #
 # --- ディスクがあれば、そちらを根にして移り住む ---
 #

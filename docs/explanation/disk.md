@@ -155,4 +155,7 @@ fetch後に `DecompressionStream('gzip')` で**ホスト側で1回だけ**解く
 ## まだ無いもの
 
 - ゲストが書いた内容の持ち帰り (いまはスナップショット経由のみ)
-- ATA/IDE (互換の相手が来たら)。virtio-mmio (PCIの無い機械に挿す口)
+- ATA の HDD (6d)。**ATAPI の CD は 2026-08-23 に入った** (dev/chip/ide.rs、IDE secondary
+  0x170/0x376、IRQ15、PIO)。速さは virtio、互換は ATA、の分担どおり: CD は読むだけなので
+  PIO で足りる (2048B × 1 ブロックを insw で運ぶ)。HDD を足すなら primary に
+  READ/WRITE SECTORS を乗せる。virtio-mmio (PCIの無い機械に挿す口) は台帳のまま

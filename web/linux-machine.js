@@ -56,11 +56,14 @@ function autoRam(initrd) {
  */
 export function mountLinux(canvas, opts = {}) {
   const term = (sharedTerm ??= new AnsiTerminal(canvas, { cols: 80, rows: 24 }));
+  term.layout = localStorage.getItem('rustx86.layout') || 'jp';
   term.reset();
   // クリップボードの行き先は**呼び手 (main.js) の一本道**。
   // ここで onData へ直に流していたので、VGA機とは別の作法になっていた
   // 画素の顔のときの物理キー。ワーカー越しに 8042 へ (VGA機の key() と同じ経路)
   term.onKey = (code, down) => worker?.postMessage({ type: 'key', code, down });
+  // JIS 配列の文字。8042 が US の位置 (+Shift) に直して流す
+  term.onChar = ch => worker?.postMessage({ type: 'char', ch });
   // マウス (相対移動。絶対位置に見せる仕掛けは ansi.js)。同じ 8042 の第2ポートへ
   term.onMouse = (dx, dy, buttons) => worker?.postMessage({ type: 'mouse', dx, dy, buttons });
   // (捕獲は無くなった — マウスは画面の上に居る間だけゲストへ届く。念のため口は残す)
@@ -218,11 +221,13 @@ export function mountLinux(canvas, opts = {}) {
     // RAMの確定は initrd を読んだ後 (自動のときは中身の大きさが要る)
     let ramMb = want.ramMb || 0;
 
-    // **ISO (El Torito) から起動する道** — ルートFSと排他 (画面のつまみがそうしている)。
-    // カーネルも initramfs も ISO の中にあり、BIOS 経由で isolinux が上げる。
-    // 持ち込みの ISO (ドロップ) はファイルそのもの、ライブラリの ISO は名前で取る
+    // **CD-ROM**: 像はドロップされたファイルか、ライブラリの名前。起動元はルートFSの有無で決まる —
+    //   ルートFS「—」(want.name 空) か持ち込みの ISO → **CD から起動** (El Torito、BIOS 経由、
+    //   カーネルも initramfs も CD の中、画面は VGA)
+    //   ルートFS あり → カーネル起動して **CD を挿す** (ATAPI。init が rustx86.ide で /mnt/cdrom に掛ける)
     let iso = givenIso;
-    const isoFile = givenIso ? isoName || 'ISO' : want.iso || '';
+    const isoFile = givenIso ? isoName || 'ISO' : want.cd || want.iso || '';
+    const cdBoot = !!givenIso || (!!isoFile && !want.name);
     if (!snapshot && !iso && isoFile) {
       imageName = isoFile;
       try {
@@ -234,15 +239,15 @@ export function mountLinux(canvas, opts = {}) {
         return;
       }
     }
-    if (iso) {
+    if (cdBoot) {
       imageName = isoFile;
       usedInitrd = '';
       usedDisk = '';
-      status(`${isoFile} を起動します (BIOS 経由)`);
+      status(`${isoFile} から起動します (CD、BIOS 経由)`);
     }
 
-    if (iso) {
-      // ISO 起動にカーネルの取り寄せは無い
+    if (cdBoot) {
+      // CD 起動にカーネルの取り寄せは無い
     } else if (!snapshot && givenKernel) {
       // 持ち込みのカーネル。**initramfs はページの隣から借りる** —
       // カーネルだけ落とされても、ルートFSが無ければシェルに着けないので
@@ -295,7 +300,7 @@ export function mountLinux(canvas, opts = {}) {
     // ディスク型ならイメージも取る。**無ければディスク無しで進む** —
     // ミニのシェルには落ちるので、真っ暗になるよりは説明して動かす
     let disk = null;
-    if (!snapshot && usedDisk && !iso) {
+    if (!snapshot && usedDisk && !cdBoot) {
       try {
         disk = await fetchWithProgress(`./${usedDisk}`, usedDisk);
         // .gz は輸送路の圧縮。**ここ (ホスト) で1回だけ解く** — ゲストの
@@ -319,14 +324,14 @@ export function mountLinux(canvas, opts = {}) {
     // ディスク型はinitrdがミニなので自然に128MBになる — ディスクの中身は
     // 読んだ分しかページキャッシュに載らず、RAMの頭数に入れなくてよい
     if (!ramMb) ramMb = initrd ? autoRam(initrd) : 128;
-    if (iso && ramMb < 128) ramMb = 128; // Tiny Core はカーネル + initrd 展開で 64MB では足りない
+    if (cdBoot && ramMb < 128) ramMb = 128; // Tiny Core はカーネル + initrd 展開で 64MB では足りない
     usedRam = ramMb;
 
     status(
       snapshot
         ? '起動済みの機械を復元中…'
-        : iso
-          ? 'ワーカーを起動し、ISO から起動中… (isolinux → Linux、シェルまで 1〜2 分)'
+        : cdBoot
+          ? 'ワーカーを起動し、CD から起動中… (isolinux → Linux、シェルまで 1〜2 分)'
           : 'ワーカーを起動し、カーネルを展開中… (シェルまで1〜2分)',
     );
 
@@ -351,8 +356,10 @@ export function mountLinux(canvas, opts = {}) {
             worker.postMessage(
               {
                 type: 'boot',
-                // ISO なら kernel/initrd/disk は無い (BIOS が CD から上げる)
-                iso: iso?.buffer,
+                // CD 起動なら kernel/initrd/disk は無い (BIOS が CD から上げる)。
+                // カーネル起動なら cd として挿す (ATAPI)
+                iso: cdBoot ? iso?.buffer : undefined,
+                cd: !cdBoot ? iso?.buffer : undefined,
                 kernel: kernel?.buffer,
                 initrd: initrd?.buffer,
                 disk: disk?.buffer,
@@ -361,7 +368,8 @@ export function mountLinux(canvas, opts = {}) {
                 // 最後に書いた方なので、プロンプトが画面 (fbcon) に出る。
                 // 逆順 (ttyS0が最後) だとログだけ映ってシェルは見えないシリアルに
                 // 居る — 「FBだと触れない」の正体 (2026-08-21)
-                cmdline: opts.fb?.() ? 'console=ttyS0 console=tty0' : 'console=ttyS0',
+                // CD を挿したら rustx86.ide=1 — init が ATAPI のモジュールを挿して /mnt/cdrom に掛ける
+                cmdline: (opts.fb?.() ? 'console=ttyS0 console=tty0' : 'console=ttyS0') + (!cdBoot && iso ? ' rustx86.ide=1' : ''),
                 ramMb,
                 // 解像度はルートFSの項が言える (X入りは 1024×768)。既定は 640×480
                 lfb: opts.fb?.() ? (entry.lfb ?? { width: 640, height: 480 }) : null,
@@ -480,6 +488,10 @@ export function mountLinux(canvas, opts = {}) {
   return {
     boot,
     setJit,
+    /** キー配列 (FB/VGA の顔で効く)。VGA 機と同じ記憶 (rustx86.layout) から */
+    setLayout(v) {
+      term.layout = v;
+    },
     get booted() { return booted; },
     get busy() { return busy; },
     get paused() { return paused; },

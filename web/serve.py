@@ -26,6 +26,22 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass  # 静かにする
 
+    def do_GET(self):
+        # CD-ROM の棚: web/ に置いた *.iso を並べて返す。main.js がつまみに足す。
+        # 静的配信 (serve.py 無し) では 404 → machines.js の ISOS だけになる
+        if self.path.split("?")[0] == "/cdroms.json":
+            import json
+            root = Path(self.directory)
+            isos = sorted(p.name for p in root.glob("*.iso"))
+            body = json.dumps([{"name": n, "size": (root / n).stat().st_size} for n in isos]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
     def do_POST(self):
         """画面の写しを受け取って `docs/images/` へ置く。
 

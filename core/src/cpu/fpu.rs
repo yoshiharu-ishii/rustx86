@@ -274,6 +274,122 @@ fn round_by_cw(m: &Machine, v: f64) -> f64 {
     }
 }
 
+/// 隣の f64 (IEEE の次/前の値)。directed rounding の 1 段ずらしに使う
+fn next_up(v: f64) -> f64 {
+    if v.is_nan() || v == f64::INFINITY {
+        return v;
+    }
+    if v == 0.0 {
+        return f64::from_bits(1);
+    }
+    let b = v.to_bits();
+    f64::from_bits(if v > 0.0 { b + 1 } else { b - 1 })
+}
+fn next_down(v: f64) -> f64 {
+    -next_up(-v)
+}
+
+/// 算術の結果を制御語 (PC = 精度、RC = 丸め方向) に合わせる。
+///
+/// f64 の演算は最近接丸めしか無いので、**残差の符号**で方向丸めを補正する:
+/// 乗算は fma で `a*b - r` が正確に出る。加減算は TwoSum、除算と平方根は
+/// `a - r*b` / `a - r*r` を fma で取る。残差が丸め方向と逆なら隣の値へ 1 段ずらす。
+/// glibc の floor/ceil/strtod/printf は RC を切り替えて x87 を使う (musl は使わない) —
+/// ここが無いと DSL (Debian i386) で `printf "%g"` が inf、awk の 3 が +nan になった (2026-08-23)。
+/// PC=24 (単精度) は f32 に落として戻す。PC=53/64 は f64 のまま (64bit 精度は持っていない)
+fn finish(m: &Machine, r: f64, err: f64) -> f64 {
+    let cw = m.cpu.fpu_cw;
+    // 溢れ: 最近接以外では「その向きの最大有限値」に止まる (IEEE の directed rounding)
+    if r.is_infinite() {
+        return match ((cw >> 10) & 3, r > 0.0) {
+            (1, true) | (3, true) => f64::MAX,
+            (2, false) | (3, false) => -f64::MAX,
+            _ => r,
+        };
+    }
+    let r = match (cw >> 10) & 3 {
+        0 => r,
+        1 if err < 0.0 => next_down(r),
+        2 if err > 0.0 => next_up(r),
+        3 if err < 0.0 && r > 0.0 => next_down(r),
+        3 if err > 0.0 && r < 0.0 => next_up(r),
+        _ => r,
+    };
+    if (cw >> 8) & 3 == 0 && r.is_finite() && r != 0.0 {
+        // PC=24: 仮数を 24bit に丸める。**指数は x87 の 15bit のまま**なので f32 に落としては
+        // いけない (1e300/3 が inf になる)。f64 の仮数 52bit の下 29bit を最近接偶数で丸める
+        let bits = r.to_bits();
+        let low = bits & ((1u64 << 29) - 1);
+        let half = 1u64 << 28;
+        let mut hi = bits >> 29;
+        if low > half || (low == half && hi & 1 == 1) {
+            hi += 1;
+        }
+        f64::from_bits(hi << 29)
+    } else {
+        r
+    }
+}
+
+/// a + b (残差は TwoSum)
+fn f_add(m: &Machine, a: f64, b: f64) -> f64 {
+    let r = a + b;
+    if r.is_nan() || !a.is_finite() || !b.is_finite() {
+        return r;
+    }
+    let bb = r - a;
+    let err = (a - (r - bb)) + (b - bb);
+    finish(m, r, err)
+}
+fn f_mul(m: &Machine, a: f64, b: f64) -> f64 {
+    let r = a * b;
+    if r.is_nan() || !a.is_finite() || !b.is_finite() {
+        return r;
+    }
+    // 積が f64 の下限より小さくて 0 に落ちたとき、残差の fma も 0 になる — 符号だけは分かる
+    let err = if r == 0.0 && a != 0.0 && b != 0.0 {
+        if (a < 0.0) == (b < 0.0) {
+            f64::MIN_POSITIVE
+        } else {
+            -f64::MIN_POSITIVE
+        }
+    } else {
+        a.mul_add(b, -r)
+    };
+    finish(m, r, err)
+}
+fn f_div(m: &Machine, a: f64, b: f64) -> f64 {
+    let r = a / b;
+    if r.is_nan() || b == 0.0 || !a.is_finite() || !b.is_finite() {
+        return r;
+    }
+    // a - r*b の符号 = 真の商と r の差の符号 (b の符号で向きが変わる)
+    let res = (-r).mul_add(b, a);
+    finish(m, r, if b > 0.0 { res } else { -res })
+}
+fn f_sqrt(m: &Machine, a: f64) -> f64 {
+    if a < 0.0 {
+        return f64::from_bits(0xFFF8_0000_0000_0000); // 負の不定値 (実機と同じ符号)
+    }
+    let r = a.sqrt();
+    if !r.is_finite() {
+        return r;
+    }
+    finish(m, r, (-r).mul_add(r, a))
+}
+
+/// D8/DC/DE 系の算術 (reg 欄 0/1/4/5/6/7)。順序は「a op b」。比較 (2/3) は呼び手が扱う
+fn arith(m: &Machine, reg: usize, a: f64, b: f64) -> f64 {
+    match reg {
+        0 => f_add(m, a, b),
+        1 => f_mul(m, a, b),
+        4 => f_add(m, a, -b),
+        5 => f_add(m, b, -a),
+        6 => f_div(m, a, b),
+        _ => f_div(m, b, a),
+    }
+}
+
 fn to_int(m: &Machine, v: f64, min: i64, max: i64) -> i64 {
     let r = round_by_cw(m, v);
     if r.is_nan() || r < min as f64 || r > max as f64 {
@@ -298,7 +414,12 @@ fn compare(fpu: &mut Fpu, a: f64, b: f64) {
 
 /// FCOMI系: 結果をEFLAGSへ (ZF/PF/CF)。i686の作法
 fn compare_eflags(m: &mut Machine, a: f64, b: f64) {
-    let mut f = m.cpu.flags & !(ZF | PF | CF);
+    // **遅延フラグを具現化してから書く。** `m.cpu.flags` に直接書くと、直前の ALU 命令の
+    // 遅延材料 (cc_op) が生きたままで、次に eflags() を読んだ瞬間に ZF/PF/CF が
+    // その材料から計算し直されて上書きされる — FUCOMIP の結果が消え、glibc の
+    // `fabs(x) <= LDBL_MAX` (isinf の展開) が「inf」と答えて printf "%f" 3 が inf を
+    // 吐いた (DSL 2024、2026-08-23)。cosim は x87 命令だけの列で試していたので見えなかった
+    let mut f = m.cpu.eflags() & !(ZF | PF | CF);
     if a.is_nan() || b.is_nan() {
         f |= ZF | PF | CF;
     } else if a < b {
@@ -306,7 +427,7 @@ fn compare_eflags(m: &mut Machine, a: f64, b: f64) {
     } else if a == b {
         f |= ZF;
     }
-    m.cpu.flags = f;
+    m.cpu.set_eflags(f);
 }
 
 // ---------- 環境の保存/復元 (FNSTENV / FNSAVE) ----------
@@ -349,7 +470,43 @@ fn scale2(v: f64, e: i32) -> f64 {
 // ---------- 本体 ----------
 
 /// ESC命令 (0xD8-0xDF) の実行。`reg` はModRMのreg欄、`rm` は実効オペランド
+/// RUSTX86_TRACE_X87=1: ユーザーモード (CPL3) の x87 命令を 1 行ずつ stderr へ
+/// (op/reg/rm、st0 の前後)。glibc の printf が inf を吐く原因探しで生まれた診断
+fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RUSTX86_TRACE_X87").is_ok())
+}
+
 pub fn exec(m: &mut Machine, op: u8, reg: usize, rm: &Operand) {
+    if trace_on() && m.cpu.cpl() == 3 {
+        let before = if m.cpu.fpu.st_empty(0) {
+            "(空)".to_string()
+        } else {
+            format!("{:e}", m.cpu.fpu.st(0))
+        };
+        let (mant, se) = m.cpu.fpu.st_f80(0);
+        exec_inner(m, op, reg, rm);
+        let after = if m.cpu.fpu.st_empty(0) {
+            "(空)".to_string()
+        } else {
+            format!("{:e}", m.cpu.fpu.st(0))
+        };
+        let (mant2, se2) = m.cpu.fpu.st_f80(0);
+        let rms = match rm {
+            Operand::Mem { addr, .. } => format!("[{addr:#x}]"),
+            _ => "reg".to_string(),
+        };
+        eprintln!(
+            "x87 {:04x}:{:08x} {:02X} /{} {} top={} st0 {} [{:04x}:{:016x}] -> {} [{:04x}:{:016x}] cw={:04x} fl={:04x} eax={:08x} sw={:04x}",
+            m.cpu.sregs[1], m.cpu.ip, op, reg, rms, m.cpu.fpu.top, before, se, mant, after, se2, mant2, m.cpu.fpu_cw,
+            m.cpu.eflags() & 0xFFFF, m.cpu.regs[AX], m.cpu.fpu.status()
+        );
+        return;
+    }
+    exec_inner(m, op, reg, rm);
+}
+
+fn exec_inner(m: &mut Machine, op: u8, reg: usize, rm: &Operand) {
     match rm {
         Operand::Mem { addr, .. } => exec_mem(m, op, reg, *addr),
         Operand::Reg(i) => exec_reg(m, op, reg, *i),
@@ -473,17 +630,15 @@ fn exec_mem(m: &mut Machine, op: u8, reg: usize, a: u32) {
             let b = arith_src(m).unwrap();
             let a0 = m.cpu.fpu.st(0);
             match reg {
-                0 => m.cpu.fpu.set_st(0, a0 + b),
-                1 => m.cpu.fpu.set_st(0, a0 * b),
                 2 => compare(&mut m.cpu.fpu, a0, b), // FCOM
                 3 => {
                     compare(&mut m.cpu.fpu, a0, b); // FCOMP
                     m.cpu.fpu.pop();
                 }
-                4 => m.cpu.fpu.set_st(0, a0 - b),
-                5 => m.cpu.fpu.set_st(0, b - a0),
-                6 => m.cpu.fpu.set_st(0, a0 / b),
-                _ => m.cpu.fpu.set_st(0, b / a0),
+                _ => {
+                    let r = arith(m, reg, a0, b);
+                    m.cpu.fpu.set_st(0, r);
+                }
             }
         }
         // --- 制御語・環境 ---
@@ -538,17 +693,15 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
             let b = m.cpu.fpu.st(i);
             let a0 = m.cpu.fpu.st(0);
             match reg {
-                0 => m.cpu.fpu.set_st(0, a0 + b),
-                1 => m.cpu.fpu.set_st(0, a0 * b),
                 2 => compare(&mut m.cpu.fpu, a0, b),
                 3 => {
                     compare(&mut m.cpu.fpu, a0, b);
                     m.cpu.fpu.pop();
                 }
-                4 => m.cpu.fpu.set_st(0, a0 - b),
-                5 => m.cpu.fpu.set_st(0, b - a0),
-                6 => m.cpu.fpu.set_st(0, a0 / b),
-                _ => m.cpu.fpu.set_st(0, b / a0),
+                _ => {
+                    let r = arith(m, reg, a0, b);
+                    m.cpu.fpu.set_st(0, r);
+                }
             }
         }
         // --- D9: ロード・入れ替え・定数・単項演算 ---
@@ -590,10 +743,15 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
                         f.cond |= C0 | C2;
                     } else if a0 == 0.0 {
                         f.cond |= C3;
-                    } else if a0.is_subnormal() {
-                        f.cond |= C2 | C3;
                     } else {
-                        f.cond |= C2; // 正規数
+                        // f64 の非正規は 80bit では正規 (指数の幅が広い)。非正規は
+                        // 80bit の指数が 0 のときだけ (FLD m80 で原本が入っているとき)
+                        let (mant, se) = f.st_f80(0);
+                        if se & 0x7FFF == 0 && mant != 0 {
+                            f.cond |= C2 | C3;
+                        } else {
+                            f.cond |= C2; // 正規数
+                        }
                     }
                 }
                 _ => m.trap(format!("x87 D9 E{i:X}")),
@@ -673,7 +831,9 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
                     // 商の下位3bitを C0/C3/C1 へ (仕様の並び)
                     let b = m.cpu.fpu.st(1);
                     let q = (a0 / b).trunc();
-                    m.cpu.fpu.set_st(0, a0 - q * b);
+                    // 剰余は % (fmod) で — 正確に出る。a0 - q*b は q*b の丸めで下位が崩れ、
+                    // |a0| < |b| の自明な場合 (答えは a0 そのもの) すら 1e-5 が狂った
+                    m.cpu.fpu.set_st(0, a0 % b);
                     let f = &mut m.cpu.fpu;
                     f.cond &= !(C0 | C1 | C2 | C3);
                     let qi = q.abs() as u64;
@@ -693,7 +853,10 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
                     m.cpu.fpu.set_st(1, y * (a0 + 1.0).log2());
                     m.cpu.fpu.pop();
                 }
-                2 => m.cpu.fpu.set_st(0, a0.sqrt()),
+                2 => {
+                    let r = f_sqrt(m, a0);
+                    m.cpu.fpu.set_st(0, r);
+                }
                 3 => {
                     // FSINCOS
                     m.cpu.fpu.set_st(0, a0.sin());
@@ -775,17 +938,17 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
             let a0 = m.cpu.fpu.st(0);
             let b = m.cpu.fpu.st(i);
             match reg {
-                0 => m.cpu.fpu.set_st(i, b + a0),
-                1 => m.cpu.fpu.set_st(i, b * a0),
                 2 => compare(&mut m.cpu.fpu, a0, b), // FCOM2 (別名)
                 3 => {
                     compare(&mut m.cpu.fpu, a0, b);
                     m.cpu.fpu.pop();
                 }
-                4 => m.cpu.fpu.set_st(i, a0 - b), // FSUBR
-                5 => m.cpu.fpu.set_st(i, b - a0), // FSUB
-                6 => m.cpu.fpu.set_st(i, a0 / b), // FDIVR
-                _ => m.cpu.fpu.set_st(i, b / a0), // FDIV
+                // DC: st(i) = (st0 op st(i))。reg の表は D8 と同じ向き (4=FSUBR: st0-st(i)、
+                // 5=FSUB: st(i)-st0、6=FDIVR: st0/st(i)、7=FDIV: st(i)/st0) — 書き先が st(i) なだけ
+                _ => {
+                    let r = arith(m, reg, a0, b);
+                    m.cpu.fpu.set_st(i, r);
+                }
             }
         }
         // --- DD: FFREE / FST / FSTP / FUCOM ---
@@ -829,15 +992,13 @@ fn exec_reg(m: &mut Machine, op: u8, reg: usize, i: usize) {
             let a0 = m.cpu.fpu.st(0);
             let b = m.cpu.fpu.st(i);
             match reg {
-                0 => m.cpu.fpu.set_st(i, b + a0),
-                1 => m.cpu.fpu.set_st(i, b * a0),
                 2 => {
                     compare(&mut m.cpu.fpu, a0, b); // FCOMP5 (別名)
                 }
-                4 => m.cpu.fpu.set_st(i, a0 - b), // FSUBRP
-                5 => m.cpu.fpu.set_st(i, b - a0), // FSUBP
-                6 => m.cpu.fpu.set_st(i, a0 / b), // FDIVRP
-                _ => m.cpu.fpu.set_st(i, b / a0), // FDIVP
+                _ => {
+                    let r = arith(m, reg, a0, b);
+                    m.cpu.fpu.set_st(i, r);
+                }
             }
             m.cpu.fpu.pop();
         }

@@ -44,7 +44,12 @@ fn main() {
     // 多いので 128MB の 386 機で
     let is_iso = image.len() > 0x8006 && &image[0x8001..0x8006] == b"CD001";
     let mut m = if is_iso {
-        Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(128))
+        Machine::with_profile(rustx86_core::MachineProfile::pc_32bit(
+            std::env::var("RAM_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(128),
+        ))
     } else if hdd.is_some() {
         Machine::with_profile(rustx86_core::MachineProfile::pc_floppy(16))
     } else {
@@ -76,10 +81,16 @@ fn main() {
     ///
     /// ここを「halted かつ PIT停止」だけで判定していたため、キーを打った直後に
     /// 一度もstepせず諦めていた。**入力を渡した本人が、渡した直後に見捨てていた**。
+    // 「機械が止まった」= HLT 中で、起こす当てが何も無い。**PIC の挙手も当て**に数える —
+    // ワンショットの PIT (Linux の NOHZ、mode 4) は鳴った瞬間に止まるので、
+    // 「PIT が動いていない」だけで死んだと見ると、IRR に IRQ0 が立ったままの機械を
+    // 捨ててしまう (DSL 2024 で実際にそうなった、2026-08-23)
     fn stuck(m: &Machine) -> bool {
         m.halted
             && m.pending_irq.is_none()
             && !m.devices.pit.counters[0].running
+            && !m.devices.pic[0].has_pending()
+            && !m.devices.pic[1].has_pending()
             && !m.devices.keyboard.has_data()
     }
 
@@ -305,6 +316,11 @@ fn main() {
             c.reload,
             m.devices.pit.irq0_hz()
         );
+        eprintln!(
+        "--- PIC0 imr={:#04x} irr={:#04x} isr={:#04x} / PIC1 imr={:#04x} irr={:#04x} isr={:#04x} / pending_irq={:?} ---",
+        m.devices.pic[0].imr, m.devices.pic[0].irr, m.devices.pic[0].isr,
+        m.devices.pic[1].imr, m.devices.pic[1].irr, m.devices.pic[1].isr, m.pending_irq
+    );
     }
 
     println!("--- 状態 ---");

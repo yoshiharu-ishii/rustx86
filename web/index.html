@@ -488,9 +488,10 @@
         <span class="lbl">ルートFS</span>
         <select id="rootSel" class="wide"></select>
       </span>
-      <!-- ISO (El Torito) から起動する。ルートFSと排他 — どちらかを選ぶと他方が「—」になる -->
+      <!-- CD-ROM ドライブ (ATAPI、IDE secondary)。ルートFSが「—」なら CD から起動 (El Torito)、
+           ルートFSがあればカーネル起動して CD を挿した状態 (/mnt/cdrom) -->
       <span class="ctl" id="ctlIso" hidden>
-        <span class="lbl">ISO</span>
+        <span class="lbl">CD-ROM</span>
         <select id="isoSel" class="wide"></select>
       </span>
       <span class="ctl" id="ctlRam" hidden>

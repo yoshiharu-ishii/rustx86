@@ -155,7 +155,8 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('ctlLayout').hidden = !!linux;
+  // 配列は Linux 機にも効く (FB/VGA の顔のとき。シリアルの顔は文字を送るので無関係)
+  $('ctlLayout').hidden = false;
   // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
   // ラベルと選択肢は対で包んである (index.html の .ctl) — 出し入れも対で
   for (const id of ['ctlRoot', 'ctlIso', 'ctlRam', 'ctlJit']) $(id).hidden = !linux;
@@ -338,12 +339,17 @@ const rootSel = $('rootSel');
 const isoSel = $('isoSel');
 const ramSel = $('ramSel');
 const jitSel = $('jitSel');
-// ルートFS と ISO は**排他** — どちらも先頭に「—」(空) を持ち、片方を選ぶと他方が「—」になる。
-// ISO はカーネルごと CD の中にあるのでルートFSを載せる場所が無い (BIOS 経由の起動)
-for (const sel of [rootSel, isoSel]) {
+// CD-ROM はドライブ。**起動元はルートFSの有無で決まる**:
+//   ルートFS「—」+ CD あり → CD から起動 (El Torito、BIOS 経由、画面は VGA)
+//   ルートFS あり + CD あり → カーネル起動して CD を挿した状態 (ATAPI → /mnt/cdrom)
+// 両方「—」は無い (何も無い機械に意味が無い) — ルートFSの先頭に戻す
+for (const [sel, label] of [
+  [rootSel, '— (CD から起動)'],
+  [isoSel, '— (空)'],
+]) {
   const o = document.createElement('option');
   o.value = '';
-  o.textContent = '—';
+  o.textContent = label;
   sel.append(o);
 }
 for (const r of ISOS) {
@@ -360,13 +366,36 @@ for (const r of ROOTFS) {
   o.title = r.note;
   rootSel.append(o);
 }
+// **web/ に置いた ISO は全部 CD-ROM の棚に並ぶ。** serve.py が /cdroms.json で *.iso を
+// 数えて返す (静的配信では 404 → ISOS の説明付きの項だけ)。ISOS に無い名前は
+// ファイル名のまま足す — 取ってきた ISO を置くだけで選べる
+fetch('./cdroms.json', { cache: 'no-store' })
+  .then(r => (r.ok ? r.json() : []))
+  .then(list => {
+    const wanted = localStorage.getItem(ISO_KEY) || '';
+    for (const { name, size } of list) {
+      if (ISOS.some(x => x.name === name)) continue;
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = `${name} (${(size / 1048576).toFixed(0)} MB)`;
+      o.title = 'web/ に置いた ISO (説明は無し)。El Torito なら CD から起動できる';
+      isoSel.append(o);
+    }
+    // 記憶していた名前が棚に現れたら選び直す (初期化時には無かった)
+    if (wanted && isoSel.value !== wanted && [...isoSel.options].some(o => o.value === wanted)) {
+      isoSel.value = wanted;
+      syncRootfsHint();
+    }
+  })
+  .catch(() => {});
 const q0 = new URLSearchParams(location.search);
-isoSel.value = q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+isoSel.value = q0.get('cd') || q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
 if (!isoSel.value) isoSel.value = ''; // 知らない名前
-rootSel.value =
-  q0.get('initrd') || (isoSel.value ? '' : localStorage.getItem(ROOT_KEY) || ROOTFS[0].name);
-if (!rootSel.value) rootSel.value = isoSel.value ? '' : ROOTFS[0].name; // URLに知らない名前が来たとき
-if (rootSel.value) isoSel.value = ''; // URLでルートFSが明示されたら ISO は下ろす
+// ルートFS: URL > 記憶。記憶が「—」(CD から起動) でも CD が無ければミニへ
+const rootMem = localStorage.getItem(ROOT_KEY);
+rootSel.value = q0.get('initrd') ?? (rootMem === null ? ROOTFS[0].name : rootMem);
+if (rootSel.value === undefined) rootSel.value = ROOTFS[0].name; // 知らない名前
+if (!rootSel.value && !isoSel.value) rootSel.value = ROOTFS[0].name;
 ramSel.value = q0.get('ram') || localStorage.getItem(RAM_KEY) || 'auto';
 // JIT (F1d wasm)。q0の宣言より前に置くとTDZでmain.jsごと死ぬ (2026-08-17に実際に死んだ)
 jitSel.value = q0.get('jit') || localStorage.getItem('rx86.jit') || 'off';
@@ -382,10 +411,7 @@ for (const [sel, key] of [
   [ramSel, RAM_KEY],
 ]) {
   sel.addEventListener('change', () => {
-    // 排他: ISO を選んだらルートFSを「—」に、ルートFSを選んだら ISO を「—」に。
-    // 両方「—」は許さない (何も無い機械に意味が無い) — ルートFSの先頭に戻す
-    if (sel === isoSel && isoSel.value) rootSel.value = '';
-    if (sel === rootSel && rootSel.value) isoSel.value = '';
+    // 両方「—」だけは許さない (CD を抜いたら、起動元はミニへ)
     if (!rootSel.value && !isoSel.value) rootSel.value = ROOTFS[0].name;
     localStorage.setItem(ROOT_KEY, rootSel.value);
     localStorage.setItem(ISO_KEY, isoSel.value);
@@ -398,9 +424,11 @@ for (const [sel, key] of [
 /** 選択の理由を画面に出す。selectのtitleと、状態欄への一言 */
 function syncRootfsHint() {
   const r = ROOTFS.find(x => x.name === rootSel.value);
-  rootSel.title = r ? `${r.sub} — ${r.note}` : 'ISO から起動するときは「—」';
+  rootSel.title = r ? `${r.sub} — ${r.note}` : '「—」= CD-ROM から起動する (El Torito、BIOS 経由)';
   const i = ISOS.find(x => x.name === isoSel.value);
-  isoSel.title = i ? `${i.sub} — ${i.note}` : 'ISO (El Torito) から BIOS 経由で起動する。ルートFSと排他';
+  isoSel.title = i
+    ? `${i.sub} — ${i.note}`
+    : 'CD-ROM ドライブ (ATAPI)。ルートFSが「—」なら CD から起動、あればカーネル起動して /mnt/cdrom に掛かる';
   ramSel.title =
     ramSel.value === 'auto'
       ? 'initramfsの展開後の大きさから決める (足りないと中身が黙って欠ける)'
@@ -416,6 +444,7 @@ layoutSel.value = term.layout;
 layoutSel.addEventListener('change', () => {
   term.layout = layoutSel.value;
   localStorage.setItem(LAYOUT_KEY, term.layout);
+  linux?.setLayout?.(term.layout);
   focusScreen();
 });
 
@@ -1378,7 +1407,7 @@ async function select(m, { autoBoot = true } = {}) {
       // 線が来ていればRTL8029が挿さって出る — MACも16bit機と同じ
       mac: () => (link ? [0x52, 0x54, 0x00, 0x12, 0x34, 0x56] : undefined),
       // どのルートFSを何MBで載せるかも電源の瞬間に決まる (上のNICと同じ)
-      rootfs: () => ({ name: rootSel.value, iso: isoSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
+      rootfs: () => ({ name: rootSel.value, cd: isoSel.value, ramMb: ramSel.value === 'auto' ? 0 : +ramSel.value }),
       jit: () => jitSel.value === 'on',
       // 画面: フレームバッファか (機械の定義で決まる — 「Linux (フレームバッファ)」)
       fb: () => m.fb === true,

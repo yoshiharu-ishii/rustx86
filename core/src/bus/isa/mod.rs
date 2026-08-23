@@ -55,6 +55,7 @@ pub fn decode(port: u16) -> Option<IoTarget> {
         0x3D4 | 0x3D5 => IoTarget::Crtc,
         0x3DA => IoTarget::VideoStatus,
         0x388 | 0x389 => IoTarget::Opl,
+        0x170..=0x177 | 0x376 => IoTarget::Ide,
         0x3F8..=0x3FF => IoTarget::Uart,
         _ => return None,
     })

@@ -111,7 +111,7 @@ impl Machine {
                     .get(rba * SEC..rba * SEC + len)
                     .ok_or("ブート像が ISO からはみ出している")?;
                 self.mem[dst..dst + len].copy_from_slice(src);
-                self.cd = Some(image);
+                self.cd_attach(image);
                 self.cpu.set_cs_ip(seg, 0);
                 self.cpu.regs[cpu::DX] = 0x00E0; // DL = CD
             }
@@ -129,7 +129,7 @@ impl Machine {
                 let d = Disk::from_image(fd)?;
                 let boot = d.read_sector(0).ok_or("ブートセクタが読めない")?.to_vec();
                 self.disk = Some(d);
-                self.cd = Some(image);
+                self.cd_attach(image);
                 self.mem[0x7C00..0x7E00].copy_from_slice(&boot);
                 self.cpu.set_cs_ip(0x0000, 0x7C00);
                 self.cpu.regs[cpu::DX] = 0x0000;
