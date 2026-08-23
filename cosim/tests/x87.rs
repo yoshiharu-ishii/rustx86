@@ -251,6 +251,10 @@ fn x87_load_store_and_convert() {
             if name.starts_with("fprem") && v.fract() != 0.0 && v.abs() < 1.0 {
                 continue;
             }
+            // (台帳) 除数 0 の FPREM (1 % ±0) は不定値 NaN — 符号が Unicorn の版で割れる
+            if name.starts_with("fprem") && v == 0.0 {
+                continue;
+            }
             let (mut d, s) = with_double(v);
             d[8..16].copy_from_slice(&0.8f64.to_le_bytes());
             // 先頭に fninit: Unicorn の初期 FPU 状態は実機のリセットと違う (CW=0)
