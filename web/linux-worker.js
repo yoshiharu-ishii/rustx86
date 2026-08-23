@@ -131,6 +131,10 @@ self.onmessage = (e) => {
       // 物理キー (FBの顔のとき)。8042 → IRQ1 → カーネルの atkbd → VT
       if (emu) emu.key(msg.code, msg.down);
       break;
+    case 'char':
+      // JIS 配列の文字 (FB/VGA の顔のとき)。US の位置 + Shift に直して 8042 へ
+      if (emu) emu.type_text(msg.ch);
+      break;
     case 'input':
       if (emu) emu.serial_in(new Uint8Array(msg.bytes));
       break;

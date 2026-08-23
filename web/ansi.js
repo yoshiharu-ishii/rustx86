@@ -78,6 +78,10 @@ export class AnsiTerminal {
      *  (code, down) => void。シェルが tty0 (fbcon) に居るときは、入力も
      *  PS/2 キーボード (8042) からカーネルのVTへ入るのが実機の道 */
     this.onKey = null;
+    /** 文字で送る口 (JIS 配列のとき)。位置 (onKey) だと US の表で読まれて記号がずれる */
+    this.onChar = null;
+    /** キー配列 'jp' | 'us'。画素/VGA の顔のときだけ効く (シリアルは文字そのものを送るので無関係) */
+    this.layout = 'jp';
     /** マウスの動き (画素の顔で捕獲中)。(dx, dy, buttons) => void。
      *  dx/dy は相対移動 (pointer lock の movementX/Y)、buttons は bit0=左 bit1=右 bit2=中 */
     this.onMouse = null;
@@ -115,7 +119,7 @@ export class AnsiTerminal {
       // 画素の顔が出ている = シェルは tty0。文字にせず位置 (code) を渡す
       if ((this.gfxOn || this.vgaOn) && this.onKey) {
         e.preventDefault();
-        this.onKey(e.code, true);
+        this.#sendKey(e, true);
         return;
       }
       this._key(e);
@@ -123,7 +127,7 @@ export class AnsiTerminal {
     canvas.addEventListener('keyup', (e) => {
       if ((this.gfxOn || this.vgaOn) && this.onKey) {
         e.preventDefault();
-        this.onKey(e.code, false);
+        this.#sendKey(e, false);
       }
     });
 
@@ -271,6 +275,23 @@ export class AnsiTerminal {
     this.cursorVisible = true;
     this.selection = null;
     this.dirty = true;
+  }
+
+  /**
+   * 画素/VGA の顔でキーをゲストへ。配列によって「位置」と「文字」を使い分ける
+   * (terminal.js の VGA 機と同じ規則)。ゲストの Linux は US の表しか持たないので、
+   * JIS の実機で記号を打つと位置では `:` が `'` に化ける — 文字 (e.key) から
+   * US の位置を逆算して送る。修飾キー・文字でないキー・スペース・Ctrl/Alt 付きは
+   * 配列によらず位置で送る (DOOM の「押されているか」の判定はスペースの押下/解放が要る)
+   */
+  #sendKey(e, down) {
+    const printable = e.key.length === 1;
+    if (this.layout === 'us' || !printable || e.code === 'Space' || e.ctrlKey || e.altKey || e.metaKey) {
+      if (this.layout === 'jp' && /^Shift/.test(e.code)) return; // 文字側が自分で Shift を組む
+      this.onKey(e.code, down);
+      return;
+    }
+    if (down) this.onChar?.(e.key === '¥' ? '\\' : e.key);
   }
 
   _blank() {

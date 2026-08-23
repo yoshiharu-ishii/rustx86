@@ -155,7 +155,8 @@ function syncControls() {
   $('power').disabled = !powered && !lastImage && !linux;
   const on = !!machine;
   // 配列の選択は端末のもの (シリアル端末は文字を送るので配列に依らない)
-  $('ctlLayout').hidden = !!linux;
+  // 配列は Linux 機にも効く (FB/VGA の顔のとき。シリアルの顔は文字を送るので無関係)
+  $('ctlLayout').hidden = false;
   // ルートFSとRAMはLinuxの機械のときだけ。**16bit機には無い概念**なので出さない
   // ラベルと選択肢は対で包んである (index.html の .ctl) — 出し入れも対で
   for (const id of ['ctlRoot', 'ctlIso', 'ctlRam', 'ctlJit']) $(id).hidden = !linux;
@@ -443,6 +444,7 @@ layoutSel.value = term.layout;
 layoutSel.addEventListener('change', () => {
   term.layout = layoutSel.value;
   localStorage.setItem(LAYOUT_KEY, term.layout);
+  linux?.setLayout?.(term.layout);
   focusScreen();
 });
 
