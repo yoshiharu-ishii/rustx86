@@ -377,6 +377,10 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
       データポートだけ 16bit の本道 (io_read16/io_write16)。Linux は modloop の pata_legacy +
       sr_mod + isofs で /dev/sr0 → `/mnt/cdrom` (init は cmdline `rustx86.ide` のときだけ挿す)。
       台帳: DMA 無し (pata_legacy は PIO)、音楽 CD・マルチセッション無し、slave 空
+      **実物の検証 (2026-08-23)**: Tiny Core 16.x が `/mnt/sr0` を mount、**DSL 2024 (antiX 23、glibc、
+      685MB) が `dsl login:` まで** (41G 命令)。踏んだ穴 = INT 15h E820 (gfxboot)、boot 例の stuck 判定、
+      x87 の遅延フラグ (glibc の printf が inf — cosim/tests/x87.rs)。gfxboot は VBE が無くテキストの
+      `boot:` に落ちる → `text` ラベル。台帳: VBE (INT 10h 4F) で gfxboot のメニューと X (vesa) が動く
 - [ ] **6d: HDD** — ATA。IDE の素子は 6c で出来たので primary (0x1F0/0x3F6、IRQ14) に ATA の
       READ/WRITE SECTORS を足すだけ。**B5 (Web Worker + OPFS) とセット**。理由は下記
 
