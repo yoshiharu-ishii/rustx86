@@ -34,7 +34,9 @@ const MAGIC: &[u8; 8] = b"RX86SNAP";
 /// v13: RAMDAC (256色パレット) と現在ビデオモードが加わった (mode 13h)
 /// v14: Linuxへ申告するLFB (base/width/height/bpp、無ければ無し) が加わった
 /// v15: 8042 にコマンドバイト・AUXの印・PS/2マウスが加わった
-pub const VERSION: u16 = 15;
+/// v16: Bochs VGA (DISPI・vram_base・lfb_xrgb)・ATAPI (像は含めない)・BIOS の C: (hdd) が加わった。
+///      ログイン済みの DSL のような「CD から起動して 10 分かかる機械」を控えて戻すため
+pub const VERSION: u16 = 16;
 
 /// 順番に書いていくだけの器
 pub struct Writer {
@@ -322,10 +324,41 @@ impl Machine {
             }
             None => w.bool(false),
         }
+        // v16: Bochs VGA (DISPI)・VRAM の切り出し・画素の並び・ATAPI (像は入れない)
+        match &self.devices.dispi {
+            Some(d) => {
+                w.bool(true);
+                d.save(&mut w);
+            }
+            None => w.bool(false),
+        }
+        match self.vram_base {
+            Some(b) => {
+                w.bool(true);
+                w.u32(b);
+            }
+            None => w.bool(false),
+        }
+        w.bool(self.lfb_xrgb);
+        match &self.devices.ide {
+            Some(ide) => {
+                w.bool(true);
+                ide.save(&mut w);
+            }
+            None => w.bool(false),
+        }
 
         // メモリとディスク (ほとんどがゼロなので連長圧縮で潰れる)
         w.rle(&self.mem);
         match &self.disk {
+            Some(d) => {
+                w.bool(true);
+                w.rle(&d.data);
+            }
+            None => w.bool(false),
+        }
+        // v16: BIOS 経由の C: (DOS 用の HDD)
+        match &self.hdd {
             Some(d) => {
                 w.bool(true);
                 w.rle(&d.data);
@@ -445,6 +478,21 @@ impl Machine {
         } else {
             None
         };
+        // v16
+        m.devices.dispi = if r.bool()? {
+            Some(crate::dev::Dispi::load(&mut r)?)
+        } else {
+            None
+        };
+        m.vram_base = if r.bool()? { Some(r.u32()?) } else { None };
+        m.lfb_xrgb = r.bool()?;
+        // CD の像は控えに無い — 復元した人が [`Machine::cd_attach`] で同じ像を挿し直す
+        // (素子の状態はそのまま残り、像だけ差し替わる)。それまでは `cd_wanted()` が立つ
+        m.devices.ide = if r.bool()? {
+            Some(crate::dev::Ide::load(&mut r)?)
+        } else {
+            None
+        };
 
         // メモリのRLEはサイズを暗黙に持つ。復元した長さがそのままRAMサイズ。
         // 物理マスクは mem.len() を見るので、これで大きい機械もそのまま復元される。
@@ -471,6 +519,12 @@ impl Machine {
         m.dcache = cpu::dcache::DecodeCache::new(m.mem.len());
         m.disk = if r.bool()? {
             Some(Disk::from_image(r.rle()?)?)
+        } else {
+            None
+        };
+        // v16
+        m.hdd = if r.bool()? {
+            Some(Disk::hdd_from_image(r.rle()?)?)
         } else {
             None
         };

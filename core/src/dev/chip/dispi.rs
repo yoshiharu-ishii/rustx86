@@ -181,6 +181,43 @@ impl Dispi {
         w as u32 * 4
     }
 
+    /// 控えに書く (VRAM の中身は RAM の末尾なので RAM 側に入る)
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        for v in [
+            self.index,
+            self.xres,
+            self.yres,
+            self.bpp,
+            self.enable,
+            self.bank,
+            self.virt_width,
+            self.virt_height,
+            self.x_offset,
+            self.y_offset,
+        ] {
+            w.u16(v);
+        }
+        w.u32(self.vram_base);
+        w.bool(self.dirty);
+    }
+
+    pub fn load(r: &mut crate::snapshot::Reader) -> Result<Self, String> {
+        let mut d = Dispi::new(0);
+        d.index = r.u16()?;
+        d.xres = r.u16()?;
+        d.yres = r.u16()?;
+        d.bpp = r.u16()?;
+        d.enable = r.u16()?;
+        d.bank = r.u16()?;
+        d.virt_width = r.u16()?;
+        d.virt_height = r.u16()?;
+        d.x_offset = r.u16()?;
+        d.y_offset = r.u16()?;
+        d.vram_base = r.u32()?;
+        d.dirty = r.bool()?;
+        Ok(d)
+    }
+
     /// PCI の設定空間の顔。BAR0 = VRAM (16MB、prefetchable)
     pub fn pci_function(vram_base: u32) -> crate::bus::pci::PciFunction {
         use crate::bus::pci::{Bar, PciFunction};

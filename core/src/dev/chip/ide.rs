@@ -126,6 +126,77 @@ impl Ide {
         d
     }
 
+    /// 控えに書く (像そのものは入れない — 大きさだけ。復元側が同じ像を挿し直す)
+    pub fn save(&self, w: &mut crate::snapshot::Writer) {
+        for v in [
+            self.error,
+            self.features,
+            self.sector_count,
+            self.lba_lo,
+            self.lba_mid,
+            self.lba_hi,
+            self.drive,
+            self.status,
+            self.control,
+        ] {
+            w.u8(v);
+        }
+        w.u8(match self.phase {
+            Phase::Idle => 0,
+            Phase::PacketWait => 1,
+            Phase::DataIn => 2,
+        });
+        w.bytes(&self.packet);
+        w.u32(self.packet_len as u32);
+        w.bytes(&self.buf);
+        w.u32(self.pos as u32);
+        w.u32(self.block_end as u32);
+        w.u32(self.limit as u32);
+        w.u8(self.sense.0);
+        w.u8(self.sense.1);
+        w.u8(self.sense.2);
+        w.u32(self.sectors);
+        w.bool(self.irq_pending);
+        w.u32(self.commands);
+    }
+
+    pub fn load(r: &mut crate::snapshot::Reader) -> Result<Self, String> {
+        let mut d = Ide::new(0);
+        d.error = r.u8()?;
+        d.features = r.u8()?;
+        d.sector_count = r.u8()?;
+        d.lba_lo = r.u8()?;
+        d.lba_mid = r.u8()?;
+        d.lba_hi = r.u8()?;
+        d.drive = r.u8()?;
+        d.status = r.u8()?;
+        d.control = r.u8()?;
+        d.phase = match r.u8()? {
+            0 => Phase::Idle,
+            1 => Phase::PacketWait,
+            2 => Phase::DataIn,
+            p => return Err(format!("IDE の段が不正 ({p})")),
+        };
+        let packet = r.bytes()?;
+        if packet.len() != 12 {
+            return Err(format!("IDE のパケット長が不正 ({})", packet.len()));
+        }
+        d.packet.copy_from_slice(&packet);
+        d.packet_len = r.u32()? as usize;
+        d.buf = r.bytes()?;
+        d.pos = r.u32()? as usize;
+        d.block_end = r.u32()? as usize;
+        d.limit = r.u32()? as usize;
+        d.sense = (r.u8()?, r.u8()?, r.u8()?);
+        d.sectors = r.u32()?;
+        d.irq_pending = r.bool()?;
+        d.commands = r.u32()?;
+        if d.block_end > d.buf.len() || d.pos > d.block_end {
+            return Err("IDE の DRQ ブロックがバッファからはみ出る".into());
+        }
+        Ok(d)
+    }
+
     /// 像を差し替えたとき (大きさだけ知ればよい)
     pub fn set_sectors(&mut self, sectors: u32) {
         self.sectors = sectors;

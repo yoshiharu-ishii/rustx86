@@ -381,6 +381,11 @@ DHCP/DNS/TCPハーフクローズ/外向きICMPまで実インターネット検
       685MB) が `dsl login:` まで** (41G 命令)。踏んだ穴 = INT 15h E820 (gfxboot)、boot 例の stuck 判定、
       x87 の遅延フラグ (glibc の printf が inf — cosim/tests/x87.rs)。gfxboot は VBE が無くテキストの
       `boot:` に落ちる → `text` ラベル。台帳: VBE (INT 10h 4F) で gfxboot のメニューと X (vesa) が動く
+      **10 分問題への手当て (2026-08-23)**: スナップショット v16 で ATAPI・Bochs VGA (DISPI)・hdd も
+      控えに入る (像は入れない — 復元側が同じ ISO を挿し直す: `cd_wanted()` → `cd_attach`)。
+      ログイン済みの DSL を控えて秒で戻せる。ネイティブは `SNAPSHOT_SAVE=` / `SNAPSHOT_LOAD=`
+      (boot 例)、ブラウザは 書出/復元 のまま (CD-ROM を選んであれば挿し直す)。
+      検証は tools/webtest/snap-cd.mjs。PGO も同日に解放 (ネイティブのみ、ADR-0009 の復帰)
 - [ ] **6d: HDD** — ATA。IDE の素子は 6c で出来たので primary (0x1F0/0x3F6、IRQ14) に ATA の
       READ/WRITE SECTORS を足すだけ。**B5 (Web Worker + OPFS) とセット**。理由は下記
 

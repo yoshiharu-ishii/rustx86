@@ -55,7 +55,17 @@ fn main() {
     } else {
         Machine::new()
     };
-    if is_iso {
+    // SNAPSHOT_LOAD=path: 控えから戻して続きをやる (DSL のログインまで 10 分、を 0 にする)。
+    // CD の像は控えに入っていないので第1引数の ISO を挿し直す。
+    // SNAPSHOT_SAVE=path: 手順を終えたところで控えを書く
+    if let Ok(p) = std::env::var("SNAPSHOT_LOAD") {
+        let data = std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        m.load_state(&data).expect("snapshot");
+        if m.cd_wanted() {
+            m.cd_attach(image);
+        }
+        eprintln!("[boot] {p} から復元");
+    } else if is_iso {
         m.boot_from_iso(image).expect("El Torito");
     } else {
         m.boot_from_disk(image).expect("boot");
@@ -97,6 +107,11 @@ fn main() {
     /// 画面に `needle` が出るまで走らせ、**かかった命令数**を返す。
     /// 出ないまま上限に達したか本当に止まったら `None`
     fn run_until(m: &mut Machine, needle: &str, budget: u64) -> Option<u64> {
+        // 空の合図 = 待たずに打つ。控えから戻した直後は画面が書き換わらない
+        // (プロンプトはもう出ている) ので、下の「書き換わったら見る」では一生合わない
+        if needle.is_empty() {
+            return Some(0);
+        }
         for i in 0..budget {
             if stuck(m) {
                 return None;
@@ -207,6 +222,14 @@ fn main() {
         }
         n
     }));
+
+    if let Ok(p) = std::env::var("SNAPSHOT_SAVE") {
+        let data = m.save_state();
+        match std::fs::write(&p, &data) {
+            Ok(()) => eprintln!("[boot] 控えを書いた: {p} ({} バイト)", data.len()),
+            Err(e) => eprintln!("[boot] 控えを書けない: {e}"),
+        }
+    }
 
     // 止まった理由より先に、**ゲストが何を出したか**を見せる。
     // 大抵はそこに手がかりが書いてある
