@@ -23,3 +23,7 @@ web/disk-x.img.gz
 .DS_Store
 __pycache__/
 *.pyc
+# 機械の控え (スナップショット)。ゲストのメモリ丸ごと = 100MB 級、ライセンス不明の中身を含みうるのでコミットしない
+*.snap
+*.snap.gz
+*.rx86snap
