@@ -90,6 +90,11 @@ impl Machine {
                 let now = self.cpu.tsc;
                 self.devices.opl.status(now) // 0x389 の読みも status を返す (実機と同じ)
             }
+            // CD が無ければ浮いたバス (0xFF)。pata_legacy はこれで「装置無し」と見る
+            IoTarget::Ide => match &mut self.devices.ide {
+                Some(ide) => ide.read8(port),
+                None => 0xFF,
+            },
             IoTarget::SysPortA => {
                 if self.cpu.a20 {
                     0x02
@@ -285,6 +290,11 @@ impl Machine {
                 } else {
                     let now = self.cpu.tsc;
                     self.devices.opl.write_data(val, now);
+                }
+            }
+            IoTarget::Ide => {
+                if let Some(ide) = &mut self.devices.ide {
+                    ide.write8(port, val);
                 }
             }
             IoTarget::VideoStatus => {

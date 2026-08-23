@@ -561,6 +561,12 @@ impl Machine {
             Some(12) => self.devices.pic[1].raise(bus::isa::IRQ_MOUSE & 7),
             _ => {}
         }
+        // IDE (ATAPI): パケットの完了・データ到着で挙手。status を読むと下りる
+        if let Some(ide) = &self.devices.ide {
+            if ide.irq_pending {
+                self.devices.pic[1].raise(dev::chip::ide::IRQ & 7);
+            }
+        }
         // **スレーブの挙手はマスタの IRQ2 に現れる** (連結)。PC/ATは8本では
         // 足りず2個目の8259をIRQ2にぶら下げた — IRQ8〜15はこの線を通って届く
         if self.devices.pic[1].has_pending() {
@@ -869,14 +875,58 @@ impl Machine {
             .to_string()
     }
 
-    /// 16bitのI/Oは連続する2ポートへのアクセスとして扱う
+    /// 16bitのI/Oは連続する2ポートへのアクセスとして扱う。
+    /// **例外は IDE のデータポート** — 1 ワードが 1 回の転送で、8bit × 2 に割ると
+    /// 2 つ目が error レジスタを読んでしまう (insw/outsw が使う本道)
     pub fn io_read16(&mut self, port: u16) -> u16 {
+        if port == dev::chip::ide::BASE {
+            if let Some(ide) = &mut self.devices.ide {
+                return ide.read_data16();
+            }
+            return 0xFFFF;
+        }
         self.io_read8(port) as u16 | (self.io_read8(port.wrapping_add(1)) as u16) << 8
     }
 
     pub fn io_write16(&mut self, port: u16, val: u16) {
+        if port == dev::chip::ide::BASE {
+            let req = match &mut self.devices.ide {
+                Some(ide) => ide.write_data16(val),
+                None => None,
+            };
+            if let Some(dev::chip::ide::Request::Read { lba, count }) = req {
+                self.ide_fill(lba, count);
+            }
+            return;
+        }
         self.io_write8(port, val as u8);
         self.io_write8(port.wrapping_add(1), (val >> 8) as u8);
+    }
+
+    /// ATAPI の READ に像のセクタを詰める (像は self.cd、素子は大きさしか知らない)
+    fn ide_fill(&mut self, lba: u32, count: u32) {
+        let data = match &self.cd {
+            Some(cd) => {
+                let a = lba as usize * 2048;
+                let b = (a + count as usize * 2048).min(cd.len());
+                let mut v = cd.get(a..b).map(|s| s.to_vec()).unwrap_or_default();
+                v.resize(count as usize * 2048, 0);
+                v
+            }
+            None => vec![0; count as usize * 2048],
+        };
+        if let Some(ide) = &mut self.devices.ide {
+            ide.data_ready(data);
+        }
+    }
+
+    /// ATAPI の CD-ROM を挿す (IDE secondary、IRQ15)。Linux は pata_legacy + sr_mod で
+    /// /dev/sr0 として見る。BIOS の CD (INT 13h 0xE0) も同じ像を読む。
+    /// 呼ばなければ素子は無く、起動はビット同一 (NIC/virtio-blk と同じ入力口の流儀)
+    pub fn cd_attach(&mut self, image: Vec<u8>) {
+        let sectors = image.len().div_ceil(2048) as u32;
+        self.cd = Some(image);
+        self.devices.ide = Some(dev::Ide::new(sectors));
     }
 
     /// 32bitのI/O。専用装置 (PCIコンフィグ等) を積むまでは16bit×2で表す

@@ -187,6 +187,11 @@ impl Emulator {
             .map_err(|e| JsError::new(&e))
     }
 
+    /// ATAPI の CD-ROM を挿す (IDE secondary)。Linux 機で ISO を /dev/sr0 として見せる
+    pub fn cd_attach(&mut self, image: &[u8]) {
+        self.m.cd_attach(image.to_vec());
+    }
+
     /// 起動済みスナップショットから機械を丸ごと復元する。
     ///
     /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を

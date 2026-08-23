@@ -58,6 +58,10 @@ pub enum IoTarget {
     VgaGc,
     /// 0x388 / 0x389: Adlib (OPL2、YM3812)。DOOM の音楽
     Opl,
+    /// 0x170-0x177 / 0x376: IDE の secondary チャネル (ATAPI の CD-ROM、IRQ15)。
+    /// データポート (0x170) の 16bit 読み書きは Machine の io_read16/io_write16 が
+    /// 直接素子へ渡す (8bit × 2 に割ると 1 ワードが 2 レジスタに化ける)
+    Ide,
     /// 0x3DA: 入力状態レジスタ1 (垂直帰線・表示ブランク)。
     /// レジスタの実体は無く、機械の時計から合成する — ゲームはここを
     /// ポーリングしてテンポを取る (ティアリング無しの描き換えの合図)
@@ -126,6 +130,9 @@ pub struct Devices {
     /// virtio-blk (PCIスロット4)。**挿さっていないのが既定** — NICと同じで、
     /// 装置が居なければ起動はビット同一のまま (ADR-0017の不変条件)
     pub blk: Option<crate::dev::VirtioBlk>,
+    /// IDE secondary の ATAPI CD-ROM。`cd_attach` / `boot_from_iso` で挿す。
+    /// 像は Machine.cd (BIOS の CD と共有) — 素子は大きさしか知らない
+    pub ide: Option<crate::dev::Ide>,
 }
 
 impl Default for Devices {
@@ -150,6 +157,7 @@ impl Devices {
             net: None,
             pci: None,
             blk: None,
+            ide: None,
         }
     }
 }

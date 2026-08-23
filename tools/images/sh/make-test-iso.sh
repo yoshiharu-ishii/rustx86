@@ -1,7 +1,8 @@
 #!/bin/sh
 # 起動できる ISO (El Torito、no-emulation) を焼く — isolinux + 自前の Linux (vmlinuz-lts +
 # initramfs-mini)。6c (ISO 起動) の検証用: 「実物のブートローダが INT 13h の CD を読んで
-# カーネルを上げる」が通るかを見る。
+# カーネルを上げる」が通るかを見る。rustx86.ide=1 で init が ATAPI のモジュールを挿し、
+# 起動した ISO 自身を /mnt/cdrom に掛ける (6c 2段目の検証)。
 #
 #   tools/images/sh/make-test-iso.sh            → images/test-linux.iso
 #   cargo run --release --example boot -- images/test-linux.iso   (BIOS 経由で起動)
@@ -35,7 +36,7 @@ TIMEOUT 1
 LABEL linux
   KERNEL /vmlinuz
   INITRD /initramfs
-  APPEND console=ttyS0 quiet
+  APPEND console=ttyS0 quiet rustx86.ide=1
 CFG
 xorriso -as mkisofs -quiet -o "$out" \
   -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table \
