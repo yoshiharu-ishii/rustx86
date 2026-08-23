@@ -506,6 +506,49 @@ impl Machine {
                     self.cpu.regs[cpu::DX] = high_blocks;
                     self.cpu.set_flag_cf(false);
                 }
+                // AX=E820: メモリマップ。EBX = 続きの番号 (0 から)、ES:DI に 20 バイト
+                // (base/len 各 64bit、type: 1=使える 2=予約)、EAX='SMAP'、ECX=書いた長さ。
+                // gfxboot (isolinux の画面付きメニュー、DSL 2024 等) はこれが無いと
+                // 高位メモリを取れず "Could not allocate memory" で boot: に落ちる (2026-08-23)。
+                // Linux のカーネルは E801 に落ちるので、無くても起動だけはしていた
+                0xE8 if self.cpu.regs[cpu::AX] & 0xFF == 0x20 => {
+                    // 表: 下位 RAM (EBDA 手前まで) / EBDA・VGA・ROM は予約 / 1MB〜RAM 末尾。
+                    // LFB を申告しているときは RAM 末尾の窓を予約にして分ける
+                    let top = self.mem.len() as u64;
+                    let mut map: Vec<(u64, u64, u32)> =
+                        vec![(0, 0x9FC00, 1), (0x9FC00, 0x400, 2), (0xF0000, 0x10000, 2)];
+                    match self.lfb {
+                        Some(l) if (l.base as u64) < top => {
+                            map.push((0x10_0000, l.base as u64 - 0x10_0000, 1));
+                            map.push((l.base as u64, top - l.base as u64, 2));
+                        }
+                        _ => map.push((0x10_0000, top - 0x10_0000, 1)),
+                    }
+                    let idx = self.cpu.regs[cpu::BX] as usize;
+                    let dst_ok = self.cpu.regs[cpu::DX] & 0xFFFF == 0x534D_4150 & 0xFFFF
+                        || self.cpu.regs[cpu::DX] == 0x534D_4150;
+                    if idx >= map.len() || !dst_ok || self.cpu.regs[cpu::CX] < 20 {
+                        self.cpu.set_flag_cf(true);
+                        self.cpu.regs[cpu::AX] = 0x8600;
+                    } else {
+                        let (base, len, kind) = map[idx];
+                        let dst = ((self.cpu.sregs[cpu::ES] as u32) << 4)
+                            + (self.cpu.regs[cpu::DI] & 0xFFFF);
+                        self.write32(dst, base as u32);
+                        self.write32(dst + 4, (base >> 32) as u32);
+                        self.write32(dst + 8, len as u32);
+                        self.write32(dst + 12, (len >> 32) as u32);
+                        self.write32(dst + 16, kind);
+                        self.cpu.regs[cpu::AX] = 0x534D_4150; // 'SMAP'
+                        self.cpu.regs[cpu::CX] = 20;
+                        self.cpu.regs[cpu::BX] = if idx + 1 < map.len() {
+                            idx as u32 + 1
+                        } else {
+                            0
+                        };
+                        self.cpu.set_flag_cf(false);
+                    }
+                }
                 _ => {
                     // 未対応の機能は「サポートしていない」と答える。
                     // OSは戻り値を見て別の手段へ回るので、ここで落としてはいけない
