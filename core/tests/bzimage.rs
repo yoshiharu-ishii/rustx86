@@ -66,7 +66,7 @@ use rustx86_core::bzimage::{build_zero_page, zero_page_e820, zero_page_e820_coun
 fn e820はramサイズから作られる() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 128MB の機械
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None, None);
     // 640K + EBDA + VGA窓 + 1MB以降 = 4エントリ
     assert_eq!(zero_page_e820_count(&zp), 4);
     // 最後のエントリ = 1MB から (128MB - 1MB) の使えるRAM
@@ -80,14 +80,14 @@ fn e820はramサイズから作られる() {
 fn 小さいramでは1mb以降のエントリが無い() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
     // 1MB ちょうど → 1MB以降のRAMが無いので3エントリ
-    let zp = build_zero_page(&img, 1 << 20, 0x9_0000, None, None);
+    let zp = build_zero_page(&img, 1 << 20, 0x9_0000, None, None, None);
     assert_eq!(zero_page_e820_count(&zp), 3);
 }
 
 #[test]
 fn zero_pageにヘッダとcmdlineが入る() {
     let img = fake_bzimage(4, 0x020C, 0x0010_0000, 0x01);
-    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None);
+    let zp = build_zero_page(&img, 128 << 20, 0x9_0000, None, None, None);
     // setupヘッダのマジックが zero page にも写っている
     assert_eq!(&zp[0x202..0x206], b"HdrS");
     // cmdline ポインタ
@@ -232,7 +232,7 @@ fn zero_page_declares_an_efi_lfb_and_reserves_it_in_e820() {
     let ram = 128u64 << 20;
     let lfb = Lfb::at_top_of(ram);
     assert_eq!(lfb.base, (128 << 20) - 0x20_0000, "RAMの末尾2MB");
-    let zp = build_zero_page(&img, ram, 0x9_0000, None, Some(lfb));
+    let zp = build_zero_page(&img, ram, 0x9_0000, None, Some(lfb), None);
     assert_eq!(zp[0x0F], 0x70, "orig_video_isVGA = VIDEO_TYPE_EFI");
     assert_eq!(u16::from_le_bytes([zp[0x12], zp[0x13]]), 640);
     assert_eq!(u16::from_le_bytes([zp[0x14], zp[0x15]]), 480);

@@ -466,7 +466,8 @@ impl Machine {
                 // ここで「32bit で使える RAM」を知る — 答えないと DOOM は
                 // 「メモリが足りない」で起動しない。16bit 機の RAM は 16MB
                 0x88 => {
-                    let ext_kb = (self.mem.len().saturating_sub(0x10_0000) / 1024).min(0xFFFF);
+                    let ram = self.vram_base.map(|v| v as usize).unwrap_or(self.mem.len());
+                    let ext_kb = (ram.saturating_sub(0x10_0000) / 1024).min(0xFFFF);
                     self.cpu.regs[cpu::AX] = ext_kb as u32;
                     self.cpu.set_flag_cf(false);
                 }
@@ -497,9 +498,11 @@ impl Machine {
                 }
                 // AX=E801: 同じことを 1〜16MB (KB) と 16MB 以上 (64KB 単位) に分けて
                 0xE8 if self.cpu.regs[cpu::AX] & 0xFF == 0x01 => {
-                    let ext = self.mem.len().saturating_sub(0x10_0000);
+                    // VRAM (Bochs VGA) は RAM の頭数に入れない (E820 と同じ理由)
+                    let ram = self.vram_base.map(|v| v as usize).unwrap_or(self.mem.len());
+                    let ext = ram.saturating_sub(0x10_0000);
                     let low_kb = (ext / 1024).min(0x3C00) as u32; // 15MB まで
-                    let high_blocks = (self.mem.len().saturating_sub(0x100_0000) / 65536) as u32;
+                    let high_blocks = (ram.saturating_sub(0x100_0000) / 65536) as u32;
                     self.cpu.regs[cpu::AX] = low_kb;
                     self.cpu.regs[cpu::CX] = low_kb;
                     self.cpu.regs[cpu::BX] = high_blocks;
@@ -517,15 +520,17 @@ impl Machine {
                     let top = self.mem.len() as u64;
                     let mut map: Vec<(u64, u64, u32)> =
                         vec![(0, 0x9FC00, 1), (0x9FC00, 0x400, 2), (0xF0000, 0x10000, 2)];
-                    // LFB (efifb) か VRAM (Bochs VGA) を申告していれば、そこから上は予約
-                    let reserved_from = self
-                        .vram_base
-                        .map(|b| b as u64)
-                        .or(self.lfb.map(|l| l.base as u64));
-                    match reserved_from {
-                        Some(b) if b < top && b > 0x10_0000 => {
-                            map.push((0x10_0000, b - 0x10_0000, 1));
-                            map.push((b, top - b, 2));
+                    // LFB (efifb) を申告していればそこから上は予約。**VRAM (Bochs VGA) は表に
+                    // 載せない** — 予約 (type 2) にすると Linux が「BAR が予約域と衝突」と見て
+                    // BAR0 を 0xE0000000 などへ付け替え、書き込みが RAM の外へ消える。
+                    // 載せなければ PCI の窓として素直に claim され、RAM 末尾 (= VRAM) に書く
+                    match (self.vram_base, self.lfb) {
+                        (Some(v), _) if (v as u64) > 0x10_0000 => {
+                            map.push((0x10_0000, v as u64 - 0x10_0000, 1));
+                        }
+                        (None, Some(l)) if (l.base as u64) < top && l.base > 0x10_0000 => {
+                            map.push((0x10_0000, l.base as u64 - 0x10_0000, 1));
+                            map.push((l.base as u64, top - l.base as u64, 2));
                         }
                         _ => map.push((0x10_0000, top - 0x10_0000, 1)),
                     }

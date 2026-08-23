@@ -222,6 +222,7 @@ pub fn build_zero_page(
     cmdline_ptr: u32,
     initrd: Option<(u32, u32)>,
     lfb: Option<Lfb>,
+    vram_base: Option<u32>,
 ) -> Vec<u8> {
     let mut zp = vec![0u8; 4096];
 
@@ -305,9 +306,13 @@ pub fn build_zero_page(
     ];
     // LFBを申告するなら、その窓はRAMの地図から外して予約にする。
     // usable のままだと ioremap が「RAMには張れない」と断る
-    let usable_end = match lfb {
-        Some(l) => l.base as u64,
-        None => ram_bytes,
+    // Bochs VGA の VRAM (RAM 末尾) は**地図に載せない** (usable でも reserved でもない) —
+    // reserved にすると PCI が「BAR が予約域と衝突」と見て BAR0 を RAM の外へ付け替え、
+    // 画素が消える。載せなければ PCI の窓として claim され、RAM 末尾に書く (2026-08-23)
+    let usable_end = match (vram_base, lfb) {
+        (Some(v), _) => v as u64,
+        (None, Some(l)) => l.base as u64,
+        (None, None) => ram_bytes,
     };
     if usable_end > 0x0010_0000 {
         entries.push(E820 {
@@ -316,7 +321,7 @@ pub fn build_zero_page(
             kind: 1,
         });
     }
-    if let Some(l) = lfb {
+    if let (None, Some(l)) = (vram_base, lfb) {
         entries.push(E820 {
             base: l.base as u64,
             size: ram_bytes - l.base as u64,

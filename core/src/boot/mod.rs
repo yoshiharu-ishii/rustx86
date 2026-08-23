@@ -333,6 +333,7 @@ impl Machine {
             CMDLINE_ADDR,
             initrd_loc,
             self.lfb,
+            self.vram_base,
         );
         for (i, b) in zp.iter().enumerate() {
             self.write_phys8(ZERO_PAGE_ADDR + i as u32, *b);

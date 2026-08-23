@@ -240,11 +240,10 @@ fn dsl_chroot_under_alpine() {
     // 直前の ALU 命令に上書きされる) で全部 inf/nan だった (2026-08-23)
     let cmd = concat!(
         "mkdir -p /mnt/lfs; mount -t squashfs -o loop /mnt/cdrom/antiX/linuxfs /mnt/lfs; ",
-        "echo Q1; find /mnt/lfs/lib/modules -name 'bochs*' -o -name 'vesafb*' -o -name 'simpledrm*' -o -name 'cirrus*' | head; ",
-        "echo Q2; ls /mnt/lfs/usr/lib/xorg/modules/drivers/ 2>/dev/null | tr '\\n' ' '; echo; ",
-        "echo Q3; grep -l 'modesetting' /mnt/lfs/usr/local/bin/* /mnt/lfs/usr/local/lib/* 2>/dev/null | head -5; ",
-        "echo Q4; grep -n 'bochs\\|1234\\|modesetting\\|DEFAULT_DRIVER\\|vesa' /mnt/lfs/usr/local/bin/make-xorg-conf 2>/dev/null | head -20; ",
-        "echo Q5; grep -c . /mnt/lfs/lib/modules/*/modules.builtin; grep -h 'bochs\\|drm/\\|fb/' /mnt/lfs/lib/modules/*/modules.builtin | head -12; ",
+        "echo R1; grep -h 'v00001234d00001111' /mnt/lfs/lib/modules/*/modules.alias | head -3; ",
+        "echo R2; grep -rn 'bochs\\|blacklist' /mnt/lfs/etc/modprobe.d/ 2>/dev/null | head -5; ",
+        "echo R3; grep -n 'bochs\\|1234\\|modesetting\\|vesa' /mnt/lfs/usr/local/bin/make-xorg-conf 2>/dev/null | head -12; ls /mnt/lfs/usr/local/bin/ | grep -i xorg; ",
+        "echo R4; grep -rln 'Found_no_video' /mnt/lfs/live/bin /mnt/lfs/usr/local/lib/live 2>/dev/null | head -3; ",
         "printf 'DONE%s\\n' MARK\n"
     );
     type_serial(&mut m, cmd);
