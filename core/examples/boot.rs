@@ -55,7 +55,17 @@ fn main() {
     } else {
         Machine::new()
     };
-    if is_iso {
+    // SNAPSHOT_LOAD=path: 控えから戻して続きをやる (DSL のログインまで 10 分、を 0 にする)。
+    // CD の像は控えに入っていないので第1引数の ISO を挿し直す。
+    // SNAPSHOT_SAVE=path: 手順を終えたところで控えを書く
+    if let Ok(p) = std::env::var("SNAPSHOT_LOAD") {
+        let data = std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        m.load_state(&data).expect("snapshot");
+        if m.cd_wanted() {
+            m.cd_attach(image);
+        }
+        eprintln!("[boot] {p} から復元");
+    } else if is_iso {
         m.boot_from_iso(image).expect("El Torito");
     } else {
         m.boot_from_disk(image).expect("boot");
@@ -207,6 +217,14 @@ fn main() {
         }
         n
     }));
+
+    if let Ok(p) = std::env::var("SNAPSHOT_SAVE") {
+        let data = m.save_state();
+        match std::fs::write(&p, &data) {
+            Ok(()) => eprintln!("[boot] 控えを書いた: {p} ({} バイト)", data.len()),
+            Err(e) => eprintln!("[boot] 控えを書けない: {e}"),
+        }
+    }
 
     // 止まった理由より先に、**ゲストが何を出したか**を見せる。
     // 大抵はそこに手がかりが書いてある

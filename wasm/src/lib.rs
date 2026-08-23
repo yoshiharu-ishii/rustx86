@@ -192,6 +192,11 @@ impl Emulator {
         self.m.cd_attach(image.to_vec());
     }
 
+    /// 控えから戻した機械が CD の像を待っているか (像は控えに入らない — 同じ ISO を挿し直す)
+    pub fn cd_wanted(&self) -> bool {
+        self.m.cd_wanted()
+    }
+
     /// 起動済みスナップショットから機械を丸ごと復元する。
     ///
     /// 「シンプルなカーネルの起動に1分」への即効薬 — 一度起動した機械を

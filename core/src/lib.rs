@@ -989,7 +989,17 @@ impl Machine {
     pub fn cd_attach(&mut self, image: Vec<u8>) {
         let sectors = image.len().div_ceil(2048) as u32;
         self.cd = Some(image);
-        self.devices.ide = Some(dev::Ide::new(sectors));
+        match &mut self.devices.ide {
+            // 控えから戻した直後 (像だけ無い) — 素子の状態は生かし、像だけ差し替える
+            Some(ide) => ide.set_sectors(sectors),
+            None => self.devices.ide = Some(dev::Ide::new(sectors)),
+        }
+    }
+
+    /// 控えから戻した機械が CD の像を待っているか (素子はあるが像が無い)。
+    /// 立っていたら [`Machine::cd_attach`] で同じ像を挿し直す
+    pub fn cd_wanted(&self) -> bool {
+        self.devices.ide.is_some() && self.cd.is_none()
     }
 
     /// 32bitのI/O。専用装置 (PCIコンフィグ等) を積むまでは16bit×2で表す

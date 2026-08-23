@@ -159,3 +159,6 @@ fetch後に `DecompressionStream('gzip')` で**ホスト側で1回だけ**解く
   0x170/0x376、IRQ15、PIO)。速さは virtio、互換は ATA、の分担どおり: CD は読むだけなので
   PIO で足りる (2048B × 1 ブロックを insw で運ぶ)。HDD を足すなら primary に
   READ/WRITE SECTORS を乗せる。virtio-mmio (PCIの無い機械に挿す口) は台帳のまま
+- CD の像はスナップショットに**入れない** (v16)。virtio-blk の像は書き換わるので控えに
+  写すが、CD は読むだけなので、素子の状態 (DRQ の途中でも) だけ控えて、復元側が同じ ISO を
+  `cd_attach` で挿し直す。`cd_wanted()` が「素子はあるが像が無い」の印

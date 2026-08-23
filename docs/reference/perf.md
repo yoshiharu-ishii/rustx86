@@ -110,7 +110,7 @@ flowchart TD
 |---|---|---|---|---|
 | A1 | codegen-units=1 + LTO | 数% | ✅済 | 交互A/B -2〜3%。Cargo.tomlに常設 |
 | A2 | wasm-opt -O3/-O4 | wasm数% | 💤 | wasm-packが既定で適用済み。-O4は差がノイズ (2026-08-10) |
-| A3 | PGO | -25% | 💤 | **効いたが寝かせ (ユーザー判断)** — 運用判断を開発に持ち込まない。議論と復帰条件は [ADR-0009](../adr/0009-pgo-shelved.md)、実験はタグ [exp/pgo-build](https://github.com/yoshiharu-ishii/rustx86/releases/tag/exp%2Fpgo-build) |
+| A3 | PGO | -25% | ✅ | **2026-08-23 解放** (ネイティブのみ。`tools/build/pgo-build.sh`、訓練 = regress 固定、定規 bootphase は通常ビルドのまま)。2026-08-11〜22 は「運用判断を開発に持ち込まない」で寝かせていた — 議論と復帰条件は [ADR-0009](../adr/0009-pgo-shelved.md) |
 | A4 | panic=abort | 数% | 💤 | 交互A/B 8周ワッシュ (2026-08-12)。A1が既にunwind経路を最適化済みと推測。不採用 |
 
 ### B. ディスパッチとデコード

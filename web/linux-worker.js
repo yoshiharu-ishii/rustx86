@@ -74,6 +74,9 @@ self.onmessage = (e) => {
         // 空画面のままだと死んで見えるので、改行を1つ流して
         // シェルにプロンプトを出させる
         emu = Emulator.from_snapshot(new Uint8Array(msg.snapshot));
+        // CD の像は控えに入っていない (685MB の ISO を控えに写す意味が無い)。
+        // 素子が像を待っていれば、選んである同じ ISO を挿し直す
+        if (msg.cd && emu.cd_wanted()) emu.cd_attach(new Uint8Array(msg.cd));
         emu.serial_in(new TextEncoder().encode('\n'));
       } else if (msg.iso) {
         // ISO (El Torito) から BIOS 経由で起動する。機械は PCI 付き 32bit PC —
@@ -102,7 +105,8 @@ self.onmessage = (e) => {
         emu.set_rtc_unix(Date.now() / 1000);
       }
       // JIT (F1d wasm)。電源投入時の初期値 — 実行中の切替は 'jit' メッセージ
-      isoOn = !!msg.iso && !msg.snapshot;
+      // CD 起動の機械 (画面は VGA) は、控えから戻したときも VGA を汲む
+      isoOn = !!msg.iso || !!msg.cdBoot;
       lastTextAt = 0;
       lastCursor = -1;
       charsetSent = false;

@@ -228,7 +228,8 @@ export function mountLinux(canvas, opts = {}) {
     let iso = givenIso;
     const isoFile = givenIso ? isoName || 'ISO' : want.cd || want.iso || '';
     const cdBoot = !!givenIso || (!!isoFile && !want.name);
-    if (!snapshot && !iso && isoFile) {
+    // 控えからの復元でも取り寄せる — 像は控えに入っていないので、同じ CD を挿し直す
+    if (!iso && isoFile) {
       imageName = isoFile;
       try {
         iso = await fetchWithProgress(`./${isoFile}`, isoFile);
@@ -346,7 +347,10 @@ export function mountLinux(canvas, opts = {}) {
         case 'ready': {
           // 転送可能オブジェクトで渡す (コピーを避ける)
           if (snapshot) {
-            worker.postMessage({ type: 'boot', snapshot: snapshot.buffer }, [snapshot.buffer]);
+            // CD (選んであれば) も一緒に渡す。控えの機械が CD を待っていれば挿し直す
+            const xfer = [snapshot.buffer];
+            if (iso) xfer.push(iso.buffer);
+            worker.postMessage({ type: 'boot', snapshot: snapshot.buffer, cd: iso?.buffer, cdBoot }, xfer);
           } else {
             // 定規の始点 = 機械を組み始める瞬間 (headless.mjs の t0 と同じ)。
             // fetch は含めない — 測るのは計算の速さで、回線の速さではない
