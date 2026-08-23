@@ -1092,14 +1092,12 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
             m.write16(addr, cw);
             let sw = m.cpu.fpu.status();
             m.write16(addr.wrapping_add(2), sw);
-            // FTW (簡約タグ): bit i = st(i) が空でない。FSAVEの2bit表と違い
-            // FXSAVEは1bitで、TOPはFSWから復元される
-            let mut ftw = 0u8;
-            for i in 0..8 {
-                if !m.cpu.fpu.st_empty(i) {
-                    ftw |= 1 << i;
-                }
-            }
+            // FTW (簡約タグ): **bit i = 物理レジスタ R(i) が空でない** (st(i) ではない —
+            // ST の本体は st(i) 順に並ぶが、タグだけは物理順。TOP は FSW から復元される)。
+            // st(i) 順で書いていた間は自分の FXRSTOR とは辻褄が合っていたが、カーネルが
+            // シグナルフレームで FTW を本物の表に広げ直す (twd_fxsr_to_i387) と、
+            // TOP≠0 のときレジスタの空/非空が入れ替わり、戻った x87 スタックが NaN を吐いた
+            let ftw = !m.cpu.fpu.empty;
             m.write8(addr.wrapping_add(4), ftw);
             let mx = m.cpu.mxcsr;
             m.write32(addr.wrapping_add(24), mx);
@@ -1129,7 +1127,9 @@ pub(crate) fn grp_0fae(m: &mut Machine, d: &Decoder) -> bool {
                 let at = addr.wrapping_add(32 + i as u32 * 16);
                 let mant = m.read32(at) as u64 | (m.read32(at.wrapping_add(4)) as u64) << 32;
                 let se = m.read16(at.wrapping_add(8));
-                m.cpu.fpu.set_st_f80(i, mant, se, ftw & (1 << i) != 0);
+                // 本体は st(i) 順、タグは物理順 (st(i) の物理番号 = TOP+i)
+                let phys = (m.cpu.fpu.top as usize + i) & 7;
+                m.cpu.fpu.set_st_f80(i, mant, se, ftw & (1 << phys) != 0);
             }
             m.cpu.mxcsr = m.read32(addr.wrapping_add(24));
             for i in 0..8 {

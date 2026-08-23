@@ -136,3 +136,124 @@ fn tinycore_sees_its_own_cd() {
         m.devices.ide.as_ref().map(|d| d.commands).unwrap_or(0)
     );
 }
+
+/// (重い) 大きな ISO を端から端まで ATAPI で読んで壊れていないか — DSL 2024 の linuxfs (700MB) の
+/// md5 を ISO 内の .md5 と突き合わせる。RUSTX86_BIG_ISO=path で指定
+#[test]
+#[ignore]
+fn big_iso_reads_intact() {
+    let (Ok(kernel), Ok(initrd)) = (std::fs::read(KERNEL), std::fs::read(INITRD)) else {
+        return;
+    };
+    let Ok(path) = std::env::var("RUSTX86_BIG_ISO") else {
+        return;
+    };
+    let iso = std::fs::read(&path).unwrap();
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(256));
+    m.cd_attach(iso);
+    m.boot_linux_with_initrd(&kernel, "console=ttyS0 rustx86.ide=1", Some(&initrd))
+        .expect("boot");
+    assert!(wait_serial(&mut m, "busybox shell", 3_000_000_000));
+    type_serial(&mut m, "ls -la /mnt/cdrom/antiX/; cat /mnt/cdrom/antiX/linuxfs.md5; md5sum /mnt/cdrom/antiX/linuxfs; printf 'DONE%s\\n' MARK\n");
+    assert!(
+        wait_serial(&mut m, "DONEMARK", 400_000_000_000),
+        "終わらない:\n{}",
+        serial(&m)
+    );
+    let out = serial(&m);
+    eprintln!("{}", &out[out.rfind("ls -la").unwrap_or(0)..]);
+}
+
+/// (重い) DSL 2024 を CD から起動し、シリアルにも出させて init のログを全部採る。
+/// RUSTX86_BIG_ISO=path。出力は RUSTX86_SERIAL_OUT のファイルへ
+#[test]
+#[ignore]
+fn dsl_serial_log() {
+    let Ok(path) = std::env::var("RUSTX86_BIG_ISO") else {
+        return;
+    };
+    let iso = std::fs::read(&path).unwrap();
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(512));
+    m.boot_from_iso(iso).unwrap();
+    let mut n = 0u64;
+    while n < 200_000_000 {
+        m.run(1_000_000);
+        n += 1_000_000;
+        if m.text_screen_string().contains("boot:") {
+            break;
+        }
+    }
+    eprintln!("boot: 時点の video_mode={:#x}", m.video_mode);
+    m.run(2_000_000);
+    // BIOS のキー待ち行列は 15 個。isolinux は 1 文字ずつゆっくり取るので、小分けに打つ
+    // ラベルの APPEND (quiet) を使わず、カーネルの行を丸ごと打つ (全ログをシリアルへ)
+    let line = std::env::var("RUSTX86_BOOT_LINE")
+        .unwrap_or_else(|_| "text console=ttyS0,115200 console=tty1\n".into());
+    for chunk in line.as_bytes().chunks(6) {
+        m.devices
+            .keyboard
+            .type_ascii(std::str::from_utf8(chunk).unwrap());
+        m.run(3_000_000);
+    }
+    let budget: u64 = std::env::var("RUSTX86_BUDGET_G")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20)
+        * 1_000_000_000;
+    let mut spent = 0u64;
+    while spent < budget {
+        m.run(5_000_000);
+        spent += 5_000_000;
+        if serial(&m).contains("login:") {
+            break;
+        }
+    }
+    let out = serial(&m);
+    if let Ok(p) = std::env::var("RUSTX86_SERIAL_OUT") {
+        std::fs::write(&p, &out).unwrap();
+    }
+    eprintln!(
+        "{spent} 命令 / シリアル {} バイト / 最後の画面:\n{}",
+        out.len(),
+        m.text_screen_string()
+    );
+}
+
+/// (重い) DSL の linuxfs を Alpine の下で chroot し、glibc の coreutils が動くか —
+/// 「memory exhausted」が antiX のカーネル/設定のせいか、エミュレータ (CPU) のせいかを切り分ける
+#[test]
+#[ignore]
+fn dsl_chroot_under_alpine() {
+    let (Ok(kernel), Ok(initrd)) = (std::fs::read(KERNEL), std::fs::read(INITRD)) else {
+        return;
+    };
+    let Ok(path) = std::env::var("RUSTX86_BIG_ISO") else {
+        return;
+    };
+    let iso = std::fs::read(&path).unwrap();
+    let mut m = Machine::with_profile(MachineProfile::pc_32bit(512));
+    m.cd_attach(iso);
+    m.boot_linux_with_initrd(&kernel, "console=ttyS0 rustx86.ide=1", Some(&initrd))
+        .expect("boot");
+    assert!(wait_serial(&mut m, "busybox shell", 3_000_000_000));
+    // glibc の coreutils/awk/python の浮動小数点。x87 の遅延フラグの穴 (FUCOMIP の結果が
+    // 直前の ALU 命令に上書きされる) で全部 inf/nan だった (2026-08-23)
+    let cmd = concat!(
+        "mkdir -p /mnt/lfs; mount -t squashfs -o loop /mnt/cdrom/antiX/linuxfs /mnt/lfs; mount -t proc proc /mnt/lfs/proc; mount -t devtmpfs dev /mnt/lfs/dev; mount -t tmpfs tmp /mnt/lfs/tmp; ",
+        "chroot /mnt/lfs /bin/sh -c '",
+        "echo P1; /usr/bin/printf \"%f|%e|%g|%a\\n\" 3 3 3 3; /usr/bin/printf \"%f|%e|%g\\n\" 2.5 2.5 2.5; ",
+        "echo P2; /usr/bin/awk \"BEGIN{x=0.8; y=1.0; print x<y, x*y, 1.414*100, sqrt(2), 3}\"; ",
+        "echo P3; /bin/grep --version | head -1; /usr/bin/find /etc -maxdepth 1 -name passwd; ",
+        "echo P4; /usr/bin/python3 -S -c \"print(repr(3.0), 1.5*2, 0.8<1.0)\" 2>&1 | tail -1; ",
+        "echo :[ok]'; ",
+        "printf 'DONE%s\\n' MARK\n"
+    );
+    type_serial(&mut m, cmd);
+    assert!(
+        wait_serial(&mut m, "DONEMARK", 60_000_000_000),
+        "終わらない:\n{}",
+        serial(&m)
+    );
+    let out = serial(&m);
+    eprintln!("{}", &out[out.rfind("mkdir -p /mnt/lfs").unwrap_or(0)..]);
+}

@@ -66,6 +66,7 @@ if [ -f images/modloop-lts ]; then
   #   libata + pata_legacy    ISA の古典 IDE ポートを叩くドライバ
   #   cdrom + sr_mod          CD-ROM の共通層と /dev/sr0
   #   isofs                   ISO 9660
+  #   loop                    CD の中の像 (squashfs 等) を mount -o loop で開く
   unsquashfs -q -f -d "$mlo" images/modloop-lts \
     'modules/*/kernel/drivers/scsi/scsi_common.ko' \
     'modules/*/kernel/drivers/scsi/scsi_mod.ko' \
@@ -73,7 +74,8 @@ if [ -f images/modloop-lts ]; then
     'modules/*/kernel/drivers/ata/pata_legacy.ko' \
     'modules/*/kernel/drivers/cdrom/cdrom.ko' \
     'modules/*/kernel/drivers/scsi/sr_mod.ko' \
-    'modules/*/kernel/fs/isofs/isofs.ko' >/dev/null 2>&1 || true
+    'modules/*/kernel/fs/isofs/isofs.ko' \
+    'modules/*/kernel/drivers/block/loop.ko' >/dev/null 2>&1 || true
   find "$mlo" -name "*.ko" -exec cp {} "$work/root/lib/modules/" \;
   rm -rf "$mlo"
 fi
@@ -160,7 +162,7 @@ done
 # 7 つの insmod と IDE のプローブで起動の命令数が変わるので、素の起動には持ち込まない。
 # 挿さったら /dev/sr0 を /mnt/cdrom に読み取り専用で掛ける (無ければ黙って進む)
 if /bin/busybox grep -q 'rustx86\.ide' /proc/cmdline 2>/dev/null; then
-  for mod in scsi_common scsi_mod libata pata_legacy cdrom sr_mod isofs; do
+  for mod in scsi_common scsi_mod libata pata_legacy cdrom sr_mod isofs loop; do
     /bin/busybox insmod /lib/modules/$mod.ko 2>/dev/null
   done
   /bin/busybox mkdir -p /mnt/cdrom
