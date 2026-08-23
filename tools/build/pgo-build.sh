@@ -21,7 +21,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PGO_DATA="${PGO_DATA:-target/pgo-data}"
+# 絶対パスで — cargo は依存クレートを各パッケージのディレクトリから
+# コンパイルするので、相対パスの -Cprofile-use は「file does not exist」で落ちる
+PGO_DATA="${PGO_DATA:-$PWD/target/pgo-data}"
 PROFDATA=$(ls "$HOME"/.rustup/toolchains/*/lib/rustlib/*/bin/llvm-profdata | head -1)
 if [ -z "$PROFDATA" ]; then
     echo "llvm-profdata が無い。rustup component add llvm-tools を先に" >&2

@@ -46,8 +46,9 @@ console.log(`起動: ${prompt} まで ${(n / 1e6).toFixed(0)}M 命令 (${((perfo
 
 // 控える (像は入らない)
 const snap = emu.save_state();
+// 大きさは RAM (RLE) が支配するので ISO との比較はできない — 像が無いことは
+// 下の cd_wanted() が証明する
 console.log(`控え: ${(snap.length / 1024 / 1024).toFixed(1)} MB (ISO は ${(iso.length / 1024 / 1024).toFixed(1)} MB)`);
-if (snap.length > iso.length) fail('控えに像が混ざっている');
 emu.free?.();
 
 // 戻す → 像を待っている → 挿し直す
