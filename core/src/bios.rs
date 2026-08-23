@@ -517,10 +517,15 @@ impl Machine {
                     let top = self.mem.len() as u64;
                     let mut map: Vec<(u64, u64, u32)> =
                         vec![(0, 0x9FC00, 1), (0x9FC00, 0x400, 2), (0xF0000, 0x10000, 2)];
-                    match self.lfb {
-                        Some(l) if (l.base as u64) < top => {
-                            map.push((0x10_0000, l.base as u64 - 0x10_0000, 1));
-                            map.push((l.base as u64, top - l.base as u64, 2));
+                    // LFB (efifb) か VRAM (Bochs VGA) を申告していれば、そこから上は予約
+                    let reserved_from = self
+                        .vram_base
+                        .map(|b| b as u64)
+                        .or(self.lfb.map(|l| l.base as u64));
+                    match reserved_from {
+                        Some(b) if b < top && b > 0x10_0000 => {
+                            map.push((0x10_0000, b - 0x10_0000, 1));
+                            map.push((b, top - b, 2));
                         }
                         _ => map.push((0x10_0000, top - 0x10_0000, 1)),
                     }

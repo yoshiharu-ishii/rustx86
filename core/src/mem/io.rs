@@ -90,6 +90,12 @@ impl Machine {
                 let now = self.cpu.tsc;
                 self.devices.opl.status(now) // 0x389 の読みも status を返す (実機と同じ)
             }
+            // DISPI の 8bit 読み (下位バイト)。本道は 16bit (lib.rs の io_read16)
+            IoTarget::Dispi => match &self.devices.dispi {
+                Some(d) if port == 0x1CE => d.read_index() as u8,
+                Some(d) => d.read_data() as u8,
+                None => 0xFF,
+            },
             // CD が無ければ浮いたバス (0xFF)。pata_legacy はこれで「装置無し」と見る
             IoTarget::Ide => match &mut self.devices.ide {
                 Some(ide) => ide.read8(port),
@@ -296,6 +302,17 @@ impl Machine {
                 if let Some(ide) = &mut self.devices.ide {
                     ide.write8(port, val);
                 }
+            }
+            IoTarget::Dispi => {
+                // 8bit 書きは下位だけ (使う者は居ない — 16bit が本道)
+                if let Some(d) = &mut self.devices.dispi {
+                    if port == 0x1CE {
+                        d.write_index(val as u16);
+                    } else {
+                        d.write_data(val as u16);
+                    }
+                }
+                self.sync_dispi();
             }
             IoTarget::VideoStatus => {
                 self.unhandled_io.insert(port);

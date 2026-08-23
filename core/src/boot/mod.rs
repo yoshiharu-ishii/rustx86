@@ -101,6 +101,8 @@ impl Machine {
         let count = u16::from_le_bytes([e[6], e[7]]) as usize;
         let rba = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
         self.power_on_self_test();
+        // CD から上がる OS (Tiny Core、DSL…) は PCI の VGA を探す。bochs-drm が掴める顔を挿す
+        self.vga_attach();
         match media {
             0 => {
                 // no-emulation: 像を指定セグメントへ (count は 512B 単位)

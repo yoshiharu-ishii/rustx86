@@ -180,6 +180,10 @@ pub struct Machine {
     /// 同じく「挿さっていなければビット同一」の不変条件で守る。
     /// 起動前に [`lfb_enable`](Self::lfb_enable) で挿す
     pub lfb: Option<boot::bzimage::Lfb>,
+    /// LFB の画素の並びが XRGB (B,G,R,X = Bochs VGA) か。false なら efifb の [pad,R,G,B]
+    pub lfb_xrgb: bool,
+    /// Bochs VGA の VRAM (RAM 末尾 16MB) の先頭。E820 はここから上を予約にする
+    pub vram_base: Option<u32>,
     /// 装置を進めるまでの残り命令数。
     ///
     /// 装置を毎命令進めると、最も回数の多い経路に仕事が乗る。
@@ -389,6 +393,8 @@ impl Machine {
             video_modes: std::collections::BTreeSet::new(),
             video_mode: 0x03,
             lfb: None,
+            lfb_xrgb: false,
+            vram_base: None,
             ud_user: std::collections::BTreeSet::new(),
             tick_countdown: INSTRUCTIONS_PER_TICK,
             dcache: cpu::dcache::DecodeCache::new(profile.ram_bytes),
@@ -879,6 +885,13 @@ impl Machine {
     /// **例外は IDE のデータポート** — 1 ワードが 1 回の転送で、8bit × 2 に割ると
     /// 2 つ目が error レジスタを読んでしまう (insw/outsw が使う本道)
     pub fn io_read16(&mut self, port: u16) -> u16 {
+        if port == dev::chip::dispi::PORT_INDEX || port == dev::chip::dispi::PORT_DATA {
+            return match &self.devices.dispi {
+                Some(d) if port == dev::chip::dispi::PORT_INDEX => d.read_index(),
+                Some(d) => d.read_data(),
+                None => 0xFFFF,
+            };
+        }
         if port == dev::chip::ide::BASE {
             if let Some(ide) = &mut self.devices.ide {
                 return ide.read_data16();
@@ -889,6 +902,17 @@ impl Machine {
     }
 
     pub fn io_write16(&mut self, port: u16, val: u16) {
+        if port == dev::chip::dispi::PORT_INDEX || port == dev::chip::dispi::PORT_DATA {
+            if let Some(d) = &mut self.devices.dispi {
+                if port == dev::chip::dispi::PORT_INDEX {
+                    d.write_index(val);
+                } else {
+                    d.write_data(val);
+                }
+            }
+            self.sync_dispi();
+            return;
+        }
         if port == dev::chip::ide::BASE {
             let req = match &mut self.devices.ide {
                 Some(ide) => ide.write_data16(val),
@@ -901,6 +925,45 @@ impl Machine {
         }
         self.io_write8(port, val as u8);
         self.io_write8(port.wrapping_add(1), (val >> 8) as u8);
+    }
+
+    /// Bochs VGA (PCI 1234:1111、DISPI) を挿す。VRAM は RAM 末尾 16MB — BAR0 がそこを指し、
+    /// ゲストの書き込みはただの RAM、表示側は LFB として読む (efifb と同じ窓)。
+    /// PCI の機械にしか挿せない (bochs-drm は PCI を数える)。呼ばなければ無い (入力口の流儀)
+    pub fn vga_attach(&mut self) {
+        let Some(pci) = &mut self.devices.pci else {
+            return;
+        };
+        if self.mem.len() < (dev::chip::dispi::VRAM_BYTES as usize) * 2 {
+            return; // RAM が 32MB 未満なら VRAM を切り出せない
+        }
+        let base = (self.mem.len() as u32).wrapping_sub(dev::chip::dispi::VRAM_BYTES);
+        pci.plug(dev::chip::dispi::SLOT, dev::Dispi::pci_function(base));
+        self.devices.dispi = Some(dev::Dispi::new(base));
+        self.vram_base = Some(base);
+    }
+
+    /// DISPI の書き込みのあと、表示の形 (lfb) を組み直す
+    pub(crate) fn sync_dispi(&mut self) {
+        let Some(d) = &mut self.devices.dispi else {
+            return;
+        };
+        if !d.dirty {
+            return;
+        }
+        d.dirty = false;
+        if d.active() {
+            self.lfb = Some(boot::bzimage::Lfb {
+                base: d.frame_base(),
+                width: d.xres,
+                height: d.yres,
+                bpp: 32,
+            });
+            self.lfb_xrgb = true;
+        } else if self.lfb_xrgb {
+            self.lfb = None;
+            self.lfb_xrgb = false;
+        }
     }
 
     /// ATAPI の READ に像のセクタを詰める (像は self.cd、素子は大きさしか知らない)
