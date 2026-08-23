@@ -21,3 +21,5 @@ dist/
 web/disk-gcc.img.gz
 web/disk-x.img.gz
 .DS_Store
+__pycache__/
+*.pyc
