@@ -107,6 +107,11 @@ fn main() {
     /// 画面に `needle` が出るまで走らせ、**かかった命令数**を返す。
     /// 出ないまま上限に達したか本当に止まったら `None`
     fn run_until(m: &mut Machine, needle: &str, budget: u64) -> Option<u64> {
+        // 空の合図 = 待たずに打つ。控えから戻した直後は画面が書き換わらない
+        // (プロンプトはもう出ている) ので、下の「書き換わったら見る」では一生合わない
+        if needle.is_empty() {
+            return Some(0);
+        }
         for i in 0..budget {
             if stuck(m) {
                 return None;
