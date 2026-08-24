@@ -369,10 +369,14 @@ for (const r of ROOTFS) {
 // **web/ に置いた ISO は全部 CD-ROM の棚に並ぶ。** serve.py が /cdroms.json で *.iso を
 // 数えて返す (静的配信では 404 → ISOS の説明付きの項だけ)。ISOS に無い名前は
 // ファイル名のまま足す — 取ってきた ISO を置くだけで選べる
-fetch('./cdroms.json', { cache: 'no-store' })
+const cdromsReady = fetch('./cdroms.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : []))
   .then(list => {
-    const wanted = localStorage.getItem(ISO_KEY) || '';
+    // **URL (?cd=) が最優先** — 棚は後から非同期に埋まるので、先に入れた値は
+    // まだ選択肢に無く消えている。控えから始める URL (?snap=) は CD が要るので
+    // ここで選び直せないと「像の無い CD-ROM」で復元してしまう
+    const q = new URLSearchParams(location.search);
+    const wanted = q.get('cd') || q.get('iso') || localStorage.getItem(ISO_KEY) || '';
     for (const { name, size } of list) {
       if (ISOS.some(x => x.name === name)) continue;
       const o = document.createElement('option');
@@ -1514,6 +1518,24 @@ try {
   } else {
     const saved = netSaved();
     netConnect(withToken(saved.url, saved.token));
+  }
+  // **?snap=名前** — web/ に置いた控えから始める (ドロップと同じ口を通す)。
+  //
+  // 起動が長いOS (DSL 2024 は CD から 13分) は、速いネイティブで目的の状態まで
+  // 進めた控えを配って**そこから始める**。CD の像は控えに入っていないので
+  // `?cd=` も一緒に指すこと (復元のときに挿し直される)。
+  //   例: ?cd=dsl-2024.rc7.iso&snap=dsl-x.rx86snap
+  const snapName = q0.get('snap');
+  if (snapName) {
+    setStatus(`${snapName} を取り寄せています…`);
+    try {
+      await cdromsReady; // CD の棚が埋まってから (?cd= の像を挿し直すため)
+      const r = await fetch(`./${snapName}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await insertMedia(await r.blob());
+    } catch (e) {
+      setStatus(`${snapName} が読めない: ${e.message}`, true);
+    }
   }
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
