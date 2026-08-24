@@ -41,7 +41,7 @@ x86_64 (ロングモード) は**このリポジトリのゴールに含めな�
   棄却ではなく、[roadmap](docs/roadmap.md) と各台帳に再開手順ごと寝かせてある
 
 なぜここで終えるのか・何がうまくいき何が失敗だったかは、ポストモーテムに書いた:
-**[ブラウザでLinuxとDOOMが動くまで — rustx86 ポストモーテム](https://pocraft.net/rustx86-postmortem/)** (pocraft.net)
+**[RustとWASMで作るx86エミュレータ、18日間・226PRの完走記 — ポストモーテム](https://pocraft.net/?p=600)** (pocraft.net)
 
 ## 動いている様子
 
