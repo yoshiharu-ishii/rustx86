@@ -421,6 +421,11 @@ impl Emulator {
         self.jit_rt.baked as f64
     }
 
+    /// 据わっているブロックを衝突で追い出した回数 (W1 の定規)
+    pub fn jit_conflicts(&self) -> f64 {
+        self.jit_rt.conflicts as f64
+    }
+
     /// JITブロック内で実行された命令数の累計。tsc()に対する割合がカバレッジ
     pub fn jit_instrs(&self) -> f64 {
         self.m.jit_instrs as f64

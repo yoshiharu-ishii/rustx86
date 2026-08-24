@@ -1034,7 +1034,23 @@ struct Module {
     live: u32,
 }
 
-const JSLOTS: usize = 64 * 1024;
+/// スロット表の**組**数。索引は物理番地のハッシュ
+const JSETS: usize = 64 * 1024;
+/// 1 組の**道**数 (W1、ADR-0028)。
+///
+/// **直接マップ (1-way) だと、ホットなブロック 2 本が同じ組に落ちただけで
+/// 互いを永久に追い出し合う。** X + dillo の 30G 命令 soak で
+/// **据付 31K に対し 焼き 2.68M** (2026-08-22 実測) — JIT の稼ぎを
+/// 焼き直しで使い切っていた。組を 2 道にすれば 2 本の衝突は共存できる
+/// (容量を 4 倍に増やすより、衝突ミスにはこちらが効く)。
+/// 表は 64K 組 × 2 道 = 128K 枠、Slot 20B として 2.6MB
+const JWAYS: usize = 2;
+const JSLOTS: usize = JSETS * JWAYS;
+
+/// 物理番地 → 組の先頭 (枠の索引)
+fn set_base(pa: u32) -> usize {
+    (((pa ^ (pa >> 12)) as usize) & (JSETS - 1)) * JWAYS
+}
 const TAG_FREE: u32 = 0xFFFF_FFFF;
 /// assign_slots が返す「新しく伸ばせ」の印 (JS 側と同じ値)
 pub const FRESH: u32 = 0xFFFF_FFFF;
@@ -1066,6 +1082,11 @@ pub struct JitRt {
     pub recycled: u64,
     /// 早期引退させたモジュール数 (診断)
     pub retired: u64,
+    /// 据わっているブロックを**衝突で**追い出した回数 (診断)。
+    /// W1 の効きはこの数字で裁く — 焼き直しの嵐の直接の原因
+    pub conflicts: u64,
+    /// 組ごとの「次に追い出す道」(擬似 LRU、1 バイト/組)
+    lru: Vec<u8>,
 }
 
 thread_local! {
@@ -1100,7 +1121,42 @@ impl JitRt {
             modules: Vec::new(),
             recycled: 0,
             retired: 0,
+            conflicts: 0,
+            lru: vec![0; JSETS],
         }
+    }
+
+    /// 組の中から `pa` の枠を探す (無ければ None)
+    fn find_way(&self, base: usize, pa: u32) -> Option<usize> {
+        // 返すのは**枠の絶対索引** (base + 道番号)。道番号をそのまま返すと
+        // 表の先頭 2 枠を見に行く (2026-08-24 に踏んだ: 別ブロックを実行して
+        // ゲストがカーネルパニック — 決定性ゲートが捕まえた)
+        (0..JWAYS)
+            .find(|&w| self.slots[base + w].tag == pa)
+            .map(|w| base + w)
+    }
+
+    /// 焼く相手の枠を選ぶ。空き・負の印が先、次に擬似 LRU の順。
+    /// **焼き待ち (Baking) は動かせない** — 据え付け (JS の pump) は非同期で、
+    /// 追い出すとジョブが孤児になる。全部 Baking なら None (素通り)
+    fn victim_way(&self, base: usize) -> Option<usize> {
+        for w in 0..JWAYS {
+            let st = self.slots[base + w].state;
+            if st == SlotState::Free || st == SlotState::Rejected {
+                return Some(base + w);
+            }
+        }
+        let first = self.lru[base / JWAYS] as usize;
+        (0..JWAYS)
+            .map(|k| (first + k) % JWAYS)
+            .find(|&w| self.slots[base + w].state != SlotState::Baking)
+            .map(|w| base + w)
+    }
+
+    /// 使った道の**次**を追い出し候補にする (擬似 LRU)
+    fn touch_way(&mut self, si: usize) {
+        let (set, w) = (si / JWAYS, si % JWAYS);
+        self.lru[set] = ((w + 1) % JWAYS) as u8;
     }
 
     /// バッチ (= モジュール) の帳簿を1つ起こし、番号を返す
@@ -1192,7 +1248,8 @@ impl JitRt {
     /// 焼いた後に世代が動いていても構わず据える — try_enterの世代照合が
     /// 初回ヒットで捨てて焼き直す (自己回復)
     pub fn install(&mut self, pa: u32, gen: u32, n: u32, table_slot: u32, module: u32) {
-        let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        let base = set_base(pa);
+        let si = self.find_way(base, pa).unwrap_or(base);
         let slot = &mut self.slots[si];
         if slot.tag == pa && slot.state == SlotState::Baking {
             slot.gen = gen;
@@ -1200,6 +1257,7 @@ impl JitRt {
             slot.n = n as u16;
             slot.state = SlotState::Installed;
             slot.module = module;
+            self.touch_way(si);
             self.installed += 1;
             if let Some(m) = self.modules.get_mut(module as usize) {
                 m.live += 1;
@@ -1236,9 +1294,9 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
         return 0; // プローブ機構 (coreの再プローブループ+この呼び出し) の税だけ測る
     }
     let rt = unsafe { &mut *p };
-    let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
-    let slot = rt.slots[si];
-    if slot.tag == pa {
+    let base = set_base(pa);
+    if let Some(si) = rt.find_way(base, pa) {
+        let slot = rt.slots[si];
         match slot.state {
             SlotState::Installed => {
                 if diag == 2 {
@@ -1252,6 +1310,7 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
                 if slot.n as u32 > budget {
                     return 0;
                 }
+                rt.touch_way(si); // 使った道は残す (追い出し候補は相棒へ)
                 return call_block(slot.table_slot);
             }
             SlotState::Baking | SlotState::Rejected => return 0,
@@ -1262,9 +1321,9 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     // (JSのpump) は非同期なので、退去させるとジョブが全員孤児になる
     // (2026-08-17に installed=0 + 焼き39.7万の暴走として実測)。
     // 新参はpumpが片づけるまで素通り (インタプリタが走る — 退路)
-    if rt.slots[si].state == SlotState::Baking {
-        return 0;
-    }
+    let Some(si) = rt.victim_way(base) else {
+        return 0; // 組の全員が焼き待ち — 素通り
+    };
     // 同期でバイト列を焼き、instantiateはJSへ
     let m = unsafe { &mut *rt.machine };
     // fillと同じ義務: このページに「コードあり」を立てる (立て忘れは
@@ -1296,8 +1355,10 @@ pub fn try_enter(_ctx: usize, pa: u32, gen: u32, budget: u32) -> u32 {
     let body = compile_body(&blk, &lay, maddr);
     rt.baked += 1;
     if rt.slots[si].state == SlotState::Installed {
+        rt.conflicts += 1;
         rt.evict(si); // 衝突退去 (添字は回収)
     }
+    rt.touch_way(si);
     rt.slots[si] = Slot {
         tag: pa,
         gen,
@@ -1354,7 +1415,8 @@ mod tests {
         let mut rt = JitRt::new();
         assert_eq!(rt.assign_slots(2), vec![FRESH, FRESH]);
         let pa = 0x1000u32;
-        let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        // 2-way になったので索引は set_base (道 0 に置く)
+        let si = set_base(pa);
         let baking = Slot {
             tag: pa,
             gen: 1,
@@ -1392,7 +1454,7 @@ mod tests {
     fn sparse_modules_retire() {
         let mut rt = JitRt::new();
         let m = rt.new_module(16);
-        let si_of = |pa: u32| ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        let si_of = set_base; // 道 0
         for i in 0..16u32 {
             let pa = 0x1000 * (i + 1);
             rt.slots[si_of(pa)] = Slot {
