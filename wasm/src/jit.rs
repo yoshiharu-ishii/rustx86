@@ -1415,7 +1415,8 @@ mod tests {
         let mut rt = JitRt::new();
         assert_eq!(rt.assign_slots(2), vec![FRESH, FRESH]);
         let pa = 0x1000u32;
-        let si = ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        // 2-way になったので索引は set_base (道 0 に置く)
+        let si = set_base(pa);
         let baking = Slot {
             tag: pa,
             gen: 1,
@@ -1453,7 +1454,7 @@ mod tests {
     fn sparse_modules_retire() {
         let mut rt = JitRt::new();
         let m = rt.new_module(16);
-        let si_of = |pa: u32| ((pa ^ (pa >> 12)) as usize) & (JSLOTS - 1);
+        let si_of = set_base; // 道 0
         for i in 0..16u32 {
             let pa = 0x1000 * (i + 1);
             rt.slots[si_of(pa)] = Slot {
