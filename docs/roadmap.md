@@ -3,6 +3,12 @@
 
 # ロードマップ — 深さ (Tier) と広さ (箱)
 
+> **完結 (2026-08-25)**: プロジェクトはここで完結した。Tier 1〜6 到達・箱はB1まで。
+> Tier 7〜9 と残る箱・台帳 ([core](reference/core-roadmap.md) / [gfx](reference/gfx-roadmap.md) /
+> [jit3](reference/jit-roadmap3.md) / [system](reference/system-roadmap.md)) は
+> **凍結** — 棄却ではなく、再開の判断材料ごと寝かせてある (このリポジトリの流儀のまま)。
+> 経緯はルートREADMEの「完結」とポストモーテム記事を参照。
+
 軸が2本ある。混ぜると両方の意味が壊れるので分けてある。
 
 ```
