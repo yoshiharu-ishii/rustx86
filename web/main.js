@@ -393,7 +393,20 @@ const cdromsReady = fetch('./cdroms.json', { cache: 'no-store' })
   })
   .catch(() => {});
 const q0 = new URLSearchParams(location.search);
-isoSel.value = q0.get('cd') || q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+const wantCd = q0.get('cd') || q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+// **URL が指した名前は、棚に無くても信じて足す。**
+// 棚は `/cdroms.json` (serve.py) で埋まるが、静的配信ではその口が無く、
+// サーバーが古い (その口を持たない版のまま動いている) こともある。そのとき
+// `?cd=` を黙って捨てると、**CD の無いまま控えを復元して**ライブ CD の
+// 未読ファイルが全部 Input/output error になる (2026-08-24 に踏んだ)
+if (wantCd && ![...isoSel.options].some(o => o.value === wantCd)) {
+  const o = document.createElement('option');
+  o.value = wantCd;
+  o.textContent = `${wantCd} (URL 指定)`;
+  o.title = 'URL の ?cd= で指された ISO。web/ に置いてあれば挿せる';
+  isoSel.append(o);
+}
+isoSel.value = wantCd;
 if (!isoSel.value) isoSel.value = ''; // 知らない名前
 // ルートFS: URL > 記憶。記憶が「—」(CD から起動) でも CD が無ければミニへ
 const rootMem = localStorage.getItem(ROOT_KEY);
