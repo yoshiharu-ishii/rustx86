@@ -161,6 +161,10 @@ export class AnsiTerminal {
     };
     // PS/2 の1パケットは ±255 まで (素子もそこで切る) — 大きい差分は分けて送る
     const send = (dx, dy, buttons) => {
+      // 入力の道筋を追う覗き窓 (コンソールで `__rx86dbg = true`)。
+      // 「画面は出るのに操作できない」を切り分けるのに要る — 送っていないのか、
+      // 送っているのにゲストが無視しているのかは、ここを見ないと区別できない
+      if (globalThis.__rx86dbg) console.log('[dbg] mouse', dx, dy, buttons, 'onMouse=', !!this.onMouse);
       while (dx || dy) {
         const sx = Math.max(-255, Math.min(255, dx)), sy = Math.max(-255, Math.min(255, dy));
         this.onMouse?.(sx, sy, buttons);
@@ -285,6 +289,8 @@ export class AnsiTerminal {
    * 配列によらず位置で送る (DOOM の「押されているか」の判定はスペースの押下/解放が要る)
    */
   #sendKey(e, down) {
+    // 同上 (キー側)。gfxOn/vgaOn がどちらも偽なら、キーはシリアルへ流れている
+    if (globalThis.__rx86dbg) console.log('[dbg] sendKey', e.code, down, 'gfxOn=', this.gfxOn, 'onKey=', !!this.onKey);
     const printable = e.key.length === 1;
     if (this.layout === 'us' || !printable || e.code === 'Space' || e.ctrlKey || e.altKey || e.metaKey) {
       if (this.layout === 'jp' && /^Shift/.test(e.code)) return; // 文字側が自分で Shift を組む

@@ -46,6 +46,18 @@ let lfbBuf = null; // 往復させる一枚分のバッファ
 /** ISO (BIOS 経由) で起動した機械か。画面はシリアルでなく VGA — テキスト VRAM を
     升目で、mode 13h は画素で、どちらもメインへ送る (ワーカー側に canvas は無い) */
 let isoOn = false;
+/** 控えから戻した機械の画面が VGA/LFB の顔か (中身で決める。下の 'boot' 参照) */
+let snapVga = false;
+
+/** テキスト VRAM に文字が置かれているか (空白・NUL だけなら「使っていない」) */
+function vgaHasText(e) {
+  const cells = new Uint8Array(wasmExports.memory.buffer, e.text_vram_ptr(), e.text_vram_len());
+  for (let i = 0; i < cells.length; i += 2) {
+    const ch = cells[i];
+    if (ch && ch !== 0x20) return true;
+  }
+  return false;
+}
 let lastTextAt = 0;
 let lastCursor = -1;
 let charsetSent = false;
@@ -77,7 +89,19 @@ self.onmessage = (e) => {
         // CD の像は控えに入っていない (685MB の ISO を控えに写す意味が無い)。
         // 素子が像を待っていれば、選んである同じ ISO を挿し直す
         if (msg.cd && emu.cd_wanted()) emu.cd_attach(new Uint8Array(msg.cd));
-        emu.serial_in(new TextEncoder().encode('\n'));
+        // **画面の顔は控えの中身が決める** — ツールバーの選択ではない。
+        // ここを取り違えると、シリアルの顔だと思ってキーを ttyS0 へ流し、
+        // VGA/LFB のゲスト (DSL) には何も届かない (2026-08-24 に踏んだ:
+        // 「画面は出るのに操作できない」の正体がこれ)。
+        //   LFB が開いている → 画素の顔 / テキスト VRAM に文字がある → VGA の顔
+        //   どちらでもない → シリアルの顔 (改行を1つ流してプロンプトを出させる)
+        snapVga = emu.lfb_on() || vgaHasText(emu);
+        if (!snapVga) emu.serial_in(new TextEncoder().encode('\n'));
+        // **像の無い CD-ROM のまま走らせない。** ライブ CD (DSL) のルートは CD 上の
+        // squashfs なので、まだ読んでいないファイルが全部 `Input/output error` になる。
+        // 「動いているのに startx だけ落ちる」という分かりにくい形で出るので、
+        // ここで名指しで言う (2026-08-24 に踏んだ)
+        if (emu.cd_wanted()) postMessage({ type: 'cd-missing' });
       } else if (msg.iso) {
         // ISO (El Torito) から BIOS 経由で起動する。機械は PCI 付き 32bit PC —
         // NIC は RTL8029 (Tiny Core の ne2k-pci が拾う)
@@ -105,8 +129,9 @@ self.onmessage = (e) => {
         emu.set_rtc_unix(Date.now() / 1000);
       }
       // JIT (F1d wasm)。電源投入時の初期値 — 実行中の切替は 'jit' メッセージ
-      // CD 起動の機械 (画面は VGA) は、控えから戻したときも VGA を汲む
-      isoOn = !!msg.iso || !!msg.cdBoot;
+      // CD 起動の機械 (画面は VGA) は、控えから戻したときも VGA を汲む。
+      // 復元は控えの中身で決めた顔 (snapVga) を使う
+      isoOn = !!msg.iso || (msg.snapshot ? snapVga : false);
       lastTextAt = 0;
       lastCursor = -1;
       charsetSent = false;

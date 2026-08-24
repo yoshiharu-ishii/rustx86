@@ -369,10 +369,14 @@ for (const r of ROOTFS) {
 // **web/ に置いた ISO は全部 CD-ROM の棚に並ぶ。** serve.py が /cdroms.json で *.iso を
 // 数えて返す (静的配信では 404 → ISOS の説明付きの項だけ)。ISOS に無い名前は
 // ファイル名のまま足す — 取ってきた ISO を置くだけで選べる
-fetch('./cdroms.json', { cache: 'no-store' })
+const cdromsReady = fetch('./cdroms.json', { cache: 'no-store' })
   .then(r => (r.ok ? r.json() : []))
   .then(list => {
-    const wanted = localStorage.getItem(ISO_KEY) || '';
+    // **URL (?cd=) が最優先** — 棚は後から非同期に埋まるので、先に入れた値は
+    // まだ選択肢に無く消えている。控えから始める URL (?snap=) は CD が要るので
+    // ここで選び直せないと「像の無い CD-ROM」で復元してしまう
+    const q = new URLSearchParams(location.search);
+    const wanted = q.get('cd') || q.get('iso') || localStorage.getItem(ISO_KEY) || '';
     for (const { name, size } of list) {
       if (ISOS.some(x => x.name === name)) continue;
       const o = document.createElement('option');
@@ -389,7 +393,20 @@ fetch('./cdroms.json', { cache: 'no-store' })
   })
   .catch(() => {});
 const q0 = new URLSearchParams(location.search);
-isoSel.value = q0.get('cd') || q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+const wantCd = q0.get('cd') || q0.get('iso') || localStorage.getItem(ISO_KEY) || '';
+// **URL が指した名前は、棚に無くても信じて足す。**
+// 棚は `/cdroms.json` (serve.py) で埋まるが、静的配信ではその口が無く、
+// サーバーが古い (その口を持たない版のまま動いている) こともある。そのとき
+// `?cd=` を黙って捨てると、**CD の無いまま控えを復元して**ライブ CD の
+// 未読ファイルが全部 Input/output error になる (2026-08-24 に踏んだ)
+if (wantCd && ![...isoSel.options].some(o => o.value === wantCd)) {
+  const o = document.createElement('option');
+  o.value = wantCd;
+  o.textContent = `${wantCd} (URL 指定)`;
+  o.title = 'URL の ?cd= で指された ISO。web/ に置いてあれば挿せる';
+  isoSel.append(o);
+}
+isoSel.value = wantCd;
 if (!isoSel.value) isoSel.value = ''; // 知らない名前
 // ルートFS: URL > 記憶。記憶が「—」(CD から起動) でも CD が無ければミニへ
 const rootMem = localStorage.getItem(ROOT_KEY);
@@ -536,6 +553,12 @@ function closeMenu() {
 // consoleBox はこの下で定義されるので、ここでは要素を直に引く
 $('console').addEventListener('contextmenu', e => {
   e.preventDefault();
+  // **画素の顔が出ている間、マウスはゲストのもの。** X のルートメニューも
+  // DOS のゲームも右ボタンを使う。ここでアプリのメニューを開くと、
+  // canvas が preventDefault してもイベントが上がってきて奪ってしまう
+  // (キャンバスは既に 8042 の第2ポートへ送っている)。
+  // コピー/ペーストは Ctrl+Shift+C / V が残る
+  if (term.gfxOn || term.vgaOn || linux?.gfxOn) return;
   const can = menuAbility(!!(machine || linux), hasSelection(), acceptsDrop());
   $('mCopy').disabled = !can.copy;
   $('mPaste').disabled = !can.paste;
@@ -1514,6 +1537,24 @@ try {
   } else {
     const saved = netSaved();
     netConnect(withToken(saved.url, saved.token));
+  }
+  // **?snap=名前** — web/ に置いた控えから始める (ドロップと同じ口を通す)。
+  //
+  // 起動が長いOS (DSL 2024 は CD から 13分) は、速いネイティブで目的の状態まで
+  // 進めた控えを配って**そこから始める**。CD の像は控えに入っていないので
+  // `?cd=` も一緒に指すこと (復元のときに挿し直される)。
+  //   例: ?cd=dsl-2024.rc7.iso&snap=dsl-x.rx86snap
+  const snapName = q0.get('snap');
+  if (snapName) {
+    setStatus(`${snapName} を取り寄せています…`);
+    try {
+      await cdromsReady; // CD の棚が埋まってから (?cd= の像を挿し直すため)
+      const r = await fetch(`./${snapName}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await insertMedia(await r.blob());
+    } catch (e) {
+      setStatus(`${snapName} が読めない: ${e.message}`, true);
+    }
   }
 } catch (e) {
   setStatus(`WASMの読み込みに失敗: ${e}`, true);
