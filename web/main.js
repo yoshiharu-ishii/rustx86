@@ -540,6 +540,12 @@ function closeMenu() {
 // consoleBox はこの下で定義されるので、ここでは要素を直に引く
 $('console').addEventListener('contextmenu', e => {
   e.preventDefault();
+  // **画素の顔が出ている間、マウスはゲストのもの。** X のルートメニューも
+  // DOS のゲームも右ボタンを使う。ここでアプリのメニューを開くと、
+  // canvas が preventDefault してもイベントが上がってきて奪ってしまう
+  // (キャンバスは既に 8042 の第2ポートへ送っている)。
+  // コピー/ペーストは Ctrl+Shift+C / V が残る
+  if (term.gfxOn || term.vgaOn || linux?.gfxOn) return;
   const can = menuAbility(!!(machine || linux), hasSelection(), acceptsDrop());
   $('mCopy').disabled = !can.copy;
   $('mPaste').disabled = !can.paste;

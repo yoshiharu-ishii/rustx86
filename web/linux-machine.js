@@ -437,6 +437,16 @@ export function mountLinux(canvas, opts = {}) {
           worker?.postMessage({ type: 'lfb-ack', bytes: msg.bytes }, [msg.bytes]);
           break;
         }
+        case 'cd-missing': {
+          // 控えの機械が CD を待っているのに、CD-ROM に何も選ばれていない。
+          // ライブ CD のルートは CD の中なので、このまま使うと未読のファイルが
+          // すべて Input/output error になる (原因が見えない形で出る)
+          status(
+            'この控えは CD-ROM を待っています — ツールバーの CD-ROM に同じ ISO を選んでから復元し直してください (今のままでは未読のファイルが Input/output error になります)',
+            true,
+          );
+          break;
+        }
         case 'state': {
           // captureState (スナップショット書出) の返事。控えは持たない —
           // 保存/復元はファイルに一本化した (Tier 3g)
@@ -497,6 +507,9 @@ export function mountLinux(canvas, opts = {}) {
       term.layout = v;
     },
     get booted() { return booted; },
+    /** 画素の顔が出ているか (LFB/VGA)。**マウスの持ち主を決める** —
+     * 出ている間、右クリックはアプリのメニューではなくゲスト (X のルートメニュー) のもの */
+    get gfxOn() { return term.gfxOn || term.vgaOn; },
     get busy() { return busy; },
     get paused() { return paused; },
     get mips() { return mips; },
