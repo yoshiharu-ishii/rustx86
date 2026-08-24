@@ -13,8 +13,10 @@ import { dirname, join } from 'node:path';
 import { setupJit, pumpJit, resetJit } from '../../web/jit-runtime.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const wasmBytes = readFileSync(join(root, 'web/pkg/rustx86_wasm_bg.wasm'));
-const modUrl = pathToFileURL(join(root, 'web/pkg/rustx86_wasm.js')).href;
+// PKG= で別の pkg を指せる (新旧を交互に走らせる A/B 用。ビルドし直さずに切り替える)
+const PKG = process.env.PKG ?? join(root, 'web/pkg');
+const wasmBytes = readFileSync(join(PKG, 'rustx86_wasm_bg.wasm'));
+const modUrl = pathToFileURL(join(PKG, 'rustx86_wasm.js')).href;
 const BUDGET = Number(process.env.INSTRS ?? 8e9);
 const SNAP = process.env.SNAP ?? '';
 const ISO = process.env.ISO ?? '';
